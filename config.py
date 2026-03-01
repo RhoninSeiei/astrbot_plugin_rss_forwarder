@@ -80,16 +80,6 @@ class RSSConfig:
         targets_raw = cls._normalize_collection(runtime_conf.get("targets", []))
         jobs_raw = cls._normalize_collection(runtime_conf.get("jobs", []))
 
-        logger.info(
-            "RSS config loaded: feeds=%s(%s) targets=%s(%s) jobs=%s(%s)",
-            len(feeds_raw),
-            type(runtime_conf.get("feeds", [])).__name__,
-            len(targets_raw),
-            type(runtime_conf.get("targets", [])).__name__,
-            len(jobs_raw),
-            type(runtime_conf.get("jobs", [])).__name__,
-        )
-
         feeds = [
             FeedConfig(
                 id=str(item.get("id", "")).strip(),
@@ -166,57 +156,11 @@ class RSSConfig:
     def _normalize_collection(value) -> list[dict]:
         """兼容 AstrBot 配置面板与手工 JSON 的多种写法，统一为 list[dict]。"""
         if isinstance(value, list):
-            result: list[dict] = []
-            for item in value:
-                unpacked = RSSConfig._extract_collection_item(item)
-                if isinstance(unpacked, dict):
-                    result.append(unpacked)
-            return result
+            return [item for item in value if isinstance(item, dict)]
         if isinstance(value, dict):
-            # 兼容对象映射的情况：{"id1": {...}, "id2": {...}}
-            dict_values = list(value.values())
-            if dict_values and all(isinstance(item, list) for item in dict_values):
-                # 兼容 template_list 另一种序列化：{"template_key": [{...}]}
-                merged: list[dict] = []
-                for items in dict_values:
-                    merged.extend(RSSConfig._normalize_collection(items))
-                return merged
-            result: list[dict] = []
-            for item in dict_values:
-                unpacked = RSSConfig._extract_collection_item(item)
-                if isinstance(unpacked, dict):
-                    result.append(unpacked)
-            return result
+            # 兼容错误配置为对象映射的情况：{"id1": {...}, "id2": {...}}
+            return [item for item in value.values() if isinstance(item, dict)]
         return []
-
-    @staticmethod
-    def _normalize_id_list(value) -> list[str]:
-        """兼容 list 或逗号/换行分隔字符串。"""
-        if isinstance(value, list):
-            return [str(v).strip() for v in value if str(v).strip()]
-        if isinstance(value, str):
-            text = value.replace("\n", ",")
-            return [part.strip() for part in text.split(",") if part.strip()]
-        return []
-
-    @staticmethod
-    def _extract_collection_item(item):
-        """把模板列表条目的多种形态解包成字段字典。"""
-        if not isinstance(item, dict):
-            return None
-        if "data" in item and isinstance(item["data"], dict):
-            merged = dict(item["data"])
-            for key in ("__template_key", "template"):
-                if key in item and key not in merged:
-                    merged[key] = item[key]
-            return merged
-        if "value" in item and isinstance(item["value"], dict):
-            merged = dict(item["value"])
-            for key in ("__template_key", "template"):
-                if key in item and key not in merged:
-                    merged[key] = item[key]
-            return merged
-        return item
 
     @staticmethod
     def _build_implicit_job_if_needed(
