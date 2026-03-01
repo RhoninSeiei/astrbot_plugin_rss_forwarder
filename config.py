@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
+import logging
+
+logger = logging.getLogger("astrbot_rss")
 
 
 class ConfigValidationError(ValueError):
@@ -100,8 +103,8 @@ class RSSConfig:
         jobs = [
             JobConfig(
                 id=str(item.get("id", "")).strip(),
-                feed_ids=[str(fid).strip() for fid in item.get("feed_ids", [])],
-                target_ids=[str(tid).strip() for tid in item.get("target_ids", [])],
+                feed_ids=cls._normalize_id_list(item.get("feed_ids", [])),
+                target_ids=cls._normalize_id_list(item.get("target_ids", [])),
                 cron=str(item.get("cron", "")).strip(),
                 interval_seconds=int(item.get("interval_seconds", 0) or 0),
                 batch_size=int(item.get("batch_size", 10)),
