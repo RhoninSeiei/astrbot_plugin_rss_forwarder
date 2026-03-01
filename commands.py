@@ -6,6 +6,44 @@ class RSSCommands:
 
     scheduler = None
 
+    @filter.regex(r"^/?rss(?:\s+.*)?$")
+    async def rss_router(self, event: AstrMessageEvent):
+        """兜底消息路由：在未命中 wake/at 指令条件时，仍可处理 /rss 子命令。"""
+        message_text = ""
+        if hasattr(event, "message_str"):
+            message_text = str(getattr(event, "message_str") or "")
+        elif hasattr(event, "get_message_str"):
+            getter = getattr(event, "get_message_str")
+            message_text = str(getter() if callable(getter) else getter or "")
+
+        tokens = message_text.strip().split()
+        if not tokens:
+            return
+
+        head = tokens[0].lstrip("/").lower()
+        if head != "rss":
+            return
+
+        sub = tokens[1].lower() if len(tokens) >= 2 else ""
+        route_map = {
+            "list": self.rss_list,
+            "status": self.rss_status,
+            "run": self.rss_run,
+            "pause": self.rss_pause,
+            "resume": self.rss_resume,
+            "reset": self.rss_reset,
+        }
+
+        handler = route_map.get(sub)
+        if handler is None:
+            yield event.plain_result(
+                "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|reset]"
+            )
+            return
+
+        async for result in handler(event):
+            yield result
+
     @filter.command("rss list")
     async def rss_list(self, event: AstrMessageEvent):
         scheduler = self.scheduler
@@ -52,6 +90,14 @@ class RSSCommands:
             return
 
         yield event.plain_result("已触发全部启用且未暂停任务。")
+
+    @filter.command("rss reset")
+    @filter.regex(r"^/?rss\s+reset\s*$")
+    async def rss_reset(self, event: AstrMessageEvent):
+        """清空已推送去重记录，便于调试或重新全量推送。"""
+        scheduler = self.scheduler
+        deleted = await scheduler.storage.clear_seen()
+        yield event.plain_result(f"已清空去重记录：{deleted} 条。")
 
     @filter.command("rss status")
     async def rss_status(self, event: AstrMessageEvent):
