@@ -44,6 +44,7 @@ class RSSScheduler:
         self._job_tasks: dict[str, asyncio.Task] = {}
         self._job_locks: dict[str, asyncio.Lock] = {}
         self._job_results: dict[str, JobExecutionResult] = {}
+        self._paused_jobs: set[str] = set()
 
     @property
     def running(self) -> bool:
@@ -52,6 +53,10 @@ class RSSScheduler:
     @property
     def last_results(self) -> dict[str, JobExecutionResult]:
         return dict(self._job_results)
+
+    @property
+    def config(self) -> RSSConfig:
+        return self._config
 
     async def start(self) -> None:
         if self.running:
@@ -82,9 +87,57 @@ class RSSScheduler:
 
     async def run_once(self) -> None:
         """手动触发：并发执行所有启用 job。"""
+        await self.run_job_once()
+
+    async def run_job_once(self, job_id: str | None = None) -> bool:
+        """手动触发任务，job_id 为空时触发所有启用且未暂停任务。"""
+        if job_id:
+            job = self.get_job(job_id)
+            if job is None or not job.enabled or job.id in self._paused_jobs:
+                return False
+            await self._run_job_once_guarded(job)
+            return True
+
         await asyncio.gather(
-            *(self._run_job_once_guarded(job) for job in self._config.jobs if job.enabled)
+            *(
+                self._run_job_once_guarded(job)
+                for job in self._config.jobs
+                if job.enabled and job.id not in self._paused_jobs
+            )
         )
+        return True
+
+    def get_job(self, job_id: str) -> JobConfig | None:
+        return next((job for job in self._config.jobs if job.id == job_id), None)
+
+    async def pause_job(self, job_id: str) -> bool:
+        """暂停指定任务。"""
+        job = self.get_job(job_id)
+        if job is None or not job.enabled:
+            return False
+
+        self._paused_jobs.add(job_id)
+        task = self._job_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        self._job_tasks.pop(job_id, None)
+        return True
+
+    def resume_job(self, job_id: str) -> bool:
+        """恢复指定任务。"""
+        job = self.get_job(job_id)
+        if job is None or not job.enabled:
+            return False
+
+        self._paused_jobs.discard(job_id)
+        self._register_job(job)
+        return True
+
+    @property
+    def paused_jobs(self) -> set[str]:
+        return set(self._paused_jobs)
 
     def _register_job(self, job: JobConfig) -> None:
         if job.id in self._job_tasks and not self._job_tasks[job.id].done():
