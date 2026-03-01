@@ -119,7 +119,8 @@ class FeedDispatcher:
         link = data["link"]
 
         try:
-            from astrbot.api.message_components import Link, MessageChain, Plain
+            # 某些 AstrBot 版本没有 Link 组件，但通常仍有 MessageChain/Plain。
+            from astrbot.api.message_components import MessageChain, Plain
 
             text_lines = [
                 line
@@ -135,7 +136,12 @@ class FeedDispatcher:
 
             if link:
                 link_label = link_text if data["truncated"] == "1" else link
-                components.append(Link(link_label, link))
+                try:
+                    from astrbot.api.message_components import Link
+
+                    components.append(Link(link_label, link))
+                except Exception:
+                    components.append(Plain(f"\n{link_label}: {link}" if link_label != link else f"\n{link}"))
 
             return MessageChain(components)
         except Exception as exc:  # pragma: no cover - 依赖运行环境
@@ -212,11 +218,11 @@ class FeedDispatcher:
                 logger.warning("event.image_result failed, fallback to image_result: %s", exc)
         return image_result
 
-    async def dispatch(self, item: dict) -> None:
+    async def dispatch(self, item: dict) -> int:
         origins = self._resolve_origins(item)
         if not origins:
             logger.warning("skip dispatch: no available targets for item=%s", item)
-            return
+            return 0
 
         if self._config.render_mode == "image":
             payload = await self._build_image_payload(item)
@@ -224,12 +230,15 @@ class FeedDispatcher:
             chain = self._build_text_message_chain(item)
             payload = self._as_chain_result_if_possible(item, chain)
 
+        success_count = 0
         for unified_msg_origin in origins:
             try:
                 await self.context.send_message(unified_msg_origin, payload)
+                success_count += 1
             except Exception as exc:
                 logger.error(
                     "主动消息发送失败 origin=%s: %s。若当前平台不支持主动消息，请在支持的会话渠道配置 target。",
                     unified_msg_origin,
                     exc,
                 )
+        return success_count
