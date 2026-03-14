@@ -146,6 +146,11 @@
     "default": 604800,
     "description": "RSS 去重记录保留时间（秒），默认 7 天"
   },
+  "startup_delay_seconds": {
+    "type": "int",
+    "default": 45,
+    "description": "插件启动后的首次轮询延迟（秒），默认 45 秒"
+  },
   "render_mode": {
     "type": "string",
     "default": "text",

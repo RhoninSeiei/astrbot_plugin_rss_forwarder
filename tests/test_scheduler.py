@@ -34,11 +34,39 @@ _load_module("fetcher")
 _load_module("parser")
 _load_module("pipeline")
 _load_module("storage")
+config_module = sys.modules[f"{PACKAGE_NAME}.config"]
 RSSScheduler = _load_module("scheduler").RSSScheduler
 DispatchResult = dispatcher_module.DispatchResult
+RSSConfig = config_module.RSSConfig
 
 
 class RSSSchedulerTests(unittest.TestCase):
+    def test_config_defaults_startup_delay_to_45_seconds(self):
+        config = RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-1",
+                        "platform": "qq",
+                        "unified_msg_origin": "qq:group:1",
+                        "enabled": True,
+                    }
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-1"],
+                        "interval_seconds": 300,
+                        "enabled": True,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(config.startup_delay_seconds, 45)
+
     def test_history_items_are_suppressed_when_older_than_last_success(self):
         item = {
             "feed_id": "feed-1",

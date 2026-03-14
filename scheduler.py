@@ -158,6 +158,10 @@ class RSSScheduler:
 
     async def _job_loop(self, job: JobConfig) -> None:
         interval = self._resolve_interval(job)
+        initial_delay = max(int(self._config.startup_delay_seconds), 0)
+        if initial_delay > 0:
+            logger.info("job=%s waiting startup delay=%ss before first poll", job.id, initial_delay)
+            await asyncio.sleep(initial_delay)
         while True:
             await self._run_job_once_guarded(job)
             await asyncio.sleep(interval)
