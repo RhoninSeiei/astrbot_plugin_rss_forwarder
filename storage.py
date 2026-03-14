@@ -4,6 +4,11 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+try:
+    from astrbot.api.star import StarTools
+except ImportError:  # pragma: no cover - unit tests may run without AstrBot runtime.
+    StarTools = None
+
 
 class FeedStorage:
     """存储层：负责去重、游标和持久化。"""
@@ -177,6 +182,11 @@ class FeedStorage:
 
     def plugin_cache_dir(self) -> Path:
         """如需大文件缓存，请按规范写入 data/plugin_data/{plugin_name}/。"""
+        if StarTools is not None:
+            try:
+                return Path(StarTools.get_data_dir(self._plugin_name))
+            except Exception:
+                pass
         return Path("data") / "plugin_data" / self._plugin_name
 
     async def _ensure_state_loaded(self) -> None:

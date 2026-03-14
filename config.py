@@ -1,8 +1,7 @@
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
-import logging
 
-logger = logging.getLogger("astrbot_rss")
+from astrbot.api import logger
 
 
 class ConfigValidationError(ValueError):

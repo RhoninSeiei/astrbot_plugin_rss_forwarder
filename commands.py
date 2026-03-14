@@ -8,13 +8,7 @@ class RSSCommands:
 
     async def rss_router(self, event: AstrMessageEvent):
         """兜底消息路由：在未命中 wake/at 指令条件时，仍可处理 /rss 子命令。"""
-        message_text = ""
-        if hasattr(event, "message_str"):
-            message_text = str(getattr(event, "message_str") or "")
-        elif hasattr(event, "get_message_str"):
-            getter = getattr(event, "get_message_str")
-            message_text = str(getter() if callable(getter) else getter or "")
-
+        message_text = self._get_message_text(event)
         tokens = message_text.strip().split()
         if not tokens:
             return
@@ -152,15 +146,18 @@ class RSSCommands:
 
     @staticmethod
     def _extract_param(event: AstrMessageEvent) -> str:
-        message_text = ""
-        if hasattr(event, "message_str"):
-            message_text = str(getattr(event, "message_str") or "")
-        elif hasattr(event, "get_message_str"):
-            getter = getattr(event, "get_message_str")
-            message_text = str(getter() if callable(getter) else getter or "")
-
+        message_text = RSSCommands._get_message_text(event)
         tokens = message_text.strip().split()
         return tokens[2].strip() if len(tokens) >= 3 else ""
+
+    @staticmethod
+    def _get_message_text(event: AstrMessageEvent) -> str:
+        if hasattr(event, "message_str"):
+            return str(getattr(event, "message_str") or "")
+        if hasattr(event, "get_message_str"):
+            getter = getattr(event, "get_message_str")
+            return str(getter() if callable(getter) else getter or "")
+        return ""
 
     @staticmethod
     def _format_success_time(result) -> str:

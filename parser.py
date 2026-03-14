@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from typing import Any
-from xml.etree import ElementTree as ET
+
+try:
+    from defusedxml import ElementTree as ET
+except ImportError:  # pragma: no cover - fallback for environments without defusedxml.
+    from xml.etree import ElementTree as ET
 
 from astrbot.api import logger
 
