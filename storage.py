@@ -19,6 +19,7 @@ class FeedStorage:
         get_kv_data: Callable[[str], Awaitable[Any]] | None = None,
         put_kv_data: Callable[[str, Any], Awaitable[Any]] | None = None,
         delete_kv_data: Callable[[str], Awaitable[Any]] | None = None,
+        storage_dir: str | Path | None = None,
     ) -> None:
         self._plugin_name = plugin_name
         self._get_kv_data = get_kv_data
@@ -27,29 +28,32 @@ class FeedStorage:
         self._fallback_store: dict[str, str] = {}
         self._seen_ids: set[str] = set()
         self._dedup_version: int | None = None
+        cache_root = Path(storage_dir) if storage_dir is not None else self.plugin_cache_dir()
+        self._state_path = cache_root / "state.json"
+        self._state_loaded = False
+        self._disk_state: dict[str, Any] = {"kv": {}}
 
     async def get(self, key: str, default: Any = None) -> Any:
         """封装 KV 读取。"""
-        if self._get_kv_data is None:
-            raw = self._fallback_store.get(key)
-        else:
-            try:
-                # AstrBot PluginKVStoreMixin.get_kv_data(key, default)
-                raw = await self._get_kv_data(key, None)
-            except TypeError:
-                # 兼容仅接收 key 的实现
-                raw = await self._get_kv_data(key)
-        if raw in (None, ""):
+        await self._ensure_state_loaded()
+        kv_store = self._disk_state.setdefault("kv", {})
+        if key in kv_store:
+            return kv_store[key]
+
+        raw = await self._read_raw_from_backend(key)
+        decoded = self._decode_value(raw)
+        if decoded is None:
             return default
-        if isinstance(raw, str):
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return raw
-        return raw
+        kv_store[key] = decoded
+        self._flush_state()
+        return decoded
 
     async def put(self, key: str, value: Any) -> None:
         """封装 KV 写入。"""
+        await self._ensure_state_loaded()
+        self._disk_state.setdefault("kv", {})[key] = value
+        self._flush_state()
+
         encoded = json.dumps(value, ensure_ascii=False)
         if self._put_kv_data is None:
             self._fallback_store[key] = encoded
@@ -58,6 +62,10 @@ class FeedStorage:
 
     async def delete(self, key: str) -> None:
         """封装 KV 删除。"""
+        await self._ensure_state_loaded()
+        self._disk_state.setdefault("kv", {}).pop(key, None)
+        self._flush_state()
+
         if self._delete_kv_data is None:
             self._fallback_store.pop(key, None)
             return
@@ -68,6 +76,8 @@ class FeedStorage:
         if item_id in self._seen_ids:
             return True
         record = await self.get(self._content_key(item_id), default=None)
+        if not record:
+            record = await self._read_legacy_content_record(item_id)
         if not record:
             return False
         expire_at = int(record.get("expire_at", 0))
@@ -168,6 +178,60 @@ class FeedStorage:
     def plugin_cache_dir(self) -> Path:
         """如需大文件缓存，请按规范写入 data/plugin_data/{plugin_name}/。"""
         return Path("data") / "plugin_data" / self._plugin_name
+
+    async def _ensure_state_loaded(self) -> None:
+        if self._state_loaded:
+            return
+        self._state_loaded = True
+        try:
+            if self._state_path.exists():
+                with self._state_path.open("r", encoding="utf-8") as fp:
+                    loaded = json.load(fp)
+                if isinstance(loaded, dict):
+                    self._disk_state = loaded
+        except (OSError, json.JSONDecodeError):
+            self._disk_state = {"kv": {}}
+        self._disk_state.setdefault("kv", {})
+
+    def _flush_state(self) -> None:
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._state_path.open("w", encoding="utf-8") as fp:
+            json.dump(self._disk_state, fp, ensure_ascii=False, sort_keys=True)
+
+    async def _read_raw_from_backend(self, key: str) -> Any:
+        if self._get_kv_data is None:
+            return self._fallback_store.get(key)
+        try:
+            # AstrBot PluginKVStoreMixin.get_kv_data(key, default)
+            return await self._get_kv_data(key, None)
+        except TypeError:
+            # 兼容仅接收 key 的实现
+            return await self._get_kv_data(key)
+
+    def _decode_value(self, raw: Any) -> Any:
+        if raw in (None, ""):
+            return None
+        if isinstance(raw, dict) and set(raw.keys()) == {"val"}:
+            return self._decode_value(raw.get("val"))
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                return raw
+            return self._decode_value(decoded)
+        return raw
+
+    async def _read_legacy_content_record(self, item_id: str) -> dict[str, Any] | None:
+        legacy_keys = [f"{self.CONTENT_KEY_PREFIX}{item_id}"]
+        if self._dedup_version not in (None, 0):
+            legacy_keys.append(f"{self.CONTENT_KEY_PREFIX}v0:{item_id}")
+
+        for legacy_key in legacy_keys:
+            record = await self.get(legacy_key, default=None)
+            if record:
+                await self.put(self._content_key(item_id), record)
+                return record
+        return None
 
     @classmethod
     def _feed_state_key(cls, feed_id: str) -> str:

@@ -141,6 +141,11 @@
     "default": 15,
     "description": "LLM 调用超时时间（秒）"
   },
+  "dedup_ttl_seconds": {
+    "type": "int",
+    "default": 604800,
+    "description": "RSS 去重记录保留时间（秒），默认 7 天"
+  },
   "render_mode": {
     "type": "string",
     "default": "text",

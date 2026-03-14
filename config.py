@@ -58,6 +58,7 @@ class RSSConfig:
     llm_profile: str = "rss_enrich"
     max_input_chars: int = 2000
     timeout: int = 15
+    dedup_ttl_seconds: int = 7 * 24 * 60 * 60
     render_mode: str = "text"
     summary_max_chars: int = 280
     render_card_template: RenderCardTemplateConfig = field(default_factory=RenderCardTemplateConfig)
@@ -125,6 +126,7 @@ class RSSConfig:
             llm_profile=str(runtime_conf.get("llm_profile", "rss_enrich")).strip() or "rss_enrich",
             max_input_chars=int(runtime_conf.get("max_input_chars", 2000)),
             timeout=int(runtime_conf.get("timeout", 15)),
+            dedup_ttl_seconds=int(runtime_conf.get("dedup_ttl_seconds", 7 * 24 * 60 * 60)),
             render_mode=str(runtime_conf.get("render_mode", "text")).strip() or "text",
             summary_max_chars=int(runtime_conf.get("summary_max_chars", 280)),
             render_card_template=RenderCardTemplateConfig(
@@ -235,6 +237,8 @@ class RSSConfig:
             raise ConfigValidationError("max_input_chars 必须 > 0")
         if self.timeout <= 0:
             raise ConfigValidationError("timeout 必须 > 0")
+        if self.dedup_ttl_seconds <= 0:
+            raise ConfigValidationError("dedup_ttl_seconds 必须 > 0")
         if self.render_mode not in {"text", "image"}:
             raise ConfigValidationError("render_mode 必须是 text 或 image")
         if self.summary_max_chars <= 0:

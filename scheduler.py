@@ -3,7 +3,7 @@ import inspect
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from astrbot.api import logger
 
@@ -187,12 +187,17 @@ class RSSScheduler:
             pushed_count = 0
             parsed_count = 0
             skipped_seen_count = 0
+            skipped_history_count = 0
             dispatch_fail_count = 0
             error_summary = ""
 
             try:
                 raw_items = await self._call_fetch(job)
                 fetched_count = len(raw_items)
+                feed_state_map = {
+                    feed_id: await self._storage.get_feed_state(feed_id)
+                    for feed_id in job.feed_ids
+                }
 
                 items = self._call_parse(raw_items, job)
                 parsed_count = len(items)
@@ -200,6 +205,13 @@ class RSSScheduler:
                     item_id = self._storage.build_dedup_key(item)
                     if not item_id or await self._storage.has_seen(item_id):
                         skipped_seen_count += 1
+                        continue
+                    if self._should_mark_history_only(item, feed_state_map):
+                        await self._storage.mark_seen(
+                            item_id,
+                            ttl_seconds=self._config.dedup_ttl_seconds,
+                        )
+                        skipped_history_count += 1
                         continue
 
                     event_item = dict(item)
@@ -210,7 +222,10 @@ class RSSScheduler:
                     if success_count <= 0:
                         dispatch_fail_count += 1
                         continue
-                    await self._storage.mark_seen(item_id)
+                    await self._storage.mark_seen(
+                        item_id,
+                        ttl_seconds=self._config.dedup_ttl_seconds,
+                    )
                     pushed_count += 1
 
                 feed_meta = self._extract_feed_meta(raw_items)
@@ -236,12 +251,13 @@ class RSSScheduler:
                 error_summary=error_summary,
             )
             logger.info(
-                "job=%s finished: fetched=%s parsed=%s pushed=%s skipped_seen=%s dispatch_fail=%s duration_ms=%s error=%s",
+                "job=%s finished: fetched=%s parsed=%s pushed=%s skipped_seen=%s skipped_history=%s dispatch_fail=%s duration_ms=%s error=%s",
                 job.id,
                 fetched_count,
                 parsed_count,
                 pushed_count,
                 skipped_seen_count,
+                skipped_history_count,
                 dispatch_fail_count,
                 duration_ms,
                 error_summary or "",
@@ -289,3 +305,39 @@ class RSSScheduler:
             in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
         ]
         return len(positional_or_keyword_params) >= expected_count
+
+    @classmethod
+    def _should_mark_history_only(
+        cls,
+        item: dict,
+        feed_state_map: dict[str, dict[str, int | str]],
+    ) -> bool:
+        feed_id = str(item.get("feed_id", "")).strip()
+        if not feed_id:
+            return False
+
+        feed_state = feed_state_map.get(feed_id) or {}
+        try:
+            last_success_time = int(feed_state.get("last_success_time", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if last_success_time <= 0:
+            return False
+
+        published_at = cls._parse_item_timestamp(item.get("published_at"))
+        if published_at is None:
+            return False
+        return int(published_at.timestamp()) <= last_success_time
+
+    @staticmethod
+    def _parse_item_timestamp(raw_value) -> datetime | None:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
