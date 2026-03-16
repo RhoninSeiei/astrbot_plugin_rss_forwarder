@@ -78,17 +78,26 @@ class FeedStorage:
 
     async def has_seen(self, item_id: str) -> bool:
         await self._get_dedup_version()
-        if item_id in self._seen_ids:
-            return True
+
+        # NOTE:
+        # _seen_ids is only an in-memory acceleration set and does not carry TTL.
+        # We still need to validate persisted record expiration to avoid permanent
+        # false positives after long-running processes.
+        cached = item_id in self._seen_ids
         record = await self.get(self._content_key(item_id), default=None)
         if not record:
             record = await self._read_legacy_content_record(item_id)
         if not record:
+            if cached:
+                self._seen_ids.discard(item_id)
             return False
+
         expire_at = int(record.get("expire_at", 0))
         if expire_at and expire_at < int(time.time()):
             await self.delete(self._content_key(item_id))
+            self._seen_ids.discard(item_id)
             return False
+
         self._seen_ids.add(item_id)
         return True
 
