@@ -163,6 +163,7 @@ class FeedStorage:
         etag: str | None = None,
         last_modified: str | None = None,
         last_success_time: int | None = None,
+        bootstrap_done: bool | None = None,
     ) -> dict[str, Any]:
         state = await self.get_feed_state(feed_id)
         if etag is not None:
@@ -171,6 +172,8 @@ class FeedStorage:
             state["last_modified"] = last_modified
         if last_success_time is not None:
             state["last_success_time"] = last_success_time
+        if bootstrap_done is not None:
+            state["bootstrap_done"] = bool(bootstrap_done)
         await self.put(self._feed_state_key(feed_id), state)
         return state
 

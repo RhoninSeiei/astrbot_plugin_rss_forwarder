@@ -211,7 +211,7 @@ class RSSScheduler:
                     if not item_id or await self._storage.has_seen(item_id):
                         skipped_seen_count += 1
                         continue
-                    if self._should_mark_history_only(item, feed_state_map):
+                    if self._should_mark_history_only(item, feed_state_map, bootstrap_only=True):
                         await self._storage.mark_seen(
                             item_id,
                             ttl_seconds=self._config.dedup_ttl_seconds,
@@ -253,6 +253,7 @@ class RSSScheduler:
                         etag=meta.get("etag"),
                         last_modified=meta.get("last_modified"),
                         last_success_time=now_ts,
+                        bootstrap_done=True,
                     )
             except Exception as exc:
                 error_summary = f"{type(exc).__name__}: {exc}"
@@ -328,12 +329,17 @@ class RSSScheduler:
         cls,
         item: dict,
         feed_state_map: dict[str, dict[str, int | str]],
+        *,
+        bootstrap_only: bool = True,
     ) -> bool:
         feed_id = str(item.get("feed_id", "")).strip()
         if not feed_id:
             return False
 
         feed_state = feed_state_map.get(feed_id) or {}
+        if bootstrap_only and bool(feed_state.get("bootstrap_done", False)):
+            return False
+
         try:
             last_success_time = int(feed_state.get("last_success_time", 0) or 0)
         except (TypeError, ValueError):
