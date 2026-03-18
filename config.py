@@ -53,15 +53,33 @@ class RSSConfig:
     feeds: list[FeedConfig]
     targets: list[TargetConfig]
     jobs: list[JobConfig]
+
+    # 翻译增强
     llm_enabled: bool = False
+    llm_provider_id: str = ""
     llm_profile: str = "rss_enrich"
+    llm_timeout_seconds: int = 15
     max_input_chars: int = 2000
-    timeout: int = 15
+    llm_proxy_mode: str = "system"  # off|system|custom
+    llm_proxy_url: str = ""
+
+    google_translate_enabled: bool = False
+    google_translate_api_key: str = ""
+    google_translate_target_lang: str = "zh-CN"
+    google_translate_timeout_seconds: int = 15
+    google_translate_proxy_mode: str = "system"  # off|system|custom
+    google_translate_proxy_url: str = ""
+
     dedup_ttl_seconds: int = 7 * 24 * 60 * 60
     startup_delay_seconds: int = 45
     render_mode: str = "text"
     summary_max_chars: int = 280
     render_card_template: RenderCardTemplateConfig = field(default_factory=RenderCardTemplateConfig)
+
+    @property
+    def timeout(self) -> int:
+        """兼容旧代码字段名。"""
+        return self.llm_timeout_seconds
 
     @property
     def poll_interval_seconds(self) -> int:
@@ -80,6 +98,7 @@ class RSSConfig:
             runtime_conf = context_or_config
         else:
             runtime_conf = getattr(context_or_config, "config", {}) or {}
+
         feeds_raw = cls._normalize_collection(runtime_conf.get("feeds", []))
         targets_raw = cls._normalize_collection(runtime_conf.get("targets", []))
         jobs_raw = cls._normalize_collection(runtime_conf.get("jobs", []))
@@ -118,14 +137,64 @@ class RSSConfig:
         ]
 
         jobs = cls._build_implicit_job_if_needed(feeds, targets, jobs)
+
+        def conf_value(key: str, default, legacy_keys: list[str] | None = None):
+            translation_conf = runtime_conf.get("translation", {})
+            if isinstance(translation_conf, dict) and translation_conf.get(key) is not None:
+                return translation_conf.get(key)
+
+            if runtime_conf.get(key) is not None:
+                return runtime_conf.get(key)
+
+            for old_key in legacy_keys or []:
+                if runtime_conf.get(old_key) is not None:
+                    return runtime_conf.get(old_key)
+            return default
+
+        llm_timeout_seconds = int(conf_value("llm_timeout_seconds", 15, legacy_keys=["timeout"]))
+
         config = cls(
             feeds=feeds,
             targets=targets,
             jobs=jobs,
-            llm_enabled=bool(runtime_conf.get("llm_enabled", False)),
-            llm_profile=str(runtime_conf.get("llm_profile", "rss_enrich")).strip() or "rss_enrich",
-            max_input_chars=int(runtime_conf.get("max_input_chars", 2000)),
-            timeout=int(runtime_conf.get("timeout", 15)),
+            llm_enabled=bool(conf_value("llm_enabled", False)),
+            llm_provider_id=str(conf_value("llm_provider_id", "")).strip(),
+            llm_profile=str(conf_value("llm_profile", "rss_enrich")).strip() or "rss_enrich",
+            llm_timeout_seconds=llm_timeout_seconds,
+            max_input_chars=int(conf_value("max_input_chars", 2000)),
+            llm_proxy_mode=str(
+                conf_value("llm_proxy_mode", "system")
+            )
+            .strip()
+            .lower()
+            or "system",
+            llm_proxy_url=str(conf_value("llm_proxy_url", "")).strip(),
+            google_translate_enabled=bool(
+                conf_value("google_translate_enabled", False, legacy_keys=["google_enabled"])
+            ),
+            google_translate_api_key=str(
+                conf_value("google_translate_api_key", "", legacy_keys=["google_api_key"])
+            ).strip(),
+            google_translate_target_lang=str(
+                conf_value("google_translate_target_lang", "zh-CN", legacy_keys=["google_target_lang"])
+            ).strip()
+            or "zh-CN",
+            google_translate_timeout_seconds=int(
+                conf_value(
+                    "google_translate_timeout_seconds",
+                    llm_timeout_seconds,
+                    legacy_keys=["google_timeout_seconds"],
+                )
+            ),
+            google_translate_proxy_mode=str(
+                conf_value("google_translate_proxy_mode", "system", legacy_keys=["google_proxy_mode"])
+            )
+            .strip()
+            .lower()
+            or "system",
+            google_translate_proxy_url=str(
+                conf_value("google_translate_proxy_url", "", legacy_keys=["google_proxy_url"])
+            ).strip(),
             dedup_ttl_seconds=int(runtime_conf.get("dedup_ttl_seconds", 7 * 24 * 60 * 60)),
             startup_delay_seconds=int(runtime_conf.get("startup_delay_seconds", 45)),
             render_mode=str(runtime_conf.get("render_mode", "text")).strip() or "text",
@@ -233,11 +302,17 @@ class RSSConfig:
                     f"targets[{target.id}] 需要 unified_msg_origin 或平台会话标识"
                 )
 
-
         if self.max_input_chars <= 0:
             raise ConfigValidationError("max_input_chars 必须 > 0")
-        if self.timeout <= 0:
-            raise ConfigValidationError("timeout 必须 > 0")
+        if self.llm_timeout_seconds <= 0:
+            raise ConfigValidationError("llm_timeout_seconds 必须 > 0")
+        if self.google_translate_timeout_seconds <= 0:
+            raise ConfigValidationError("google_translate_timeout_seconds 必须 > 0")
+        if self.llm_proxy_mode not in {"off", "system", "custom"}:
+            raise ConfigValidationError("llm_proxy_mode 必须是 off/system/custom")
+        if self.google_translate_proxy_mode not in {"off", "system", "custom"}:
+            raise ConfigValidationError("google_translate_proxy_mode 必须是 off/system/custom")
+
         if self.dedup_ttl_seconds <= 0:
             raise ConfigValidationError("dedup_ttl_seconds 必须 > 0")
         if self.startup_delay_seconds < 0:
@@ -248,6 +323,15 @@ class RSSConfig:
             raise ConfigValidationError("summary_max_chars 必须 > 0")
         if self.llm_enabled and not self.llm_profile:
             raise ConfigValidationError("llm_enabled=true 时 llm_profile 不能为空")
+
+        if self.google_translate_enabled and not self.google_translate_api_key:
+            logger.warning("google_translate_enabled=true 但 google_translate_api_key 为空，Google 翻译将不可用")
+
+        if self.llm_proxy_mode == "custom" and not self.llm_proxy_url:
+            logger.warning("llm_proxy_mode=custom 但未配置 llm_proxy_url，将回退为默认 provider 网络配置")
+
+        if self.google_translate_proxy_mode == "custom" and not self.google_translate_proxy_url:
+            logger.warning("google_translate_proxy_mode=custom 但未配置 google_translate_proxy_url，将回退为直连")
 
         for job in self.jobs:
             if not job.id:

@@ -146,6 +146,40 @@ class RSSScheduler:
     def paused_jobs(self) -> set[str]:
         return set(self._paused_jobs)
 
+    async def test_translation(self, sample_text: str = "") -> dict:
+        """执行翻译链路测试，不触发分发与去重。"""
+        if self._pipeline is None:
+            return {"error": "pipeline_not_configured"}
+
+        diagnose_func = getattr(self._pipeline, "diagnose_translation", None)
+        if not callable(diagnose_func):
+            return {"error": "pipeline_diagnose_not_supported"}
+
+        sample_entry = {
+            "title": "RSS Translation Test",
+            "summary": sample_text or "This is a translation diagnostics message from RSS forwarder.",
+            "content": sample_text or "",
+        }
+        report = await diagnose_func(sample_entry)
+        report["config"] = {
+            "llm_enabled": bool(getattr(self._config, "llm_enabled", False)),
+            "llm_timeout_seconds": int(getattr(self._config, "llm_timeout_seconds", 0) or 0),
+            "llm_proxy_mode": str(getattr(self._config, "llm_proxy_mode", "system") or "system"),
+            "google_translate_enabled": bool(
+                getattr(self._config, "google_translate_enabled", False)
+            ),
+            "google_translate_target_lang": str(
+                getattr(self._config, "google_translate_target_lang", "zh-CN") or "zh-CN"
+            ),
+            "google_translate_timeout_seconds": int(
+                getattr(self._config, "google_translate_timeout_seconds", 0) or 0
+            ),
+            "google_translate_proxy_mode": str(
+                getattr(self._config, "google_translate_proxy_mode", "system") or "system"
+            ),
+        }
+        return report
+
     def _register_job(self, job: JobConfig) -> None:
         if job.id in self._job_tasks and not self._job_tasks[job.id].done():
             return

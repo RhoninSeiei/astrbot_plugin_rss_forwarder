@@ -146,5 +146,59 @@ class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.marked, [("item-1", 123)])
 
 
+class SchedulerTranslationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_test_translation_returns_pipeline_error_when_missing(self):
+        config = types.SimpleNamespace(jobs=[])
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=types.SimpleNamespace(),
+            parser=types.SimpleNamespace(),
+            dispatcher=types.SimpleNamespace(),
+            storage=types.SimpleNamespace(),
+            pipeline=None,
+        )
+
+        result = await scheduler.test_translation(sample_text="hello")
+
+        self.assertEqual(result.get("error"), "pipeline_not_configured")
+
+    async def test_test_translation_returns_report_and_config_snapshot(self):
+        class FakePipeline:
+            async def diagnose_translation(self, entry):
+                self.entry = entry
+                return {
+                    "input_chars": len(entry.get("summary", "")),
+                    "llm": {"ok": True, "latency_ms": 10, "provider_id": "p"},
+                    "google": {"ok": False, "latency_ms": 20, "error": "no_key"},
+                }
+
+        pipeline = FakePipeline()
+        config = types.SimpleNamespace(
+            jobs=[],
+            llm_enabled=True,
+            llm_timeout_seconds=15,
+            llm_proxy_mode="system",
+            google_translate_enabled=True,
+            google_translate_target_lang="zh-CN",
+            google_translate_timeout_seconds=15,
+            google_translate_proxy_mode="off",
+        )
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=types.SimpleNamespace(),
+            parser=types.SimpleNamespace(),
+            dispatcher=types.SimpleNamespace(),
+            storage=types.SimpleNamespace(),
+            pipeline=pipeline,
+        )
+
+        result = await scheduler.test_translation(sample_text="sample")
+
+        self.assertEqual(pipeline.entry.get("summary"), "sample")
+        self.assertEqual(result.get("llm", {}).get("ok"), True)
+        self.assertEqual(result.get("google", {}).get("error"), "no_key")
+        self.assertEqual(result.get("config", {}).get("google_translate_proxy_mode"), "off")
+
+
 if __name__ == "__main__":
     unittest.main()

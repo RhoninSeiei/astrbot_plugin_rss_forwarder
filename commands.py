@@ -25,12 +25,14 @@ class RSSCommands:
             "pause": self.rss_pause,
             "resume": self.rss_resume,
             "reset": self.rss_reset,
+            "test": self.rss_test,
+            "test_translate": self.rss_test,
         }
 
         handler = route_map.get(sub)
         if handler is None:
             yield event.plain_result(
-                "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|reset]"
+                "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|reset|test [sample text]]"
             )
             return
 
@@ -81,6 +83,52 @@ class RSSCommands:
             return
 
         yield event.plain_result("已触发全部启用且未暂停任务。")
+
+    async def rss_test(self, event: AstrMessageEvent):
+        sample_text = self._extract_tail_text(event)
+        report = await self.scheduler.test_translation(sample_text=sample_text)
+
+        if report.get("error"):
+            yield event.plain_result(f"翻译测试失败：{report['error']}")
+            return
+
+        config = report.get("config", {})
+        llm = report.get("llm", {})
+        google = report.get("google", {})
+
+        lines = [
+            "翻译链路测试：",
+            f"- 输入字符数：{report.get('input_chars', 0)}",
+            (
+                "- LLM："
+                f"enabled={self._bool_text(bool(config.get('llm_enabled', llm.get('enabled', False))))} "
+                f"provider={llm.get('provider_id', '') or '(自动/未解析)'} "
+                f"timeout={llm.get('timeout_seconds', config.get('llm_timeout_seconds', 0))}s "
+                f"proxy={config.get('llm_proxy_mode', 'system')} "
+                f"ok={self._bool_text(bool(llm.get('ok', False)))} "
+                f"latency={llm.get('latency_ms', 0)}ms "
+                f"error={llm.get('error', '') or '-'}"
+            ),
+            (
+                "- Google："
+                f"enabled={self._bool_text(bool(config.get('google_translate_enabled', google.get('enabled', False))))} "
+                f"target={google.get('target_lang', config.get('google_translate_target_lang', 'zh-CN'))} "
+                f"timeout={google.get('timeout_seconds', config.get('google_translate_timeout_seconds', 0))}s "
+                f"proxy={config.get('google_translate_proxy_mode', 'system')} "
+                f"ok={self._bool_text(bool(google.get('ok', False)))} "
+                f"latency={google.get('latency_ms', 0)}ms "
+                f"error={google.get('error', '') or '-'}"
+            ),
+        ]
+
+        llm_preview = str(llm.get("preview", "")).strip()
+        google_preview = str(google.get("preview", "")).strip()
+        if llm_preview:
+            lines.append(f"- LLM结果预览：{llm_preview}")
+        if google_preview:
+            lines.append(f"- Google结果预览：{google_preview}")
+
+        yield event.plain_result("\n".join(lines))
 
     async def rss_reset(self, event: AstrMessageEvent):
         """清空已推送去重记录，便于调试或重新全量推送。"""
@@ -151,6 +199,12 @@ class RSSCommands:
         return tokens[2].strip() if len(tokens) >= 3 else ""
 
     @staticmethod
+    def _extract_tail_text(event: AstrMessageEvent) -> str:
+        message_text = RSSCommands._get_message_text(event)
+        parts = message_text.strip().split(maxsplit=2)
+        return parts[2].strip() if len(parts) >= 3 else ""
+
+    @staticmethod
     def _get_message_text(event: AstrMessageEvent) -> str:
         if hasattr(event, "message_str"):
             return str(getattr(event, "message_str") or "")
@@ -158,6 +212,10 @@ class RSSCommands:
             getter = getattr(event, "get_message_str")
             return str(getter() if callable(getter) else getter or "")
         return ""
+
+    @staticmethod
+    def _bool_text(value: bool) -> str:
+        return "on" if value else "off"
 
     @staticmethod
     def _format_success_time(result) -> str:

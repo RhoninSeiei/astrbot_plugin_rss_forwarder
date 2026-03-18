@@ -60,11 +60,19 @@
   - `cron`（可填，当前版本回退到 interval）
   - `batch_size`
   - `enabled`
-- 处理渲染
-  - `llm_enabled`
-  - `llm_profile`
-  - `max_input_chars`
-  - `timeout`
+- 翻译增强（`translation`）
+  - `llm_enabled`：是否启用 LLM 摘要/翻译
+  - `llm_provider_id`：LLM Provider（WebUI 可下拉选择）
+  - `llm_timeout_seconds`：LLM 超时
+  - `llm_profile`：LLM profile（高级）
+  - `max_input_chars`：传给翻译器的最大输入字符数
+  - `llm_proxy_mode` / `llm_proxy_url`：LLM 独立代理（尽力，是否生效取决于 Provider）
+  - `google_translate_enabled`：是否启用 Google 翻译
+  - `google_translate_api_key`：Google Cloud Translation API Key
+  - `google_translate_target_lang`：目标语言（默认 `zh-CN`）
+  - `google_translate_timeout_seconds`：Google 超时
+  - `google_translate_proxy_mode` / `google_translate_proxy_url`：Google 独立代理
+- 其他
   - `dedup_ttl_seconds`
   - `startup_delay_seconds`
   - `render_mode`（`text|image`）
@@ -108,7 +116,19 @@
       "enabled": true
     }
   ],
-  "llm_enabled": false,
+  "translation": {
+    "llm_enabled": true,
+    "llm_provider_id": "",
+    "llm_timeout_seconds": 15,
+    "llm_profile": "rss_enrich",
+    "max_input_chars": 2000,
+    "google_translate_enabled": true,
+    "google_translate_api_key": "YOUR_GOOGLE_TRANSLATE_API_KEY",
+    "google_translate_target_lang": "zh-CN",
+    "google_translate_timeout_seconds": 15,
+    "google_translate_proxy_mode": "system",
+    "google_translate_proxy_url": ""
+  },
   "render_mode": "text"
 }
 ```
@@ -134,6 +154,7 @@
 
 - `render_mode = image` 时，依赖 AstrBot 侧提供的 `html_render` 能力。
 - `llm_enabled = true` 时，依赖 AstrBot 已配置可用的大模型提供商。
+- 翻译优先级：LLM -> Google。若仅开启 Google，则直接走 Google。
 
 若上述 AstrBot 能力未配置，本插件会记录日志并自动降级，不影响基础 RSS 文本推送。
 

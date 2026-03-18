@@ -20,7 +20,11 @@
           "auth_mode": {
             "type": "string",
             "default": "none",
-            "options": ["none", "query", "header"],
+            "options": [
+              "none",
+              "query",
+              "header"
+            ],
             "description": "鉴权模式"
           },
           "key": {
@@ -36,7 +40,7 @@
           "timeout": {
             "type": "int",
             "default": 10,
-            "description": "请求超时时间（秒）"
+            "description": "抓取请求超时时间（秒）"
           }
         }
       }
@@ -121,25 +125,98 @@
       }
     }
   },
-  "llm_enabled": {
-    "type": "bool",
-    "default": false,
-    "description": "是否启用 LLM 处理摘要/翻译（默认关闭）"
-  },
-  "llm_profile": {
-    "type": "string",
-    "default": "rss_enrich",
-    "description": "LLM 调用使用的 profile 名称"
-  },
-  "max_input_chars": {
-    "type": "int",
-    "default": 2000,
-    "description": "发送给 LLM 的最大输入字符数"
-  },
-  "timeout": {
-    "type": "int",
-    "default": 15,
-    "description": "LLM 调用超时时间（秒）"
+  "translation": {
+    "type": "object",
+    "description": "翻译增强（LLM / Google）",
+    "hint": "优先级：LLM -> Google。若仅开启 Google，则直接走 Google 翻译。",
+    "items": {
+      "llm_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用 LLM 摘要/翻译"
+      },
+      "llm_provider_id": {
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "description": "LLM 提供商 ID",
+        "hint": "留空自动使用当前会话/默认模型；可点击右侧按钮下拉选择。"
+      },
+      "llm_timeout_seconds": {
+        "type": "int",
+        "default": 15,
+        "description": "LLM 超时（秒）",
+        "hint": "超时后若已开启 Google 翻译，将自动回退到 Google。"
+      },
+      "llm_profile": {
+        "type": "string",
+        "default": "rss_enrich",
+        "description": "LLM profile（高级）",
+        "hint": "一般保持默认即可。"
+      },
+      "max_input_chars": {
+        "type": "int",
+        "default": 2000,
+        "description": "发送给翻译器的最大输入字符数"
+      },
+      "llm_proxy_mode": {
+        "type": "string",
+        "default": "system",
+        "options": [
+          "off",
+          "system",
+          "custom"
+        ],
+        "description": "LLM 代理模式（尽力）",
+        "hint": "off=不走代理，system=使用系统代理，custom=使用下方代理地址。是否生效取决于所选 Provider。"
+      },
+      "llm_proxy_url": {
+        "type": "string",
+        "default": "",
+        "description": "LLM 自定义代理地址（尽力）",
+        "hint": "示例：http://127.0.0.1:7890（仅 custom 生效，是否生效取决于 Provider）"
+      },
+      "google_translate_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用 Google 翻译回退/直连"
+      },
+      "google_translate_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "Google Cloud Translation API Key",
+        "obvious_hint": true,
+        "hint": "使用 Cloud Translation Basic v2 API Key。"
+      },
+      "google_translate_target_lang": {
+        "type": "string",
+        "default": "zh-CN",
+        "description": "Google 翻译目标语言",
+        "hint": "例如 zh-CN / ja / en"
+      },
+      "google_translate_timeout_seconds": {
+        "type": "int",
+        "default": 15,
+        "description": "Google 翻译超时（秒）"
+      },
+      "google_translate_proxy_mode": {
+        "type": "string",
+        "default": "system",
+        "options": [
+          "off",
+          "system",
+          "custom"
+        ],
+        "description": "Google 翻译代理模式",
+        "hint": "off=不走代理，system=使用系统代理，custom=使用下方代理地址"
+      },
+      "google_translate_proxy_url": {
+        "type": "string",
+        "default": "",
+        "description": "Google 翻译自定义代理地址",
+        "hint": "示例：http://127.0.0.1:7890（仅 custom 生效）"
+      }
+    }
   },
   "dedup_ttl_seconds": {
     "type": "int",
@@ -154,7 +231,10 @@
   "render_mode": {
     "type": "string",
     "default": "text",
-    "options": ["text", "image"],
+    "options": [
+      "text",
+      "image"
+    ],
     "description": "消息渲染模式：text(纯文本+链接) / image(图文卡片)"
   },
   "summary_max_chars": {
