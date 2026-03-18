@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
+from html import unescape
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     from defusedxml import ElementTree as ET
@@ -15,6 +18,8 @@ from astrbot.api import logger
 
 class FeedParser:
     """解析层：将 RSS/Atom 转换为统一条目结构。"""
+
+    _IMG_SRC_RE = re.compile(r"<img\b[^>]*\bsrc=['\"]([^'\"]+)['\"]", re.IGNORECASE)
 
     def parse(self, raw_items: list[dict], job=None) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
@@ -54,6 +59,7 @@ class FeedParser:
             guid = self._text(item.find("guid"))
             summary = self._text(item.find("description"))
             published = self._normalize_time(self._text(item.find("pubDate")))
+            image_url = self._extract_rss_image_url(item, summary)
             item_id = guid or link or sha256(f"{title}|{published}".encode("utf-8")).hexdigest()
             result.append(
                 {
@@ -65,6 +71,7 @@ class FeedParser:
                     "summary": summary,
                     "published_at": published,
                     "source": feed_title,
+                    "image_url": image_url,
                 }
             )
         return result
@@ -84,12 +91,30 @@ class FeedParser:
                 or self._text(entry.find(self._tag(ns, "updated")))
             )
             link = ""
+            image_url = ""
             for link_node in entry.findall(self._tag(ns, "link")):
                 href = (link_node.attrib.get("href") or "").strip()
-                rel = (link_node.attrib.get("rel") or "alternate").strip()
-                if href and rel in {"alternate", ""}:
+                rel = (link_node.attrib.get("rel") or "alternate").strip().lower()
+                link_type = (link_node.attrib.get("type") or "").strip().lower()
+                if href and rel in {"alternate", ""} and not link:
                     link = href
-                    break
+                if href and rel == "enclosure" and link_type.startswith("image/") and not image_url:
+                    image_url = href
+
+            if not image_url:
+                for child in entry.iter():
+                    if child is entry:
+                        continue
+                    local = self._strip_ns(child.tag).lower()
+                    if local in {"content", "thumbnail", "image"}:
+                        url = (child.attrib.get("url") or child.attrib.get("href") or "").strip()
+                        if self._is_http_url(url):
+                            image_url = url
+                            break
+
+            if not image_url:
+                image_url = self._extract_image_from_html(summary)
+
             item_id = id_text or link or sha256(f"{title}|{published}".encode("utf-8")).hexdigest()
             result.append(
                 {
@@ -101,9 +126,46 @@ class FeedParser:
                     "summary": summary,
                     "published_at": published,
                     "source": feed_title,
+                    "image_url": image_url,
                 }
             )
         return result
+
+    def _extract_rss_image_url(self, item, summary: str) -> str:
+        enclosure = item.find("enclosure")
+        if enclosure is not None:
+            url = (enclosure.attrib.get("url") or "").strip()
+            mime = (enclosure.attrib.get("type") or "").strip().lower()
+            if self._is_http_url(url) and (not mime or mime.startswith("image/")):
+                return url
+
+        for child in item:
+            local = self._strip_ns(child.tag).lower()
+            if local in {"enclosure", "content", "thumbnail", "image"}:
+                url = (child.attrib.get("url") or child.attrib.get("href") or "").strip()
+                mime = (child.attrib.get("type") or "").strip().lower()
+                if self._is_http_url(url) and (local != "enclosure" or not mime or mime.startswith("image/")):
+                    return url
+
+        return self._extract_image_from_html(summary)
+
+    def _extract_image_from_html(self, html_text: str) -> str:
+        if not html_text:
+            return ""
+        match = self._IMG_SRC_RE.search(html_text)
+        if not match:
+            return ""
+        src = unescape((match.group(1) or "").strip())
+        if self._is_http_url(src):
+            return src
+        return ""
+
+    @staticmethod
+    def _is_http_url(url: str) -> bool:
+        if not url:
+            return False
+        parsed = urlparse(url)
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     @staticmethod
     def _strip_ns(tag: str) -> str:

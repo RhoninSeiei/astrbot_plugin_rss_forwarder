@@ -140,7 +140,23 @@ class FeedDispatcher:
 
             return Plain
 
-    def _create_message_chain(self, text_lines: list[str], link_line: str | None = None):
+    @staticmethod
+    def _resolve_image_cls():
+        try:
+            from astrbot.api.message_components import Image
+
+            return Image
+        except Exception:
+            from astrbot.core.message.components import Image
+
+            return Image
+
+    def _create_message_chain(
+        self,
+        text_lines: list[str],
+        link_line: str | None = None,
+        image_url: str | None = None,
+    ):
         MessageChain = self._resolve_messagechain_cls()
         Plain = self._resolve_plain_cls()
 
@@ -150,6 +166,13 @@ class FeedDispatcher:
         plain_text = "\n".join(lines)
 
         components: list[Any] = [Plain(plain_text)]
+
+        if image_url:
+            try:
+                Image = self._resolve_image_cls()
+                components.append(Image.fromURL(image_url))
+            except Exception as exc:
+                logger.warning("build image component failed, keep text only: %s", exc)
 
         try:
             return MessageChain(chain=components)
@@ -172,6 +195,7 @@ class FeedDispatcher:
         summary = self._safe_format(template.summary, data)
         link_text = self._safe_format(template.link_text, data)
         link = data["link"]
+        image_url = str(item.get("image_url", "") or "").strip()
 
         text_lines = [
             line
@@ -188,7 +212,7 @@ class FeedDispatcher:
             link_line = ""
             if link:
                 link_line = f"{link_text}: {link}" if data["truncated"] == "1" else link
-            return self._create_message_chain(text_lines, link_line or None)
+            return self._create_message_chain(text_lines, link_line or None, image_url or None)
         except Exception as exc:  # pragma: no cover - 依赖运行环境
             logger.error("build text MessageChain failed: %s", exc)
             raise
@@ -220,16 +244,31 @@ class FeedDispatcher:
             f"<div class='summary'>{summary}</div>{footer}</div></body></html>"
         )
 
-    async def _build_image_payload(self, item: dict[str, Any]):
+    async def _build_image_payload(self, item: dict[str, Any]) -> tuple[Any, bool]:
         html = self._build_card_html(item)
 
         try:
             image_result = await self.html_render(html)
-            return self._as_image_result_if_possible(item, image_result)
+            # 卡片渲染成功时，主 payload 不包含 RSS 原图。
+            return self._as_image_result_if_possible(item, image_result), False
         except Exception as exc:  # pragma: no cover - 依赖运行环境
             logger.warning("image render failed, fallback to text mode: %s", exc)
             chain = self._build_text_message_chain(item)
-            return self._as_chain_result_if_possible(item, chain)
+            # 文本链路已包含 image_url，避免后续重复追加原图。
+            return self._as_chain_result_if_possible(item, chain), True
+
+    def _build_image_only_chain(self, image_url: str):
+        MessageChain = self._resolve_messagechain_cls()
+        Image = self._resolve_image_cls()
+
+        try:
+            return MessageChain(chain=[Image.fromURL(image_url)])
+        except TypeError:
+            chain = MessageChain()
+            if hasattr(chain, "chain"):
+                chain.chain = [Image.fromURL(image_url)]
+                return chain
+            raise
 
     async def html_render(self, html: str):
         if hasattr(self.context, "html_render"):
@@ -262,8 +301,16 @@ class FeedDispatcher:
             logger.warning("skip dispatch: no available targets for item=%s", item)
             return DispatchResult()
 
+        extra_image_payload = None
         if self._config.render_mode == "image":
-            payload = await self._build_image_payload(item)
+            payload, source_image_already_included = await self._build_image_payload(item)
+            image_url = str(item.get("image_url", "") or "").strip()
+            if image_url and not source_image_already_included:
+                try:
+                    image_chain = self._build_image_only_chain(image_url)
+                    extra_image_payload = self._as_chain_result_if_possible(item, image_chain)
+                except Exception as exc:
+                    logger.warning("build extra source image payload failed: %s", exc)
         else:
             try:
                 chain = self._build_text_message_chain(item)
@@ -279,6 +326,15 @@ class FeedDispatcher:
             try:
                 await self.context.send_message(unified_msg_origin, payload)
                 result.success_count += 1
+                if extra_image_payload is not None:
+                    try:
+                        await self.context.send_message(unified_msg_origin, extra_image_payload)
+                    except Exception as exc:
+                        logger.warning(
+                            "extra source image send failed origin=%s: %s",
+                            unified_msg_origin,
+                            exc,
+                        )
             except Exception as exc:
                 if self._is_permanent_target_error(exc):
                     self._disabled_origins.add(unified_msg_origin)
