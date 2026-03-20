@@ -22,7 +22,7 @@
 - 起動直後の初回遅延：プラグイン起動後、既定で `45` 秒待ってから最初のポーリングを行います。
 - 重複排除・ETag/Last-Modified 永続化。
 - 管理コマンド：`/rss list` / `/rss status` / `/rss run` / `/rss pause` / `/rss resume`。
-- LLM 拡張ポイント（失敗時は自動フォールバック）。
+- 3 段階の翻訳チェーン：`LLM -> Google Translate -> GitHub Models`。
 
 ## `astrbot_plugin_rss` との主な違い
 
@@ -36,14 +36,81 @@
 
 `_conf_schema.json` により、AstrBot のプラグイン管理画面から主要項目を編集できます。
 
+- `feeds[]`
+- `targets[]`
+- `jobs[]`
+- `translation.llm_*`
+- `translation.google_translate_*`
+- `translation.github_models_*`
 - `dedup_ttl_seconds`
 - `startup_delay_seconds`
 - `render_mode` / `summary_max_chars` / `render_card_template`
+
+翻訳の順序は管理画面と実行時で共通です：`LLM -> Google -> GitHub Models`
+
+主な翻訳項目:
+
+- `translation.llm_enabled`
+- `translation.llm_provider_id`
+- `translation.llm_timeout_seconds`
+- `translation.llm_profile`
+- `translation.max_input_chars`
+- `translation.google_translate_enabled`
+- `translation.google_translate_api_key`
+- `translation.google_translate_target_lang`
+- `translation.google_translate_timeout_seconds`
+- `translation.google_translate_proxy_mode`
+- `translation.google_translate_proxy_url`
+- `translation.github_models_enabled`
+- `translation.github_models_model`
+- `translation.github_models_timeout_seconds`
+- `translation.github_models_token_file`
+- `translation.github_models_proxy_mode`
+- `translation.github_models_proxy_url`
+
+例:
+
+```json
+{
+  "translation": {
+    "llm_enabled": true,
+    "llm_provider_id": "",
+    "llm_timeout_seconds": 15,
+    "llm_profile": "rss_enrich",
+    "max_input_chars": 2000,
+    "google_translate_enabled": true,
+    "google_translate_api_key": "YOUR_GOOGLE_TRANSLATE_API_KEY",
+    "google_translate_target_lang": "zh-CN",
+    "google_translate_timeout_seconds": 15,
+    "google_translate_proxy_mode": "system",
+    "google_translate_proxy_url": "",
+    "github_models_enabled": true,
+    "github_models_model": "openai/gpt-4o-mini",
+    "github_models_timeout_seconds": 15,
+    "github_models_token_file": "github.token"
+  }
+}
+```
 
 補足:
 - 重複排除状態は AstrBot KV と `data/plugin_data/astrbot_rss/state.json` の両方に保存されます
 - `last_success_time` より古い記事は再送せず、既読扱いのみ行います
 - `startup_delay_seconds` の既定値は `45` 秒です
+- `translation.*` 配下の項目はすべて AstrBot のプラグイン管理画面から設定できます
+
+## 翻訳サービスの取得方法
+
+### 1. AstrBot LLM Provider
+
+先に AstrBot 本体で利用可能なモデル提供元を設定し、その後プラグイン管理画面の `translation.llm_provider_id` で対象 Provider を選択します。空欄の場合は、現在のセッションまたは既定 Provider を優先して利用します。
+
+### 2. Google Cloud Translation API Key
+
+Google Cloud Console でプロジェクトを作成し、`Cloud Translation API` Basic v2 を有効化してから、`APIs & Services -> Credentials` で API Key を発行します。発行した Key を `translation.google_translate_api_key` に設定します。
+
+### 3. GitHub Models Token
+
+`models` 権限を持つ GitHub token を作成します。既定では `data/github.token` から読み取り、必要に応じて `ASTRBOT_GITHUB_TOKEN`、`GITHUB_TOKEN`、`GH_TOKEN` でも指定できます。別のファイルを使う場合は `translation.github_models_token_file` を変更します。
 
 ## ロードマップ
 

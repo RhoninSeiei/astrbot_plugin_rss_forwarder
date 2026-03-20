@@ -177,6 +177,19 @@ class RSSScheduler:
             "google_translate_proxy_mode": str(
                 getattr(self._config, "google_translate_proxy_mode", "system") or "system"
             ),
+            "github_models_enabled": bool(
+                getattr(self._config, "github_models_enabled", False)
+            ),
+            "github_models_model": str(
+                getattr(self._config, "github_models_model", "openai/gpt-4o-mini")
+                or "openai/gpt-4o-mini"
+            ),
+            "github_models_timeout_seconds": int(
+                getattr(self._config, "github_models_timeout_seconds", 0) or 0
+            ),
+            "github_models_proxy_mode": str(
+                getattr(self._config, "github_models_proxy_mode", "system") or "system"
+            ),
         }
         return report
 

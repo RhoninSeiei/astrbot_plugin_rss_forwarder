@@ -94,6 +94,7 @@ class RSSCommands:
 
         config = report.get("config", {})
         llm = report.get("llm", {})
+        github = report.get("github", {})
         google = report.get("google", {})
 
         lines = [
@@ -119,14 +120,27 @@ class RSSCommands:
                 f"latency={google.get('latency_ms', 0)}ms "
                 f"error={google.get('error', '') or '-'}"
             ),
+            (
+                "- GitHub Models："
+                f"enabled={self._bool_text(bool(config.get('github_models_enabled', github.get('enabled', False))))} "
+                f"model={github.get('model', config.get('github_models_model', 'openai/gpt-4o-mini'))} "
+                f"timeout={github.get('timeout_seconds', config.get('github_models_timeout_seconds', 0))}s "
+                f"proxy={config.get('github_models_proxy_mode', 'system')} "
+                f"ok={self._bool_text(bool(github.get('ok', False)))} "
+                f"latency={github.get('latency_ms', 0)}ms "
+                f"error={github.get('error', '') or '-'}"
+            ),
         ]
 
         llm_preview = str(llm.get("preview", "")).strip()
         google_preview = str(google.get("preview", "")).strip()
+        github_preview = str(github.get("preview", "")).strip()
         if llm_preview:
             lines.append(f"- LLM结果预览：{llm_preview}")
         if google_preview:
             lines.append(f"- Google结果预览：{google_preview}")
+        if github_preview:
+            lines.append(f"- GitHub结果预览：{github_preview}")
 
         yield event.plain_result("\n".join(lines))
 

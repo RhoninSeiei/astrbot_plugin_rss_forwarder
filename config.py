@@ -63,6 +63,13 @@ class RSSConfig:
     llm_proxy_mode: str = "system"  # off|system|custom
     llm_proxy_url: str = ""
 
+    github_models_enabled: bool = False
+    github_models_model: str = "openai/gpt-4o-mini"
+    github_models_timeout_seconds: int = 15
+    github_models_token_file: str = "github.token"
+    github_models_proxy_mode: str = "system"  # off|system|custom
+    github_models_proxy_url: str = ""
+
     google_translate_enabled: bool = False
     google_translate_api_key: str = ""
     google_translate_target_lang: str = "zh-CN"
@@ -169,6 +176,25 @@ class RSSConfig:
             .lower()
             or "system",
             llm_proxy_url=str(conf_value("llm_proxy_url", "")).strip(),
+            github_models_enabled=bool(conf_value("github_models_enabled", False)),
+            github_models_model=str(
+                conf_value("github_models_model", "openai/gpt-4o-mini")
+            ).strip()
+            or "openai/gpt-4o-mini",
+            github_models_timeout_seconds=int(
+                conf_value("github_models_timeout_seconds", llm_timeout_seconds)
+            ),
+            github_models_token_file=str(
+                conf_value("github_models_token_file", "github.token")
+            ).strip()
+            or "github.token",
+            github_models_proxy_mode=str(
+                conf_value("github_models_proxy_mode", "system")
+            )
+            .strip()
+            .lower()
+            or "system",
+            github_models_proxy_url=str(conf_value("github_models_proxy_url", "")).strip(),
             google_translate_enabled=bool(
                 conf_value("google_translate_enabled", False, legacy_keys=["google_enabled"])
             ),
@@ -306,10 +332,14 @@ class RSSConfig:
             raise ConfigValidationError("max_input_chars 必须 > 0")
         if self.llm_timeout_seconds <= 0:
             raise ConfigValidationError("llm_timeout_seconds 必须 > 0")
+        if self.github_models_timeout_seconds <= 0:
+            raise ConfigValidationError("github_models_timeout_seconds 必须 > 0")
         if self.google_translate_timeout_seconds <= 0:
             raise ConfigValidationError("google_translate_timeout_seconds 必须 > 0")
         if self.llm_proxy_mode not in {"off", "system", "custom"}:
             raise ConfigValidationError("llm_proxy_mode 必须是 off/system/custom")
+        if self.github_models_proxy_mode not in {"off", "system", "custom"}:
+            raise ConfigValidationError("github_models_proxy_mode 必须是 off/system/custom")
         if self.google_translate_proxy_mode not in {"off", "system", "custom"}:
             raise ConfigValidationError("google_translate_proxy_mode 必须是 off/system/custom")
 
@@ -324,14 +354,28 @@ class RSSConfig:
         if self.llm_enabled and not self.llm_profile:
             raise ConfigValidationError("llm_enabled=true 时 llm_profile 不能为空")
 
+        if self.github_models_enabled and not self.github_models_model:
+            raise ConfigValidationError("github_models_enabled=true 时 github_models_model 不能为空")
+
         if self.google_translate_enabled and not self.google_translate_api_key:
-            logger.warning("google_translate_enabled=true 但 google_translate_api_key 为空，Google 翻译将不可用")
+            logger.warning(
+                "google_translate_enabled=true 但 google_translate_api_key 为空，Google 翻译将不可用"
+            )
 
         if self.llm_proxy_mode == "custom" and not self.llm_proxy_url:
-            logger.warning("llm_proxy_mode=custom 但未配置 llm_proxy_url，将回退为默认 provider 网络配置")
+            logger.warning(
+                "llm_proxy_mode=custom 但未配置 llm_proxy_url，将回退为默认 provider 网络配置"
+            )
+
+        if self.github_models_proxy_mode == "custom" and not self.github_models_proxy_url:
+            logger.warning(
+                "github_models_proxy_mode=custom 但未配置 github_models_proxy_url，将回退为直连"
+            )
 
         if self.google_translate_proxy_mode == "custom" and not self.google_translate_proxy_url:
-            logger.warning("google_translate_proxy_mode=custom 但未配置 google_translate_proxy_url，将回退为直连")
+            logger.warning(
+                "google_translate_proxy_mode=custom 但未配置 google_translate_proxy_url，将回退为直连"
+            )
 
         for job in self.jobs:
             if not job.id:

@@ -22,7 +22,7 @@ This project is not meant to be a drop-in clone of [`Soulter/astrbot_plugin_rss`
 - Startup-safe first poll delay: waits `45` seconds by default before the first poll after plugin startup.
 - Deduplication + feed cursor persistence (ETag / Last-Modified / last_success_time).
 - Admin commands: `/rss list`, `/rss status`, `/rss run [job_id]`, `/rss pause [job_id]`, `/rss resume [job_id]`.
-- Optional LLM enrichment pipeline (safe fallback on failure).
+- Three-stage translation chain: `LLM -> Google Translate -> GitHub Models`.
 - `text` / `image` rendering mode.
 
 ## Key Differences From `astrbot_plugin_rss`
@@ -40,14 +40,76 @@ The plugin ships `_conf_schema.json`, so all major settings can be edited from A
 - `feeds[]`
 - `targets[]`
 - `jobs[]`
-- `llm_*`, `dedup_ttl_seconds`, `startup_delay_seconds`, `render_mode`, `summary_max_chars`, `render_card_template`
+- `translation.llm_*`
+- `translation.google_translate_*`
+- `translation.github_models_*`
+- `dedup_ttl_seconds`, `startup_delay_seconds`, `render_mode`, `summary_max_chars`, `render_card_template`
 
-See `README.md` for a full JSON example.
+Translation order in the UI matches runtime order: `LLM -> Google -> GitHub Models`.
+
+Key translation fields:
+
+- `translation.llm_enabled`
+- `translation.llm_provider_id`
+- `translation.llm_timeout_seconds`
+- `translation.llm_profile`
+- `translation.max_input_chars`
+- `translation.google_translate_enabled`
+- `translation.google_translate_api_key`
+- `translation.google_translate_target_lang`
+- `translation.google_translate_timeout_seconds`
+- `translation.google_translate_proxy_mode`
+- `translation.google_translate_proxy_url`
+- `translation.github_models_enabled`
+- `translation.github_models_model`
+- `translation.github_models_timeout_seconds`
+- `translation.github_models_token_file`
+- `translation.github_models_proxy_mode`
+- `translation.github_models_proxy_url`
+
+Example:
+
+```json
+{
+  "translation": {
+    "llm_enabled": true,
+    "llm_provider_id": "",
+    "llm_timeout_seconds": 15,
+    "llm_profile": "rss_enrich",
+    "max_input_chars": 2000,
+    "google_translate_enabled": true,
+    "google_translate_api_key": "YOUR_GOOGLE_TRANSLATE_API_KEY",
+    "google_translate_target_lang": "zh-CN",
+    "google_translate_timeout_seconds": 15,
+    "google_translate_proxy_mode": "system",
+    "google_translate_proxy_url": "",
+    "github_models_enabled": true,
+    "github_models_model": "openai/gpt-4o-mini",
+    "github_models_timeout_seconds": 15,
+    "github_models_token_file": "github.token"
+  }
+}
+```
 
 Notes:
 - Dedup state is persisted to both AstrBot KV and `data/plugin_data/astrbot_rss/state.json`
 - Items older than a feed's `last_success_time` are marked seen without being pushed again
 - `startup_delay_seconds` defaults to `45` so platform adapters have time to become ready
+- All `translation.*` fields are available in AstrBot plugin UI
+
+## Translation Credential Setup
+
+### 1. AstrBot LLM provider
+
+Configure an available model provider in AstrBot first, then select it in `translation.llm_provider_id` from the plugin UI. If left empty, the plugin tries the current-session provider or AstrBot default provider.
+
+### 2. Google Cloud Translation API key
+
+Create a Google Cloud project, enable `Cloud Translation API` Basic v2, then create an API key under `APIs & Services -> Credentials`. Paste that key into `translation.google_translate_api_key`.
+
+### 3. GitHub Models token
+
+Create a GitHub token with `models` access. The plugin reads it from `data/github.token` by default, or from `ASTRBOT_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`. `translation.github_models_token_file` can be changed from the plugin UI if another file path is preferred.
 
 ## Roadmap
 

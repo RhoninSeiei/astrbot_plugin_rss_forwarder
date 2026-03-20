@@ -169,6 +169,7 @@ class SchedulerTranslationTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "input_chars": len(entry.get("summary", "")),
                     "llm": {"ok": True, "latency_ms": 10, "provider_id": "p"},
+                    "github": {"ok": False, "latency_ms": 12, "error": "token_missing"},
                     "google": {"ok": False, "latency_ms": 20, "error": "no_key"},
                 }
 
@@ -178,6 +179,10 @@ class SchedulerTranslationTest(unittest.IsolatedAsyncioTestCase):
             llm_enabled=True,
             llm_timeout_seconds=15,
             llm_proxy_mode="system",
+            github_models_enabled=True,
+            github_models_model="openai/gpt-4o-mini",
+            github_models_timeout_seconds=18,
+            github_models_proxy_mode="custom",
             google_translate_enabled=True,
             google_translate_target_lang="zh-CN",
             google_translate_timeout_seconds=15,
@@ -196,6 +201,8 @@ class SchedulerTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(pipeline.entry.get("summary"), "sample")
         self.assertEqual(result.get("llm", {}).get("ok"), True)
+        self.assertEqual(result.get("github", {}).get("error"), "token_missing")
+        self.assertEqual(result.get("config", {}).get("github_models_model"), "openai/gpt-4o-mini")
         self.assertEqual(result.get("google", {}).get("error"), "no_key")
         self.assertEqual(result.get("config", {}).get("google_translate_proxy_mode"), "off")
 

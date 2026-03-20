@@ -1,7 +1,9 @@
 import asyncio
 import json
+import os
 import re
 from html import unescape
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -15,6 +17,7 @@ from .config import RSSConfig
 class FeedPipeline:
     """处理层：负责在分发前对条目进行可选增强。"""
 
+    GITHUB_MODELS_ENDPOINT = "https://models.github.ai/inference/chat/completions"
     GOOGLE_TRANSLATE_ENDPOINT = "https://translation.googleapis.com/language/translate/v2"
     _TAG_RE = re.compile(r"<[^>]+>")
     _SPACE_RE = re.compile(r"\s+")
@@ -25,24 +28,31 @@ class FeedPipeline:
 
     async def process(self, entry: dict[str, Any]) -> dict[str, Any]:
         """执行分发前处理，失败时始终回退到清洗后的原文。"""
-        if not self._config.llm_enabled and not self._config.google_translate_enabled:
+        if not self._translation_enabled():
             return entry
 
         source = self._extract_source_fields(entry)
         if not source["title"] and not source["summary"]:
             return entry
 
-        translated, selected_engine, llm_reason, google_reason = await self._translate_fields(entry, source)
+        (
+            translated,
+            selected_engine,
+            llm_reason,
+            github_reason,
+            google_reason,
+        ) = await self._translate_fields(entry, source)
         if not translated:
             translated = self._build_fallback_fields(source)
             selected_engine = "fallback"
 
         logger.info(
-            "translation item=%s engine=%s llm=%s google=%s",
+            "translation item=%s engine=%s llm=%s google=%s github=%s",
             self._item_ref(entry),
             selected_engine,
             llm_reason or "-",
             google_reason or "-",
+            github_reason or "-",
         )
 
         enriched = dict(entry)
@@ -82,6 +92,16 @@ class FeedPipeline:
                 "error": "",
                 "preview": "",
             },
+            "github": {
+                "enabled": bool(self._config.github_models_enabled),
+                "timeout_seconds": int(self._config.github_models_timeout_seconds),
+                "model": str(self._config.github_models_model),
+                "token_source": "",
+                "ok": False,
+                "latency_ms": 0,
+                "error": "",
+                "preview": "",
+            },
         }
 
         if not input_text:
@@ -90,6 +110,7 @@ class FeedPipeline:
 
         provider_id = await self._resolve_provider_id(sample)
         report["llm"]["provider_id"] = provider_id
+        report["github"]["token_source"] = self._github_token_source()
 
         llm_fields: dict[str, str] = {}
         if self._config.llm_enabled:
@@ -103,6 +124,7 @@ class FeedPipeline:
                 report["llm"]["error"] = ""
                 report["selected_engine"] = "llm"
                 report["google"]["error"] = "skipped_after_llm_success"
+                report["github"]["error"] = "skipped_after_llm_success"
                 return report
             report["llm"]["error"] = llm_reason
         elif provider_id:
@@ -120,10 +142,26 @@ class FeedPipeline:
                 report["google"]["preview"] = self._compose_preview(google_fields)
                 report["google"]["error"] = ""
                 report["selected_engine"] = "google"
-            else:
-                report["google"]["error"] = google_reason
+                report["github"]["error"] = "skipped_after_google_success"
+                return report
+            report["google"]["error"] = google_reason
         else:
             report["google"]["error"] = "google_disabled"
+
+        if self._config.github_models_enabled:
+            loop = asyncio.get_running_loop()
+            start = loop.time()
+            github_fields, github_reason = await self._try_github_models_translate_fields(source)
+            report["github"]["latency_ms"] = int((loop.time() - start) * 1000)
+            if github_fields:
+                report["github"]["ok"] = True
+                report["github"]["preview"] = self._compose_preview(github_fields)
+                report["github"]["error"] = ""
+                report["selected_engine"] = "github_models"
+            else:
+                report["github"]["error"] = github_reason
+        else:
+            report["github"]["error"] = "github_models_disabled"
 
         return report
 
@@ -131,21 +169,33 @@ class FeedPipeline:
         self,
         entry: dict[str, Any],
         source: dict[str, str],
-    ) -> tuple[dict[str, str], str, str, str]:
+    ) -> tuple[dict[str, str], str, str, str, str]:
         llm_reason = "llm_disabled"
+        github_reason = "github_models_disabled"
         google_reason = "google_disabled"
 
         if self._config.llm_enabled:
             llm_fields, llm_reason = await self._try_llm_translate_fields(entry, source)
             if llm_fields:
-                return llm_fields, "llm", llm_reason, "skipped_after_llm_success"
+                return (
+                    llm_fields,
+                    "llm",
+                    llm_reason,
+                    "skipped_after_llm_success",
+                    "skipped_after_llm_success",
+                )
 
         if self._config.google_translate_enabled:
             google_fields, google_reason = await self._try_google_translate_fields(source)
             if google_fields:
-                return google_fields, "google", llm_reason, google_reason
+                return google_fields, "google", llm_reason, "skipped_after_google_success", google_reason
 
-        return {}, "fallback", llm_reason, google_reason
+        if self._config.github_models_enabled:
+            github_fields, github_reason = await self._try_github_models_translate_fields(source)
+            if github_fields:
+                return github_fields, "github_models", llm_reason, github_reason, google_reason
+
+        return {}, "fallback", llm_reason, github_reason, google_reason
 
     async def _try_llm_translate_fields(
         self,
@@ -194,6 +244,48 @@ class FeedPipeline:
 
         return {"title": title, "summary": summary}, "ok"
 
+    async def _try_github_models_translate_fields(
+        self,
+        source: dict[str, str],
+    ) -> tuple[dict[str, str], str]:
+        token = self._resolve_github_models_token()
+        if not token:
+            logger.warning(
+                "github_models_enabled=true but no GitHub token is available, skip github models"
+            )
+            return {}, "token_missing"
+
+        title = source.get("title", "")
+        summary = source.get("summary", "")
+        if not title or not summary:
+            return {}, "source_empty"
+
+        try:
+            translated = await asyncio.wait_for(
+                asyncio.to_thread(self._github_models_translate_blocking, source, token),
+                timeout=self._config.github_models_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "github models translate timeout after %ss",
+                self._config.github_models_timeout_seconds,
+            )
+            return {}, "timeout"
+        except Exception as exc:
+            logger.warning("github models translate failed: %s", exc)
+            return {}, f"exception:{type(exc).__name__}"
+
+        parsed = self._parse_llm_translation(translated)
+        if not parsed:
+            return {}, "invalid_payload"
+
+        title_cn = self._sanitize_text(str(parsed.get("title", "") or ""))
+        summary_cn = self._sanitize_text(str(parsed.get("summary", "") or ""))
+        if not title_cn or not summary_cn:
+            return {}, "empty_fields"
+
+        return {"title": title_cn, "summary": summary_cn}, "ok"
+
     async def _try_google_translate_fields(self, source: dict[str, str]) -> tuple[dict[str, str], str]:
         api_key = str(self._config.google_translate_api_key or "").strip()
         if not api_key:
@@ -229,6 +321,57 @@ class FeedPipeline:
             return {}, "empty_fields"
 
         return {"title": title_cn, "summary": summary_cn}, "ok"
+
+    def _github_models_translate_blocking(
+        self,
+        source: dict[str, str],
+        token: str,
+    ) -> str:
+        prompt = self._build_prompt(source)
+        body = json.dumps(
+            {
+                "model": self._config.github_models_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+            }
+        ).encode("utf-8")
+
+        req = Request(
+            url=self.GITHUB_MODELS_ENDPOINT,
+            data=body,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
+                "User-Agent": "astrbot_plugin_rss_forwarder/0.3 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+            },
+            method="POST",
+        )
+
+        opener = self._build_github_models_opener()
+        timeout = self._config.github_models_timeout_seconds
+        try:
+            with opener.open(req, timeout=timeout) as resp:  # noqa: S310
+                raw = resp.read().decode("utf-8", errors="ignore")
+        except HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="ignore")
+            except Exception:
+                detail = str(exc)
+            raise RuntimeError(f"github models http error {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"github models network error: {exc}") from exc
+
+        data = json.loads(raw)
+        choices = data.get("choices") or []
+        if not isinstance(choices, list) or not choices:
+            return ""
+
+        message = choices[0].get("message") or {}
+        content = message.get("content", "")
+        return str(content or "").strip()
 
     def _google_translate_batch_blocking(self, texts: list[str]) -> list[str]:
         payload: list[tuple[str, str]] = []
@@ -287,16 +430,33 @@ class FeedPipeline:
         return output
 
     def _build_google_opener(self):
-        mode = str(self._config.google_translate_proxy_mode or "system").strip().lower()
-        proxy_url = str(self._config.google_translate_proxy_url or "").strip()
+        return self._build_proxy_opener(
+            self._config.google_translate_proxy_mode,
+            self._config.google_translate_proxy_url,
+        )
 
-        if mode == "off":
+    def _build_github_models_opener(self):
+        return self._build_proxy_opener(
+            self._config.github_models_proxy_mode,
+            self._config.github_models_proxy_url,
+        )
+
+    @staticmethod
+    def _build_proxy_opener(mode: str, proxy_url: str):
+        normalized_mode = str(mode or "system").strip().lower()
+        normalized_proxy_url = str(proxy_url or "").strip()
+
+        if normalized_mode == "off":
             return build_opener(ProxyHandler({}))
 
-        if mode == "custom":
-            if not proxy_url:
+        if normalized_mode == "custom":
+            if not normalized_proxy_url:
                 return build_opener(ProxyHandler({}))
-            return build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            return build_opener(
+                ProxyHandler(
+                    {"http": normalized_proxy_url, "https": normalized_proxy_url}
+                )
+            )
 
         return build_opener()
 
@@ -309,6 +469,44 @@ class FeedPipeline:
         if mode == "off":
             return {"trust_env": False}
         return {}
+
+    @staticmethod
+    def _astrbot_data_dir() -> Path:
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            return Path(get_astrbot_data_path())
+        except Exception:
+            return Path("data")
+
+    def _resolve_github_models_token_path(self) -> Path:
+        configured = str(self._config.github_models_token_file or "").strip() or "github.token"
+        path = Path(configured)
+        if path.is_absolute():
+            return path
+        return self._astrbot_data_dir() / path
+
+    def _resolve_github_models_token(self) -> str:
+        env_token = str(
+            os.getenv("ASTRBOT_GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or ""
+        ).strip()
+        if env_token:
+            return env_token
+
+        token_path = self._resolve_github_models_token_path()
+        try:
+            return token_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _github_token_source(self) -> str:
+        if str(os.getenv("ASTRBOT_GITHUB_TOKEN") or "").strip():
+            return "env:ASTRBOT_GITHUB_TOKEN"
+        if str(os.getenv("GITHUB_TOKEN") or "").strip():
+            return "env:GITHUB_TOKEN"
+        if str(os.getenv("GH_TOKEN") or "").strip():
+            return "env:GH_TOKEN"
+        return str(self._resolve_github_models_token_path())
 
     async def _resolve_provider_id(self, entry: dict[str, Any]) -> str:
         provider_id = str(self._config.llm_provider_id or "").strip()
@@ -343,6 +541,15 @@ class FeedPipeline:
         if not merged:
             return ""
         return merged[: self._config.max_input_chars]
+
+    def _translation_enabled(self) -> bool:
+        return any(
+            [
+                self._config.llm_enabled,
+                self._config.github_models_enabled,
+                self._config.google_translate_enabled,
+            ]
+        )
 
     @staticmethod
     def _build_fallback_fields(source: dict[str, str]) -> dict[str, str]:

@@ -16,6 +16,18 @@
 
 ## 更新日志
 
+### v0.3.2
+
+- 翻译顺序调整为 `LLM -> Google -> GitHub Models`，其中 GitHub Models 作为第二后备。
+- AstrBot 插件面板中的翻译配置说明已与实际顺序保持一致。
+- 中文、英文、日文 README 补充了三种翻译服务的配置获取方式。
+
+### v0.3.1
+
+- 翻译链路新增 GitHub Models 回退层，顺序为 LLM -> GitHub Models -> Google。
+- 支持从 `data/github.token` 或环境变量读取 GitHub token，用于 GitHub Models 调用。
+- 翻译诊断命令新增 GitHub Models 状态输出，便于确认 token、模型与代理配置。
+
 ### v0.3.0
 
 - 翻译输出改为中文标题 + 中文摘要，不再出现摘要/翻译分段文本。
@@ -39,7 +51,7 @@
 - 支持启动首轮延迟：默认在插件启动后等待 `45` 秒再执行第一次轮询，避免平台适配器尚未就绪时抢跑。
 - 支持去重（KV + TTL）与 feed 状态（ETag/Last-Modified/last_success_time）。
 - 支持管理指令：`/rss list`、`/rss status`、`/rss run [job_id]`、`/rss pause [job_id]`、`/rss resume [job_id]`、`/rss reset`（清空去重记录）。
-- 预留 LLM 处理管线（摘要/翻译增强，失败自动降级）。
+- 支持三级翻译链路：LLM、Google Translate、GitHub Models。
 - 支持 text / image 两种渲染模式（image 使用 `html_render`）。
 
 ## 与 `astrbot_plugin_rss` 的主要区别
@@ -81,11 +93,16 @@
   - `llm_profile`：LLM profile（高级）
   - `max_input_chars`：传给翻译器的最大输入字符数
   - `llm_proxy_mode` / `llm_proxy_url`：LLM 独立代理（尽力，是否生效取决于 Provider）
-  - `google_translate_enabled`：是否启用 Google 翻译
+  - `google_translate_enabled`：是否启用 Google 翻译第一后备
   - `google_translate_api_key`：Google Cloud Translation API Key
   - `google_translate_target_lang`：目标语言（默认 `zh-CN`）
   - `google_translate_timeout_seconds`：Google 超时
   - `google_translate_proxy_mode` / `google_translate_proxy_url`：Google 独立代理
+  - `github_models_enabled`：是否启用 GitHub Models 第二后备
+  - `github_models_model`：GitHub Models 模型 ID
+  - `github_models_timeout_seconds`：GitHub Models 超时
+  - `github_models_token_file`：GitHub token 文件路径，默认按 `data/github.token` 解析
+  - `github_models_proxy_mode` / `github_models_proxy_url`：GitHub Models 独立代理
 - 其他
   - `dedup_ttl_seconds`
   - `startup_delay_seconds`
@@ -97,6 +114,7 @@
 - 去重记录会同时写入 AstrBot KV 与 `data/plugin_data/astrbot_rss/state.json`
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
 - `startup_delay_seconds` 默认为 `45`，用于给平台适配器和主动消息通道预留启动时间
+- `translation` 下的全部字段都可在 AstrBot 插件面板中配置，无需手动修改 JSON 文件
 
 ## 示例配置
 
@@ -141,7 +159,11 @@
     "google_translate_target_lang": "zh-CN",
     "google_translate_timeout_seconds": 15,
     "google_translate_proxy_mode": "system",
-    "google_translate_proxy_url": ""
+    "google_translate_proxy_url": "",
+    "github_models_enabled": true,
+    "github_models_model": "openai/gpt-4o-mini",
+    "github_models_timeout_seconds": 15,
+    "github_models_token_file": "github.token"
   },
   "render_mode": "text"
 }
@@ -168,9 +190,25 @@
 
 - `render_mode = image` 时，依赖 AstrBot 侧提供的 `html_render` 能力。
 - `llm_enabled = true` 时，依赖 AstrBot 已配置可用的大模型提供商。
-- 翻译优先级：LLM -> Google。若仅开启 Google，则直接走 Google。
+- `google_translate_enabled = true` 时，依赖 Google Cloud Translation API Key。
+- `github_models_enabled = true` 时，默认从 `data/github.token` 读取 GitHub token，也可使用 `ASTRBOT_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN`。
+- 翻译顺序：LLM -> Google -> GitHub Models。若仅开启其中一层，则直接使用该层。
 
 若上述 AstrBot 能力未配置，本插件会记录日志并自动降级，不影响基础 RSS 文本推送。
+
+## 翻译服务获取方式
+
+### 1）AstrBot LLM Provider
+
+在 AstrBot 主程序中先配置可用模型提供商，再进入插件面板的 `translation.llm_provider_id` 选择对应提供商。若留空，插件会尝试使用当前会话或默认模型。
+
+### 2）Google Cloud Translation API Key
+
+在 Google Cloud Console 创建项目，启用 `Cloud Translation API` 的 Basic v2，再在 `APIs & Services -> Credentials` 中创建 API Key。创建完成后，将 Key 填入插件面板的 `translation.google_translate_api_key`。
+
+### 3）GitHub Models Token
+
+在 GitHub 账户中创建带有 `models` 权限的 token，推荐放入 AstrBot `data` 目录映射的 `github.token` 文件，也可以通过环境变量 `ASTRBOT_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN` 提供。插件面板中的 `translation.github_models_token_file` 默认值就是 `github.token`。
 
 ## 开发参考
 

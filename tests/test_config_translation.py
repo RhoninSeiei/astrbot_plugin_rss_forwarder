@@ -1,4 +1,16 @@
+import sys
+import types
 import unittest
+
+astrbot_module = types.ModuleType("astrbot")
+astrbot_api_module = types.ModuleType("astrbot.api")
+astrbot_api_module.logger = types.SimpleNamespace(
+    info=lambda *a, **k: None,
+    warning=lambda *a, **k: None,
+    error=lambda *a, **k: None,
+)
+sys.modules.setdefault("astrbot", astrbot_module)
+sys.modules["astrbot.api"] = astrbot_api_module
 
 from config import RSSConfig
 
@@ -52,6 +64,12 @@ class ConfigTranslationTests(unittest.TestCase):
                     "llm_provider_id": "provider-A",
                     "llm_proxy_mode": "custom",
                     "llm_proxy_url": "http://127.0.0.1:7891",
+                    "github_models_enabled": True,
+                    "github_models_model": "openai/gpt-4o-mini",
+                    "github_models_timeout_seconds": 13,
+                    "github_models_token_file": "tokens/github.token",
+                    "github_models_proxy_mode": "custom",
+                    "github_models_proxy_url": "http://127.0.0.1:7892",
                     "google_translate_enabled": True,
                     "google_translate_api_key": "k",
                     "google_translate_target_lang": "ja",
@@ -69,6 +87,12 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(cfg.llm_provider_id, "provider-A")
         self.assertEqual(cfg.llm_proxy_mode, "custom")
         self.assertEqual(cfg.llm_proxy_url, "http://127.0.0.1:7891")
+        self.assertTrue(cfg.github_models_enabled)
+        self.assertEqual(cfg.github_models_model, "openai/gpt-4o-mini")
+        self.assertEqual(cfg.github_models_timeout_seconds, 13)
+        self.assertEqual(cfg.github_models_token_file, "tokens/github.token")
+        self.assertEqual(cfg.github_models_proxy_mode, "custom")
+        self.assertEqual(cfg.github_models_proxy_url, "http://127.0.0.1:7892")
         self.assertTrue(cfg.google_translate_enabled)
         self.assertEqual(cfg.google_translate_api_key, "k")
         self.assertEqual(cfg.google_translate_target_lang, "ja")

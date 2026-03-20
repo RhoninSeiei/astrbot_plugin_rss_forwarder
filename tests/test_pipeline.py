@@ -91,11 +91,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         calls = {"google": 0}
 
-        def google_mock(_texts):
+        async def google_mock(_source):
             calls["google"] += 1
-            return ["谷歌标题", "谷歌摘要"]
+            return {"title": "谷歌标题", "summary": "谷歌摘要"}, "ok"
 
-        pipe._google_translate_batch_blocking = google_mock
+        pipe._try_google_translate_fields = google_mock
 
         out = await pipe.process({"title": "Hello", "summary": "World"})
 
@@ -124,11 +124,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         calls = {"google": 0}
 
-        def google_mock(_texts):
+        async def google_mock(_source):
             calls["google"] += 1
-            return ["谷歌标题", "谷歌摘要"]
+            return {"title": "谷歌标题", "summary": "谷歌摘要"}, "ok"
 
-        pipe._google_translate_batch_blocking = google_mock
+        pipe._try_google_translate_fields = google_mock
 
         out = await pipe.process({"title": "Hello", "summary": "World"})
 
@@ -147,13 +147,92 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             google_translate_api_key="k",
         )
         pipe = FeedPipeline(ctx, cfg)
-        pipe._google_translate_batch_blocking = lambda _texts: ["直连标题", "直连摘要"]
+        async def google_mock(_source):
+            return {"title": "直连标题", "summary": "直连摘要"}, "ok"
+
+        pipe._try_google_translate_fields = google_mock
 
         out = await pipe.process({"title": "Hello", "summary": "World"})
 
         self.assertEqual(out.get("title"), "直连标题")
         self.assertEqual(out.get("summary"), "直连摘要")
         self.assertEqual(ctx.llm_calls, 0)
+
+    async def test_google_should_precede_github_models_when_llm_fails(self):
+        class FailingContext(_DummyContext):
+            async def llm_generate(self, **kwargs):
+                raise RuntimeError("boom")
+
+        ctx = FailingContext()
+        cfg = RSSConfig(
+            feeds=[],
+            targets=[],
+            jobs=[],
+            llm_enabled=True,
+            llm_provider_id="manual-provider",
+            github_models_enabled=True,
+            google_translate_enabled=True,
+            google_translate_api_key="k",
+        )
+        pipe = FeedPipeline(ctx, cfg)
+
+        calls = {"github": 0, "google": 0}
+
+        async def google_mock(_source):
+            calls["google"] += 1
+            return {"title": "谷歌标题", "summary": "谷歌摘要"}, "ok"
+
+        async def github_mock(_source):
+            calls["github"] += 1
+            return {"title": "GitHub标题", "summary": "GitHub摘要"}, "ok"
+
+        pipe._try_google_translate_fields = google_mock
+        pipe._try_github_models_translate_fields = github_mock
+
+        out = await pipe.process({"title": "Hello", "summary": "World"})
+
+        self.assertEqual(out.get("title"), "谷歌标题")
+        self.assertEqual(out.get("summary"), "谷歌摘要")
+        self.assertEqual(calls["google"], 1)
+        self.assertEqual(calls["github"], 0)
+
+    async def test_fallback_to_github_models_when_google_fails(self):
+        class FailingContext(_DummyContext):
+            async def llm_generate(self, **kwargs):
+                raise RuntimeError("boom")
+
+        ctx = FailingContext()
+        cfg = RSSConfig(
+            feeds=[],
+            targets=[],
+            jobs=[],
+            llm_enabled=True,
+            llm_provider_id="manual-provider",
+            github_models_enabled=True,
+            google_translate_enabled=True,
+            google_translate_api_key="k",
+        )
+        pipe = FeedPipeline(ctx, cfg)
+
+        calls = {"github": 0, "google": 0}
+
+        async def fail_google(_source):
+            calls["google"] += 1
+            return {}, "exception:RuntimeError"
+
+        async def github_mock(_source):
+            calls["github"] += 1
+            return {"title": "GitHub标题", "summary": "GitHub摘要"}, "ok"
+
+        pipe._try_google_translate_fields = fail_google
+        pipe._try_github_models_translate_fields = github_mock
+
+        out = await pipe.process({"title": "Hello", "summary": "World"})
+
+        self.assertEqual(out.get("title"), "GitHub标题")
+        self.assertEqual(out.get("summary"), "GitHub摘要")
+        self.assertEqual(calls["google"], 1)
+        self.assertEqual(calls["github"], 1)
 
     async def test_prompt_uses_cleaned_content_without_html_tags(self):
         ctx = _DummyContext()
@@ -199,10 +278,10 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         pipe = FeedPipeline(ctx, cfg)
 
-        def fail_google(_texts):
-            raise RuntimeError("google fail")
+        async def fail_google(_source):
+            return {}, "exception:RuntimeError"
 
-        pipe._google_translate_batch_blocking = fail_google
+        pipe._try_google_translate_fields = fail_google
 
         out = await pipe.process(
             {

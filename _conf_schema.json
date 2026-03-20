@@ -127,8 +127,8 @@
   },
   "translation": {
     "type": "object",
-    "description": "翻译增强（LLM / Google）",
-    "hint": "优先级：LLM -> Google。若仅开启 Google，则直接走 Google 翻译。",
+    "description": "翻译增强（LLM / Google / GitHub Models）",
+    "hint": "顺序：LLM -> Google -> GitHub Models。前一层失败后，将自动尝试下一层。",
     "items": {
       "llm_enabled": {
         "type": "bool",
@@ -146,7 +146,7 @@
         "type": "int",
         "default": 15,
         "description": "LLM 超时（秒）",
-        "hint": "超时后若已开启 Google 翻译，将自动回退到 Google。"
+        "hint": "超时后将继续尝试后续翻译服务。"
       },
       "llm_profile": {
         "type": "string",
@@ -179,14 +179,14 @@
       "google_translate_enabled": {
         "type": "bool",
         "default": false,
-        "description": "启用 Google 翻译回退/直连"
+        "description": "启用 Google 翻译第一后备"
       },
       "google_translate_api_key": {
         "type": "string",
         "default": "",
         "description": "Google Cloud Translation API Key",
         "obvious_hint": true,
-        "hint": "使用 Cloud Translation Basic v2 API Key。"
+        "hint": "在 Google Cloud Console 中启用 Cloud Translation Basic v2 后创建 API Key。"
       },
       "google_translate_target_lang": {
         "type": "string",
@@ -214,6 +214,45 @@
         "type": "string",
         "default": "",
         "description": "Google 翻译自定义代理地址",
+        "hint": "示例：http://127.0.0.1:7890（仅 custom 生效）"
+      },
+      "github_models_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用 GitHub Models 第二后备"
+      },
+      "github_models_model": {
+        "type": "string",
+        "default": "openai/gpt-4o-mini",
+        "description": "GitHub Models 模型 ID",
+        "hint": "示例：openai/gpt-4o-mini"
+      },
+      "github_models_timeout_seconds": {
+        "type": "int",
+        "default": 15,
+        "description": "GitHub Models 超时（秒）"
+      },
+      "github_models_token_file": {
+        "type": "string",
+        "default": "github.token",
+        "description": "GitHub token 文件路径",
+        "hint": "相对路径按 AstrBot data 目录解析，例如 github.token -> data/github.token"
+      },
+      "github_models_proxy_mode": {
+        "type": "string",
+        "default": "system",
+        "options": [
+          "off",
+          "system",
+          "custom"
+        ],
+        "description": "GitHub Models 代理模式",
+        "hint": "off=不走代理，system=使用系统代理，custom=使用下方代理地址"
+      },
+      "github_models_proxy_url": {
+        "type": "string",
+        "default": "",
+        "description": "GitHub Models 自定义代理地址",
         "hint": "示例：http://127.0.0.1:7890（仅 custom 生效）"
       }
     }
