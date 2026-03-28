@@ -197,6 +197,55 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(storage.releases), 1)
         self.assertEqual(len(context.sent), 1)
 
+    async def test_daily_digest_dispatch_uses_target_ids_and_blocks_duplicates(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._build_daily_digest_text_chain = lambda digest: "digest-payload"
+
+        digest = {
+            "id": "digest-1",
+            "title": "芯片日报",
+            "target_ids": ["target-1"],
+            "render_mode": "text",
+            "window_start_text": "2026-03-27 09:00",
+            "window_end_text": "2026-03-28 09:00",
+            "item_count": 2,
+            "content": "1. [TechPowerUp] AMD 推出新 CPU",
+        }
+
+        first = await dispatcher.dispatch_daily_digest(digest)
+        second = await dispatcher.dispatch_daily_digest(digest)
+
+        self.assertEqual(first.success_count, 1)
+        self.assertEqual(second.skipped_duplicate_count, 1)
+        self.assertEqual(len(context.sent), 1)
+
+    async def test_daily_digest_dispatch_supports_image_render_mode(self):
+        context = _FakeContext()
+        async def html_render(_html):
+            return "digest-image"
+
+        context.html_render = html_render
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+
+        digest = {
+            "id": "digest-2",
+            "title": "图卡日报",
+            "target_ids": ["target-1"],
+            "render_mode": "image",
+            "window_start_text": "2026-03-27 09:00",
+            "window_end_text": "2026-03-28 09:00",
+            "item_count": 1,
+            "content": "1. [Feed] Title",
+        }
+
+        result = await dispatcher.dispatch_daily_digest(digest)
+
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(context.sent[0], ("default:GroupMessage:1", "digest-image"))
+
 
 if __name__ == "__main__":
     unittest.main()

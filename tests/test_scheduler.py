@@ -43,6 +43,7 @@ config_module = sys.modules[f"{PACKAGE_NAME}.config"]
 RSSScheduler = _load_module("scheduler").RSSScheduler
 DispatchResult = dispatcher_module.DispatchResult
 RSSConfig = config_module.RSSConfig
+DailyDigestConfig = config_module.DailyDigestConfig
 
 
 class RSSSchedulerTests(unittest.TestCase):
@@ -160,6 +161,7 @@ class SchedulerTaskCleanupTests(unittest.IsolatedAsyncioTestCase):
                 raise
 
         stale_task = asyncio.create_task(stale_loop(), name="rss-job-stale")
+        stale_digest_task = asyncio.create_task(stale_loop(), name="rss-digest-send-stale")
         await asyncio.sleep(0)
 
         config = types.SimpleNamespace(
@@ -180,6 +182,187 @@ class SchedulerTaskCleanupTests(unittest.IsolatedAsyncioTestCase):
         await scheduler.start()
 
         self.assertTrue(stale_task.cancelled() or stale_task.done())
+        self.assertTrue(stale_digest_task.cancelled() or stale_digest_task.done())
+
+
+class SchedulerDailyDigestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collect_digest_feed_once_archives_items(self):
+        class FakeStorage:
+            def __init__(self):
+                self.archived = []
+                self.updated = []
+
+            async def archive_digest_items(self, items):
+                self.archived.extend(items)
+
+            async def update_feed_state(self, *args, **kwargs):
+                self.updated.append((args, kwargs))
+                return {}
+
+        class FakeFetcher:
+            async def fetch_feed_ids(self, feed_ids):
+                return [{"feed_id": feed_ids[0], "body": "<rss/>", "etag": "etag", "last_modified": ""}]
+
+        class FakeParser:
+            def parse(self, raw_items, job=None):
+                return [
+                    {
+                        "feed_id": raw_items[0]["feed_id"],
+                        "guid": "guid-1",
+                        "title": "Title",
+                        "feed_title": "Feed",
+                        "summary": "Summary",
+                        "published_at": "2026-03-28T00:00:00+00:00",
+                    }
+                ]
+
+        scheduler = RSSScheduler(
+            config=types.SimpleNamespace(
+                jobs=[],
+                daily_digests=[],
+                poll_interval_seconds=300,
+                startup_delay_seconds=0,
+                timezone="Asia/Shanghai",
+            ),
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=types.SimpleNamespace(),
+            storage=FakeStorage(),
+            pipeline=None,
+        )
+
+        await scheduler._collect_digest_feed_once("feed-1")
+
+        self.assertEqual(len(scheduler.storage.archived), 1)
+        self.assertEqual(scheduler.storage.archived[0]["guid"], "guid-1")
+
+    async def test_run_daily_digest_once_builds_and_dispatches(self):
+        class FakeStorage:
+            def __init__(self):
+                self.status_updates = []
+
+            async def list_digest_items(self, feed_ids, **kwargs):
+                return [
+                    {
+                        "feed_id": "feed-1",
+                        "feed_title": "Feed",
+                        "title": "Title",
+                        "summary": "Summary",
+                        "link": "https://example.com/post/1",
+                        "published_at": "2026-03-28T00:00:00+00:00",
+                    }
+                ]
+
+            async def update_daily_digest_status(self, digest_id, **fields):
+                self.status_updates.append((digest_id, fields))
+                return fields
+
+            async def get_daily_digest_status(self, digest_id):
+                return {}
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.digests = []
+
+            async def dispatch_daily_digest(self, digest):
+                self.digests.append(digest)
+                return DispatchResult(success_count=1)
+
+        class FakePipeline:
+            async def build_daily_digest_content(self, digest, items, unified_msg_origin=""):
+                self.last_digest = digest
+                self.last_items = items
+                self.last_origin = unified_msg_origin
+                return {"content": "1. [Feed] Title", "engine": "llm", "llm_reason": "ok"}
+
+        digest = DailyDigestConfig(
+            id="digest-1",
+            title="芯片日报",
+            feed_ids=["feed-1"],
+            target_ids=["target-1"],
+            enabled=True,
+        )
+        scheduler = RSSScheduler(
+            config=types.SimpleNamespace(
+                jobs=[],
+                daily_digests=[digest],
+                poll_interval_seconds=300,
+                startup_delay_seconds=0,
+                timezone="Asia/Shanghai",
+                targets=[
+                    types.SimpleNamespace(
+                        id="target-1",
+                        enabled=True,
+                        unified_msg_origin="qq:group:1",
+                    )
+                ],
+            ),
+            fetcher=types.SimpleNamespace(),
+            parser=types.SimpleNamespace(),
+            dispatcher=FakeDispatcher(),
+            storage=FakeStorage(),
+            pipeline=FakePipeline(),
+        )
+
+        await scheduler.run_daily_digest_once("digest-1")
+
+        self.assertEqual(len(scheduler._dispatcher.digests), 1)
+        self.assertEqual(scheduler._dispatcher.digests[0]["title"], "芯片日报")
+        self.assertEqual(scheduler._dispatcher.digests[0]["item_count"], 1)
+
+    async def test_run_daily_digest_once_skips_empty_window(self):
+        class FakeStorage:
+            def __init__(self):
+                self.status_updates = []
+
+            async def list_digest_items(self, feed_ids, **kwargs):
+                return []
+
+            async def update_daily_digest_status(self, digest_id, **fields):
+                self.status_updates.append((digest_id, fields))
+                return fields
+
+            async def get_daily_digest_status(self, digest_id):
+                return {}
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.calls = 0
+
+            async def dispatch_daily_digest(self, digest):
+                self.calls += 1
+                return DispatchResult(success_count=1)
+
+        digest = DailyDigestConfig(
+            id="digest-empty",
+            title="空日报",
+            feed_ids=["feed-1"],
+            target_ids=["target-1"],
+            enabled=True,
+        )
+        storage = FakeStorage()
+        dispatcher = FakeDispatcher()
+        scheduler = RSSScheduler(
+            config=types.SimpleNamespace(
+                jobs=[],
+                daily_digests=[digest],
+                poll_interval_seconds=300,
+                startup_delay_seconds=0,
+                timezone="Asia/Shanghai",
+                targets=[],
+            ),
+            fetcher=types.SimpleNamespace(),
+            parser=types.SimpleNamespace(),
+            dispatcher=dispatcher,
+            storage=storage,
+            pipeline=None,
+        )
+
+        await scheduler.run_daily_digest_once("digest-empty")
+
+        self.assertEqual(dispatcher.calls, 0)
+        self.assertEqual(len(storage.status_updates), 1)
+        self.assertEqual(storage.status_updates[0][1]["last_skipped_reason"], "empty_window")
 
 
 class SchedulerBatchDedupTests(unittest.IsolatedAsyncioTestCase):

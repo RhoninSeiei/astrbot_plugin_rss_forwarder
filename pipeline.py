@@ -11,7 +11,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from astrbot.api import logger
 
-from .config import RSSConfig
+from .config import DEFAULT_DAILY_DIGEST_PROMPT, RSSConfig
 
 
 class FeedPipeline:
@@ -168,6 +168,45 @@ class FeedPipeline:
 
         return report
 
+    async def build_daily_digest_content(
+        self,
+        digest: dict[str, Any],
+        items: list[dict[str, Any]],
+        *,
+        unified_msg_origin: str = "",
+    ) -> dict[str, str]:
+        prepared_items = self._prepare_digest_items(
+            items,
+            limit=int(digest.get("max_items", 20) or 20),
+        )
+        if not prepared_items:
+            return {
+                "content": "",
+                "engine": "empty",
+                "llm_reason": "empty_items",
+            }
+
+        digest_entry = {"unified_msg_origin": str(unified_msg_origin or "").strip()}
+        llm_reason = "llm_disabled"
+        if self._config.llm_enabled:
+            content, llm_reason = await self._try_llm_daily_digest_content(
+                digest_entry,
+                digest,
+                prepared_items,
+            )
+            if content:
+                return {
+                    "content": content,
+                    "engine": "llm",
+                    "llm_reason": llm_reason,
+                }
+
+        return {
+            "content": self._build_daily_digest_fallback_text(prepared_items),
+            "engine": "fallback",
+            "llm_reason": llm_reason,
+        }
+
     async def _translate_fields(
         self,
         entry: dict[str, Any],
@@ -199,6 +238,39 @@ class FeedPipeline:
                 return github_fields, "github_models", llm_reason, github_reason, google_reason
 
         return {}, "fallback", llm_reason, github_reason, google_reason
+
+    async def _try_llm_daily_digest_content(
+        self,
+        entry: dict[str, Any],
+        digest: dict[str, Any],
+        items: list[dict[str, str]],
+    ) -> tuple[str, str]:
+        provider_id = await self._resolve_provider_id(entry)
+        if not provider_id:
+            return "", "provider_missing"
+
+        prompt = self._build_daily_digest_prompt(digest, items)
+        llm_kwargs: dict[str, Any] = {
+            "chat_provider_id": provider_id,
+            "prompt": prompt,
+        }
+        profile = str(self._config.llm_profile or "").strip()
+        if profile:
+            llm_kwargs["profile"] = profile
+        llm_kwargs.update(self._build_llm_proxy_kwargs())
+
+        llm_call = self.context.llm_generate(**llm_kwargs)
+        try:
+            result = await asyncio.wait_for(llm_call, timeout=self._config.llm_timeout_seconds)
+        except asyncio.TimeoutError:
+            return "", "timeout"
+        except Exception as exc:
+            return "", f"exception:{type(exc).__name__}"
+
+        generated_text = self._sanitize_daily_digest_text(self._extract_generated_text(result))
+        if not generated_text:
+            return "", "invalid_payload"
+        return generated_text, "ok"
 
     async def _try_llm_translate_fields(
         self,
@@ -472,6 +544,64 @@ class FeedPipeline:
         if mode == "off":
             return {"trust_env": False}
         return {}
+
+    def _build_daily_digest_prompt(
+        self,
+        digest: dict[str, Any],
+        items: list[dict[str, str]],
+    ) -> str:
+        template = (
+            str(digest.get("prompt_template", DEFAULT_DAILY_DIGEST_PROMPT)).strip()
+            or DEFAULT_DAILY_DIGEST_PROMPT
+        )
+        payload = json.dumps(items, ensure_ascii=False, indent=2)
+        values = {
+            "title": str(digest.get("title", "")).strip() or "RSS 日报",
+            "window_start": str(digest.get("window_start_text", "")).strip(),
+            "window_end": str(digest.get("window_end_text", "")).strip(),
+            "max_items": int(digest.get("max_items", len(items)) or len(items)),
+            "items": payload,
+        }
+        try:
+            return template.format(**values)
+        except Exception:
+            return DEFAULT_DAILY_DIGEST_PROMPT.format(**values)
+
+    def _prepare_digest_items(self, items: list[dict[str, Any]], limit: int) -> list[dict[str, str]]:
+        prepared: list[dict[str, str]] = []
+        for item in items[: max(limit, 1)]:
+            title = self._sanitize_text(str(item.get("title", "") or ""))
+            source = self._sanitize_text(
+                str(item.get("feed_title", "") or item.get("source", "") or "")
+            )
+            summary = self._sanitize_text(str(item.get("summary", "") or item.get("content", "") or ""))
+            if len(summary) > 200:
+                summary = summary[:199].rstrip() + "…"
+            prepared.append(
+                {
+                    "source": source or "未知来源",
+                    "title": title or "(无标题)",
+                    "summary": summary,
+                    "link": str(item.get("link", "") or "").strip(),
+                    "published_at": str(item.get("published_at", "") or "").strip(),
+                }
+            )
+        return prepared
+
+    @staticmethod
+    def _build_daily_digest_fallback_text(items: list[dict[str, str]]) -> str:
+        lines = []
+        for index, item in enumerate(items, start=1):
+            source = str(item.get("source", "") or "").strip() or "未知来源"
+            title = str(item.get("title", "") or "").strip() or "(无标题)"
+            lines.append(f"{index}. [{source}] {title}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _sanitize_daily_digest_text(cls, text: str) -> str:
+        stripped = cls._strip_code_fence(text)
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        return "\n".join(lines)
 
     @staticmethod
     def _astrbot_data_dir() -> Path:

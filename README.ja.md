@@ -18,11 +18,13 @@
 - 複数フィード対応（フィード単位で有効/無効）。
 - 認証モード：`none` / `query` / `header`。
 - ジョブ単位の配信ルーティング（複数 feed + 複数 target）。
+- `daily_digests[]` による独立した日報タスク。
 - 定期実行：`interval_seconds` 実装済み、`cron` は将来拡張用（現状は interval フォールバック）。
 - 起動直後の初回遅延：プラグイン起動後、既定で `45` 秒待ってから最初のポーリングを行います。
 - 重複排除・ETag/Last-Modified 永続化。
-- 管理コマンド：`/rss list` / `/rss status` / `/rss run` / `/rss pause` / `/rss resume`。
+- 管理コマンド：`/rss list` / `/rss status` / `/rss run` / `/rss pause` / `/rss resume` / `/rss digest run [digest_id]`。
 - 3 段階の翻訳チェーン：`LLM -> Google Translate -> GitHub Models`。
+- 日報は `text` と `image` の両方に対応し、GUI からプロンプトを調整できます。
 
 ## `astrbot_plugin_rss` との主な違い
 
@@ -39,6 +41,7 @@
 - `feeds[]`
 - `targets[]`
 - `jobs[]`
+- `daily_digests[]`
 - `translation.llm_*`
 - `translation.google_translate_*`
 - `translation.github_models_*`
@@ -97,6 +100,20 @@
 - `last_success_time` より古い記事は再送せず、既読扱いのみ行います
 - `startup_delay_seconds` の既定値は `45` 秒です
 - `translation.*` 配下の項目はすべて AstrBot のプラグイン管理画面から設定できます
+- `daily_digests[]` は即時配信ジョブと独立して動作し、即時配信を有効にしていない feed でも日報対象にできます
+
+主な日報項目:
+
+- `id`
+- `title`
+- `feed_ids`
+- `target_ids`
+- `send_time`
+- `window_hours`
+- `max_items`
+- `render_mode`
+- `prompt_template`
+- `enabled`
 
 ## 翻訳サービスの取得方法
 
@@ -115,3 +132,7 @@ Google Cloud Console でプロジェクトを作成し、`Cloud Translation API`
 ## ロードマップ
 
 [ROADMAP.md](./ROADMAP.md) を参照してください。
+
+## 日報機能メモ
+
+`daily_digests[]` は、毎日の業界要約やテーマ別サマリーに向いた機能です。既定の `prompt_template` をそのまま使えますが、管理画面から要約スタイルを調整することもできます。

@@ -80,6 +80,14 @@ class FeedDispatcher:
                 origins.update(origin_list)
         return sorted(origins)
 
+    def _resolve_target_origins(self, target_ids: list[str]) -> list[str]:
+        origins = {
+            self._target_map[target_id].unified_msg_origin
+            for target_id in target_ids
+            if target_id in self._target_map
+        }
+        return sorted(origin for origin in origins if origin)
+
     def _format_time(self, item: dict[str, Any]) -> str:
         raw_time = (
             item.get("published")
@@ -171,6 +179,21 @@ class FeedDispatcher:
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
+    async def _build_daily_digest_fingerprint(self, digest: dict[str, Any], origin: str) -> str:
+        content = self._normalize_text(digest.get("content", ""))
+        payload = {
+            "origin": str(origin or "").strip(),
+            "digest_id": self._normalize_text(digest.get("id", "")),
+            "title": self._normalize_text(digest.get("title", "")),
+            "window_start": self._normalize_text(digest.get("window_start_text", "")),
+            "window_end": self._normalize_text(digest.get("window_end_text", "")),
+            "item_count": int(digest.get("item_count", 0) or 0),
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest() if content else "",
+            "render_mode": str(digest.get("render_mode", "text") or "text").strip(),
+        }
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     async def _hash_image_bytes(self, image_url: str) -> str:
         normalized = self._normalize_url(image_url)
         if not normalized:
@@ -184,7 +207,7 @@ class FeedDispatcher:
     def _hash_image_bytes_sync(self, image_url: str) -> str:
         request = Request(
             image_url,
-            headers={"User-Agent": "AstrBotRSSForwarder/0.3.5"},
+            headers={"User-Agent": "AstrBotRSSForwarder/0.4.0"},
         )
         digest = hashlib.sha256()
         total = 0
@@ -384,6 +407,57 @@ class FeedDispatcher:
             # 文本链路已包含 image_url，避免后续重复追加原图。
             return self._as_chain_result_if_possible(item, chain), True
 
+    def _build_daily_digest_text_chain(self, digest: dict[str, Any]):
+        title = str(digest.get("title", "")).strip() or "RSS 日报"
+        window_start = str(digest.get("window_start_text", "")).strip()
+        window_end = str(digest.get("window_end_text", "")).strip()
+        item_count = int(digest.get("item_count", 0) or 0)
+        content = str(digest.get("content", "")).strip()
+        links = list(digest.get("links", []) or [])
+
+        lines = [title]
+        if window_start and window_end:
+            lines.append(f"统计区间：{window_start} - {window_end}")
+        lines.append(f"条目数：{item_count}")
+        if content:
+            lines.extend(["", content])
+        if links:
+            lines.append("")
+            lines.append("链接：")
+            for index, item in enumerate(links, start=1):
+                link = str((item or {}).get("link", "")).strip()
+                if not link:
+                    continue
+                source = str((item or {}).get("source", "")).strip()
+                label = f"{index}. [{source}] {link}" if source else f"{index}. {link}"
+                lines.append(label)
+        return self._create_message_chain(lines)
+
+    def _build_daily_digest_card_html(self, digest: dict[str, Any]) -> str:
+        title = escape(str(digest.get("title", "")).strip() or "RSS 日报")
+        window_start = escape(str(digest.get("window_start_text", "")).strip())
+        window_end = escape(str(digest.get("window_end_text", "")).strip())
+        item_count = int(digest.get("item_count", 0) or 0)
+        content = escape(str(digest.get("content", "")).strip()).replace("\n", "<br/>")
+        window_text = f"{window_start} - {window_end}" if window_start and window_end else ""
+
+        return (
+            "<html><head><meta charset='utf-8' /><style>"
+            "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef3f9;padding:18px;}"
+            ".card{background:#fff;border-radius:14px;padding:18px;box-shadow:0 2px 16px rgba(30,55,90,.12);max-width:760px;}"
+            ".title{font-size:24px;font-weight:700;line-height:1.4;margin-bottom:8px;color:#111827;}"
+            ".meta{color:#6b7280;font-size:13px;margin-bottom:16px;}"
+            ".content{color:#1f2937;font-size:15px;line-height:1.8;white-space:pre-wrap;}"
+            "</style></head><body>"
+            f"<div class='card'><div class='title'>{title}</div>"
+            f"<div class='meta'>统计区间：{window_text} · 条目数：{item_count}</div>"
+            f"<div class='content'>{content}</div></div></body></html>"
+        )
+
+    async def _build_daily_digest_image_payload(self, digest: dict[str, Any]):
+        html = self._build_daily_digest_card_html(digest)
+        return await self.html_render(html)
+
     def _build_image_only_chain(self, image_url: str):
         MessageChain = self._resolve_messagechain_cls()
         Image = self._resolve_image_cls()
@@ -490,6 +564,61 @@ class FeedDispatcher:
                     unified_msg_origin,
                     exc,
                 )
+        return result
+
+    async def dispatch_daily_digest(self, digest: dict[str, Any]) -> DispatchResult:
+        target_ids = list(digest.get("target_ids", []) or [])
+        origins = self._resolve_target_origins(target_ids)
+        if not origins:
+            logger.warning("skip daily digest dispatch: no available targets for digest=%s", digest)
+            return DispatchResult()
+
+        render_mode = str(digest.get("render_mode", "text") or "text").strip().lower()
+        try:
+            if render_mode == "image":
+                payload = self._as_image_result_if_possible(
+                    digest,
+                    await self._build_daily_digest_image_payload(digest),
+                )
+            else:
+                chain = self._build_daily_digest_text_chain(digest)
+                payload = self._as_chain_result_if_possible(digest, chain)
+        except Exception as exc:
+            logger.error("build daily digest payload failed id=%s: %s", digest.get("id", ""), exc)
+            return DispatchResult(transient_failure_count=1)
+
+        result = DispatchResult()
+        for unified_msg_origin in origins:
+            if unified_msg_origin in self._disabled_origins:
+                result.skipped_disabled_count += 1
+                continue
+            fingerprint = await self._build_daily_digest_fingerprint(digest, unified_msg_origin)
+            if not await self._claim_dispatch(fingerprint):
+                result.skipped_duplicate_count += 1
+                logger.warning(
+                    "skip duplicate daily digest origin=%s digest=%s fingerprint=%s",
+                    unified_msg_origin,
+                    str(digest.get("id", "")).strip(),
+                    fingerprint[:12],
+                )
+                continue
+            try:
+                await self.context.send_message(unified_msg_origin, payload)
+                result.success_count += 1
+                await self._confirm_dispatch(fingerprint)
+            except Exception as exc:
+                await self._release_dispatch(fingerprint)
+                if self._is_permanent_target_error(exc):
+                    self._disabled_origins.add(unified_msg_origin)
+                    result.permanent_failure_count += 1
+                    logger.error(
+                        "日报发送失败 origin=%s: %s。已将该 target 标记为无效，本次运行内不再重试。",
+                        unified_msg_origin,
+                        exc or "unknown error",
+                    )
+                    continue
+                result.transient_failure_count += 1
+                logger.error("日报发送失败 origin=%s: %s", unified_msg_origin, exc)
         return result
 
     @staticmethod

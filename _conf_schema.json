@@ -125,6 +125,75 @@
       }
     }
   },
+  "daily_digests": {
+    "type": "template_list",
+    "description": "日报任务配置",
+    "templates": {
+      "daily_digest": {
+        "name": "日报任务",
+        "hint": "独立于即时推送的聚合日报，可复用现有 feed 与 target",
+        "items": {
+          "id": {
+            "type": "string",
+            "default": "",
+            "description": "日报任务唯一 ID"
+          },
+          "title": {
+            "type": "string",
+            "default": "",
+            "description": "日报标题",
+            "hint": "留空时将使用日报任务 ID。"
+          },
+          "feed_ids": {
+            "type": "list",
+            "default": [],
+            "description": "参与汇总的 feed ID 列表"
+          },
+          "target_ids": {
+            "type": "list",
+            "default": [],
+            "description": "发送日报的 target ID 列表"
+          },
+          "send_time": {
+            "type": "string",
+            "default": "09:00",
+            "description": "每日发送时间",
+            "hint": "格式为 HH:MM，按 AstrBot 当前时区解释。"
+          },
+          "window_hours": {
+            "type": "int",
+            "default": 24,
+            "description": "滚动统计时长（小时）"
+          },
+          "max_items": {
+            "type": "int",
+            "default": 20,
+            "description": "日报最大条目数"
+          },
+          "render_mode": {
+            "type": "string",
+            "default": "text",
+            "options": [
+              "text",
+              "image"
+            ],
+            "description": "日报渲染模式：text(文本列表) / image(图卡)"
+          },
+          "prompt_template": {
+            "type": "string",
+            "default": "请根据以下 RSS 条目生成一份简体中文日报，严格输出纯文本编号列表。\n要求：\n1) 只输出编号列表，不要导语、总结、分类标题或 Markdown 代码块；\n2) 最多输出 {max_items} 条；\n3) 每条一句话，优先保留来源信息；\n4) 如果多条内容高度相近，可合并为一条更准确的概述。\n\n统计窗口：{window_start} 至 {window_end}\n条目：\n{items}",
+            "description": "日报提示词模板",
+            "hint": "可用变量：title/window_start/window_end/max_items/items。仅在存在可用 LLM 时生效。"
+          },
+          "enabled": {
+            "type": "bool",
+            "default": false,
+            "description": "是否启用该日报任务"
+          }
+        }
+      }
+    }
+  },
   "translation": {
     "type": "object",
     "description": "翻译增强（LLM / Google / GitHub Models）",

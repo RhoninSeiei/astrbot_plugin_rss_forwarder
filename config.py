@@ -8,6 +8,18 @@ class ConfigValidationError(ValueError):
     """配置校验失败。"""
 
 
+DEFAULT_DAILY_DIGEST_PROMPT = (
+    "请根据以下 RSS 条目生成一份简体中文日报，严格输出纯文本编号列表。\n"
+    "要求：\n"
+    "1) 只输出编号列表，不要导语、总结、分类标题或 Markdown 代码块；\n"
+    "2) 最多输出 {max_items} 条；\n"
+    "3) 每条一句话，优先保留来源信息；\n"
+    "4) 如果多条内容高度相近，可合并为一条更准确的概述。\n\n"
+    "统计窗口：{window_start} 至 {window_end}\n"
+    "条目：\n{items}"
+)
+
+
 @dataclass(slots=True)
 class FeedConfig:
     id: str
@@ -38,6 +50,20 @@ class JobConfig:
 
 
 @dataclass(slots=True)
+class DailyDigestConfig:
+    id: str
+    title: str
+    feed_ids: list[str]
+    target_ids: list[str]
+    send_time: str = "09:00"
+    window_hours: int = 24
+    max_items: int = 20
+    render_mode: str = "text"
+    prompt_template: str = DEFAULT_DAILY_DIGEST_PROMPT
+    enabled: bool = False
+
+
+@dataclass(slots=True)
 class RenderCardTemplateConfig:
     title: str = "{title}"
     source: str = "{source}"
@@ -53,6 +79,8 @@ class RSSConfig:
     feeds: list[FeedConfig]
     targets: list[TargetConfig]
     jobs: list[JobConfig]
+    daily_digests: list[DailyDigestConfig] = field(default_factory=list)
+    timezone: str = "Asia/Shanghai"
 
     # 翻译增强
     llm_enabled: bool = False
@@ -109,6 +137,7 @@ class RSSConfig:
         feeds_raw = cls._normalize_collection(runtime_conf.get("feeds", []))
         targets_raw = cls._normalize_collection(runtime_conf.get("targets", []))
         jobs_raw = cls._normalize_collection(runtime_conf.get("jobs", []))
+        daily_digests_raw = cls._normalize_collection(runtime_conf.get("daily_digests", []))
 
         feeds = [
             FeedConfig(
@@ -142,8 +171,28 @@ class RSSConfig:
             )
             for item in jobs_raw
         ]
+        daily_digests = [
+            DailyDigestConfig(
+                id=str(item.get("id", "")).strip(),
+                title=(
+                    str(item.get("title", "")).strip() or str(item.get("id", "")).strip()
+                ),
+                feed_ids=cls._normalize_id_list(item.get("feed_ids", [])),
+                target_ids=cls._normalize_id_list(item.get("target_ids", [])),
+                send_time=str(item.get("send_time", "09:00")).strip() or "09:00",
+                window_hours=int(item.get("window_hours", 24) or 24),
+                max_items=int(item.get("max_items", 20) or 20),
+                render_mode=str(item.get("render_mode", "text")).strip() or "text",
+                prompt_template=str(
+                    item.get("prompt_template", DEFAULT_DAILY_DIGEST_PROMPT)
+                ).strip()
+                or DEFAULT_DAILY_DIGEST_PROMPT,
+                enabled=bool(item.get("enabled", False)),
+            )
+            for item in daily_digests_raw
+        ]
 
-        jobs = cls._build_implicit_job_if_needed(feeds, targets, jobs)
+        jobs = cls._build_implicit_job_if_needed(feeds, targets, jobs, daily_digests)
 
         def conf_value(key: str, default, legacy_keys: list[str] | None = None):
             translation_conf = runtime_conf.get("translation", {})
@@ -164,6 +213,8 @@ class RSSConfig:
             feeds=feeds,
             targets=targets,
             jobs=jobs,
+            daily_digests=daily_digests,
+            timezone=str(runtime_conf.get("timezone", "Asia/Shanghai")).strip() or "Asia/Shanghai",
             llm_enabled=bool(conf_value("llm_enabled", False)),
             llm_provider_id=str(conf_value("llm_provider_id", "")).strip(),
             llm_profile=str(conf_value("llm_profile", "rss_enrich")).strip() or "rss_enrich",
@@ -278,9 +329,12 @@ class RSSConfig:
         feeds: list[FeedConfig],
         targets: list[TargetConfig],
         jobs: list[JobConfig],
+        daily_digests: list[DailyDigestConfig],
     ) -> list[JobConfig]:
         """当仅配置了 feeds/targets 而未配置 jobs 时，自动生成一个默认任务。"""
         if jobs:
+            return jobs
+        if daily_digests:
             return jobs
 
         enabled_feeds = [feed.id for feed in feeds if feed.enabled and feed.id]
@@ -303,6 +357,7 @@ class RSSConfig:
         self._validate_unique_ids("feed", [feed.id for feed in self.feeds])
         self._validate_unique_ids("target", [target.id for target in self.targets])
         self._validate_unique_ids("job", [job.id for job in self.jobs])
+        self._validate_unique_ids("daily_digest", [digest.id for digest in self.daily_digests])
 
         feed_ids = {feed.id for feed in self.feeds}
         target_ids = {target.id for target in self.targets}
@@ -353,6 +408,8 @@ class RSSConfig:
             raise ConfigValidationError("summary_max_chars 必须 > 0")
         if self.llm_enabled and not self.llm_profile:
             raise ConfigValidationError("llm_enabled=true 时 llm_profile 不能为空")
+        if not self.timezone:
+            raise ConfigValidationError("timezone 不能为空")
 
         if self.github_models_enabled and not self.github_models_model:
             raise ConfigValidationError("github_models_enabled=true 时 github_models_model 不能为空")
@@ -402,6 +459,40 @@ class RSSConfig:
                     f"jobs[{job.id}] 引用了不存在的 target_ids: {missing_targets}"
                 )
 
+        for digest in self.daily_digests:
+            if not digest.id:
+                raise ConfigValidationError("daily_digests.id 不能为空")
+            if not digest.title:
+                raise ConfigValidationError(f"daily_digests[{digest.id}].title 不能为空")
+            if not digest.feed_ids:
+                raise ConfigValidationError(f"daily_digests[{digest.id}].feed_ids 不能为空")
+            if not digest.target_ids:
+                raise ConfigValidationError(f"daily_digests[{digest.id}].target_ids 不能为空")
+            self._validate_send_time(digest.send_time, f"daily_digests[{digest.id}].send_time")
+            if digest.window_hours <= 0:
+                raise ConfigValidationError(f"daily_digests[{digest.id}].window_hours 必须 > 0")
+            if digest.max_items <= 0:
+                raise ConfigValidationError(f"daily_digests[{digest.id}].max_items 必须 > 0")
+            if digest.render_mode not in {"text", "image"}:
+                raise ConfigValidationError(
+                    f"daily_digests[{digest.id}].render_mode 必须是 text 或 image"
+                )
+            if not digest.prompt_template:
+                raise ConfigValidationError(
+                    f"daily_digests[{digest.id}].prompt_template 不能为空"
+                )
+
+            missing_feeds = [fid for fid in digest.feed_ids if fid not in feed_ids]
+            if missing_feeds:
+                raise ConfigValidationError(
+                    f"daily_digests[{digest.id}] 引用了不存在的 feed_ids: {missing_feeds}"
+                )
+            missing_targets = [tid for tid in digest.target_ids if tid not in target_ids]
+            if missing_targets:
+                raise ConfigValidationError(
+                    f"daily_digests[{digest.id}] 引用了不存在的 target_ids: {missing_targets}"
+                )
+
     @staticmethod
     def _validate_unique_ids(kind: str, ids: list[str]) -> None:
         seen: set[str] = set()
@@ -421,3 +512,14 @@ class RSSConfig:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ConfigValidationError(f"{field_name} 不是合法 URL: {url}")
+
+    @staticmethod
+    def _validate_send_time(value: str, field_name: str) -> None:
+        text = str(value or "").strip()
+        parts = text.split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            raise ConfigValidationError(f"{field_name} 必须是 HH:MM 格式")
+        hour = int(parts[0])
+        minute = int(parts[1])
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ConfigValidationError(f"{field_name} 必须是合法的 HH:MM 时间")

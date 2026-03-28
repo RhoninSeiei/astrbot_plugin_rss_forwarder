@@ -12,7 +12,7 @@ astrbot_api_module.logger = types.SimpleNamespace(
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules["astrbot.api"] = astrbot_api_module
 
-from config import RSSConfig
+from config import ConfigValidationError, RSSConfig
 
 
 def _minimal_runtime_conf():
@@ -99,6 +99,58 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(cfg.google_translate_timeout_seconds, 11)
         self.assertEqual(cfg.google_translate_proxy_mode, "custom")
         self.assertEqual(cfg.google_translate_proxy_url, "http://127.0.0.1:7890")
+
+    def test_daily_digest_parses_and_preserves_no_implicit_job(self):
+        conf = {
+            "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+            "targets": [
+                {
+                    "id": "target-1",
+                    "platform": "qq",
+                    "unified_msg_origin": "qq:group:1",
+                    "enabled": True,
+                }
+            ],
+            "jobs": [],
+            "daily_digests": [
+                {
+                    "id": "digest-1",
+                    "feed_ids": ["feed-1"],
+                    "target_ids": ["target-1"],
+                    "send_time": "09:00",
+                    "window_hours": 24,
+                    "max_items": 20,
+                    "render_mode": "image",
+                    "enabled": True,
+                }
+            ],
+        }
+
+        cfg = RSSConfig.from_context(conf)
+
+        self.assertEqual(len(cfg.jobs), 0)
+        self.assertEqual(len(cfg.daily_digests), 1)
+        digest = cfg.daily_digests[0]
+        self.assertEqual(digest.id, "digest-1")
+        self.assertEqual(digest.title, "digest-1")
+        self.assertEqual(digest.render_mode, "image")
+        self.assertEqual(digest.send_time, "09:00")
+        self.assertTrue(digest.enabled)
+
+    def test_daily_digest_invalid_send_time_raises(self):
+        conf = _minimal_runtime_conf()
+        conf["daily_digests"] = [
+            {
+                "id": "digest-1",
+                "feed_ids": ["feed-1"],
+                "target_ids": ["target-1"],
+                "send_time": "25:61",
+                "enabled": True,
+            }
+        ]
+
+        with self.assertRaises(ConfigValidationError):
+            RSSConfig.from_context(conf)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from .storage import FeedStorage
     "astrbot_rss",
     "AstrBot RSS Forwarder",
     "面向 AstrBot 的 RSS/RSSHub 推送编排插件",
-    "0.3.6",
+    "0.4.0",
 )
 class RSSPlugin(Star, RSSCommands):
     def __init__(self, context: Context, config=None):
@@ -23,6 +23,14 @@ class RSSPlugin(Star, RSSCommands):
 
         runtime_source = config if config is not None else context
         config = RSSConfig.from_context(runtime_source)
+        if hasattr(context, "get_config"):
+            try:
+                global_config = context.get_config() or {}
+                timezone_name = str(global_config.get("timezone", "") or "").strip()
+                if timezone_name:
+                    config.timezone = timezone_name
+            except Exception:
+                pass
         parser = FeedParser()
         storage = FeedStorage(
             plugin_name="astrbot_rss",

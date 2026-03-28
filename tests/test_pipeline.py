@@ -259,6 +259,81 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<a href", prompt)
         self.assertNotIn("&quot;", prompt)
 
+    async def test_build_daily_digest_content_uses_llm_prompt(self):
+        ctx = _DummyContext()
+
+        async def digest_llm_generate(**kwargs):
+            ctx.last_llm_kwargs = kwargs
+            return types.SimpleNamespace(completion_text="1. [TechPowerUp] AMD 推出新 CPU")
+
+        ctx.llm_generate = digest_llm_generate
+        cfg = RSSConfig(
+            feeds=[],
+            targets=[],
+            jobs=[],
+            llm_enabled=True,
+            llm_provider_id="manual-provider",
+            llm_timeout_seconds=5,
+        )
+        pipe = FeedPipeline(ctx, cfg)
+
+        result = await pipe.build_daily_digest_content(
+            {
+                "title": "芯片日报",
+                "prompt_template": "标题：{title}\n窗口：{window_start}-{window_end}\n最多：{max_items}\n条目：\n{items}",
+                "window_start_text": "2026-03-27 09:00",
+                "window_end_text": "2026-03-28 09:00",
+                "max_items": 5,
+            },
+            [
+                {
+                    "feed_title": "TechPowerUp",
+                    "title": "AMD launches CPU",
+                    "summary": "Summary",
+                    "link": "https://example.com/1",
+                    "published_at": "2026-03-28T00:00:00+00:00",
+                }
+            ],
+            unified_msg_origin="qq:group:1",
+        )
+
+        self.assertEqual(result["engine"], "llm")
+        self.assertIn("AMD 推出新 CPU", result["content"])
+        self.assertIn("芯片日报", str(ctx.last_llm_kwargs.get("prompt", "")))
+        self.assertIn("2026-03-27 09:00", str(ctx.last_llm_kwargs.get("prompt", "")))
+
+    async def test_build_daily_digest_content_falls_back_to_numbered_titles(self):
+        ctx = _DummyContext()
+        cfg = RSSConfig(
+            feeds=[],
+            targets=[],
+            jobs=[],
+            llm_enabled=False,
+        )
+        pipe = FeedPipeline(ctx, cfg)
+
+        result = await pipe.build_daily_digest_content(
+            {
+                "title": "芯片日报",
+                "window_start_text": "2026-03-27 09:00",
+                "window_end_text": "2026-03-28 09:00",
+                "max_items": 5,
+            },
+            [
+                {
+                    "feed_title": "TechPowerUp",
+                    "title": "AMD launches CPU",
+                    "summary": "Summary",
+                    "link": "https://example.com/1",
+                    "published_at": "2026-03-28T00:00:00+00:00",
+                }
+            ],
+            unified_msg_origin="qq:group:1",
+        )
+
+        self.assertEqual(result["engine"], "fallback")
+        self.assertEqual(result["content"], "1. [TechPowerUp] AMD launches CPU")
+
     async def test_fallback_to_cleaned_english_when_llm_and_google_fail(self):
         class FailingContext(_DummyContext):
             async def llm_generate(self, **kwargs):

@@ -27,9 +27,13 @@ class FeedFetcher:
         self._storage = storage
 
     async def fetch(self, job) -> list[dict[str, Any]]:
+        feed_ids = list(getattr(job, "feed_ids", []) or [])
+        return await self.fetch_feed_ids(feed_ids)
+
+    async def fetch_feed_ids(self, feed_ids: list[str]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         feed_map = {feed.id: feed for feed in self._config.feeds if feed.enabled}
-        for feed_id in job.feed_ids:
+        for feed_id in feed_ids:
             feed = feed_map.get(feed_id)
             if feed is None:
                 continue
@@ -83,7 +87,7 @@ class FeedFetcher:
     @staticmethod
     def _build_url_and_headers(feed) -> tuple[str, dict[str, str]]:
         headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+            "User-Agent": "astrbot_plugin_rss_forwarder/0.4.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1",
         }
         url = feed.url

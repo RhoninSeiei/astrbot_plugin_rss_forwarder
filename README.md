@@ -16,6 +16,13 @@
 
 ## 更新日志
 
+### v0.4.0
+
+- 新增 `daily_digests[]` 日报任务，可按每日固定时间汇总指定 RSS 源并发送摘要。
+- 日报任务与即时推送分离，未绑定即时推送任务的 feed 也可单独参与日报归档与发送。
+- 新增 `/rss digest run [digest_id]`，便于立即验证某个日报任务。
+- 日报支持 `text` 与 `image` 两种独立渲染模式，并支持在 GUI 中修改默认提示词模板。
+
 ### v0.3.2
 
 - 翻译顺序调整为 `LLM -> Google -> GitHub Models`，其中 GitHub Models 作为第二后备。
@@ -51,6 +58,7 @@
 - 支持启动首轮延迟：默认在插件启动后等待 `45` 秒再执行第一次轮询，避免平台适配器尚未就绪时抢跑。
 - 支持去重（KV + TTL）与 feed 状态（ETag/Last-Modified/last_success_time）。
 - 支持管理指令：`/rss list`、`/rss status`、`/rss run [job_id]`、`/rss pause [job_id]`、`/rss resume [job_id]`、`/rss reset`（清空去重记录）。
+- 支持日报汇总：`daily_digests[]`、`/rss digest run [digest_id]`。
 - 支持三级翻译链路：LLM、Google Translate、GitHub Models。
 - 支持 text / image 两种渲染模式（image 使用 `html_render`）。
 
@@ -86,6 +94,17 @@
   - `cron`（可填，当前版本回退到 interval）
   - `batch_size`
   - `enabled`
+- `daily_digests[]`
+  - `id`（唯一）
+  - `title`
+  - `feed_ids[]`
+  - `target_ids[]`
+  - `send_time`（`HH:MM`）
+  - `window_hours`
+  - `max_items`
+  - `render_mode`（`text|image`）
+  - `prompt_template`
+  - `enabled`
 - 翻译增强（`translation`）
   - `llm_enabled`：是否启用 LLM 摘要/翻译
   - `llm_provider_id`：LLM Provider（WebUI 可下拉选择）
@@ -115,6 +134,8 @@
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
 - `startup_delay_seconds` 默认为 `45`，用于给平台适配器和主动消息通道预留启动时间
 - `translation` 下的全部字段都可在 AstrBot 插件面板中配置，无需手动修改 JSON 文件
+- `daily_digests` 与 `jobs` 相互独立；只配置日报时，不会自动生成即时推送任务
+- 日报默认在窗口内无条目时跳过发送，并在状态中记录 `empty_window`
 
 ## 示例配置
 
@@ -145,6 +166,20 @@
       "target_ids": ["tg_group_a"],
       "interval_seconds": 300,
       "batch_size": 10,
+      "enabled": true
+    }
+  ],
+  "daily_digests": [
+    {
+      "id": "daily_chip_cn",
+      "title": "芯片日报",
+      "feed_ids": ["rsshub_it"],
+      "target_ids": ["tg_group_a"],
+      "send_time": "09:00",
+      "window_hours": 24,
+      "max_items": 20,
+      "render_mode": "text",
+      "prompt_template": "请根据以下 RSS 条目生成一份简体中文日报，严格输出纯文本编号列表。\\n要求：\\n1) 只输出编号列表，不要导语、总结、分类标题或 Markdown 代码块；\\n2) 最多输出 {max_items} 条；\\n3) 每条一句话，优先保留来源信息；\\n4) 如果多条内容高度相近，可合并为一条更准确的概述。\\n\\n统计窗口：{window_start} 至 {window_end}\\n条目：\\n{items}",
       "enabled": true
     }
   ],
@@ -225,3 +260,13 @@
 
 - 当前未实现真正的 cron 调度器（配置 `cron` 时会回退到最小 interval 轮询）。
 - 主动消息依赖平台能力，若平台不支持会记录错误日志。
+
+## 日报任务建议
+
+`daily_digests[]` 适合用于每天定时汇总一个或多个 feed 的重点条目。常见配置方式如下：
+
+- `send_time` 设为固定日报时间，例如 `09:00`
+- `window_hours` 设为 `24` 或 `72`
+- `render_mode=text` 适合链接较多的场景
+- `render_mode=image` 适合群内阅读体验优先的场景
+- `prompt_template` 保持默认值即可开箱使用，若希望偏重某类信息，可在 GUI 中按需调整

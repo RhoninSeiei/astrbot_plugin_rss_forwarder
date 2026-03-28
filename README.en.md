@@ -18,12 +18,14 @@ This project is not meant to be a drop-in clone of [`Soulter/astrbot_plugin_rss`
 - Multiple feed sources with per-feed enable/disable.
 - Auth modes: `none`, `query` (`?key=...`), `header` (`Authorization: Bearer ...`).
 - Job-based routing (`feeds[] -> targets[]`).
+- Independent daily digest jobs via `daily_digests[]`.
 - Scheduled polling via `interval_seconds` (implemented) and `cron` field (reserved, currently fallback).
 - Startup-safe first poll delay: waits `45` seconds by default before the first poll after plugin startup.
 - Deduplication + feed cursor persistence (ETag / Last-Modified / last_success_time).
-- Admin commands: `/rss list`, `/rss status`, `/rss run [job_id]`, `/rss pause [job_id]`, `/rss resume [job_id]`.
+- Admin commands: `/rss list`, `/rss status`, `/rss run [job_id]`, `/rss pause [job_id]`, `/rss resume [job_id]`, `/rss digest run [digest_id]`.
 - Three-stage translation chain: `LLM -> Google Translate -> GitHub Models`.
 - `text` / `image` rendering mode.
+- Daily digests support both `text` and `image` rendering, and can use a GUI-editable prompt template.
 
 ## Key Differences From `astrbot_plugin_rss`
 
@@ -40,6 +42,7 @@ The plugin ships `_conf_schema.json`, so all major settings can be edited from A
 - `feeds[]`
 - `targets[]`
 - `jobs[]`
+- `daily_digests[]`
 - `translation.llm_*`
 - `translation.google_translate_*`
 - `translation.github_models_*`
@@ -96,6 +99,20 @@ Notes:
 - Items older than a feed's `last_success_time` are marked seen without being pushed again
 - `startup_delay_seconds` defaults to `45` so platform adapters have time to become ready
 - All `translation.*` fields are available in AstrBot plugin UI
+- `daily_digests[]` works independently from realtime jobs, so a feed can be archived and summarized even if it is never pushed as an immediate RSS message
+
+Daily digest fields:
+
+- `id`
+- `title`
+- `feed_ids`
+- `target_ids`
+- `send_time`
+- `window_hours`
+- `max_items`
+- `render_mode`
+- `prompt_template`
+- `enabled`
 
 ## Translation Credential Setup
 
@@ -114,3 +131,7 @@ Create a GitHub token with `models` access. The plugin reads it from `data/githu
 ## Roadmap
 
 See [ROADMAP.md](./ROADMAP.md).
+
+## Daily Digest Notes
+
+`daily_digests[]` is meant for scheduled rollups such as a daily industry brief. The default prompt works out of the box, while `prompt_template` in the UI can be adjusted when a different summary style is needed.

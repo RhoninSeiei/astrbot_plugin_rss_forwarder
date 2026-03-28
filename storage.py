@@ -1,6 +1,7 @@
 import hashlib
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -24,6 +25,7 @@ class FeedStorage:
     CONTENT_INDEX_KEY = "content_seen_index"
     DEDUP_VERSION_KEY = "content_seen_version"
     DISPATCH_GUARD_PREFIX = "dispatch_guard:"
+    DAILY_DIGEST_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
     def __init__(
         self,
@@ -150,6 +152,121 @@ class FeedStorage:
         await self.put(self.DEDUP_VERSION_KEY, self._dedup_version)
         return deleted
 
+    async def archive_digest_items(
+        self,
+        items: list[dict[str, Any]],
+        retention_seconds: int | None = None,
+    ) -> int:
+        if not items:
+            return 0
+
+        effective_retention = (
+            int(retention_seconds)
+            if retention_seconds is not None
+            else self.DAILY_DIGEST_RETENTION_SECONDS
+        )
+
+        def callback(state: dict[str, Any], now: int):
+            section = self._daily_digest_section(state)
+            archive = section.setdefault("archive", {})
+            self._prune_digest_archive(archive, now, effective_retention)
+
+            updated = 0
+            for item in items:
+                record = self._build_digest_archive_record(item, now)
+                if not record:
+                    continue
+                archive[record["archive_key"]] = record
+                updated += 1
+
+            self._write_disk_state(state)
+            return updated
+
+        return int(self._with_state_lock(callback))
+
+    async def list_digest_items(
+        self,
+        feed_ids: list[str],
+        *,
+        window_start_ts: int,
+        window_end_ts: int,
+        limit: int,
+        retention_seconds: int | None = None,
+    ) -> list[dict[str, Any]]:
+        selected_feed_ids = {str(feed_id).strip() for feed_id in feed_ids if str(feed_id).strip()}
+        if not selected_feed_ids or limit <= 0:
+            return []
+
+        effective_retention = (
+            int(retention_seconds)
+            if retention_seconds is not None
+            else self.DAILY_DIGEST_RETENTION_SECONDS
+        )
+
+        def callback(state: dict[str, Any], now: int):
+            section = self._daily_digest_section(state)
+            archive = section.setdefault("archive", {})
+            self._prune_digest_archive(archive, now, effective_retention)
+
+            matched: list[dict[str, Any]] = []
+            for record in archive.values():
+                if not isinstance(record, dict):
+                    continue
+                feed_id = str(record.get("feed_id", "")).strip()
+                if feed_id not in selected_feed_ids:
+                    continue
+                record_ts = self._record_window_timestamp(record)
+                if record_ts < window_start_ts or record_ts > window_end_ts:
+                    continue
+                matched.append(dict(record))
+
+            matched.sort(
+                key=lambda item: (
+                    int(self._record_window_timestamp(item)),
+                    int(item.get("collected_at", 0) or 0),
+                ),
+                reverse=True,
+            )
+            self._write_disk_state(state)
+            return matched[:limit]
+
+        return list(self._with_state_lock(callback) or [])
+
+    async def get_daily_digest_status(self, digest_id: str) -> dict[str, Any]:
+        digest_key = str(digest_id or "").strip()
+        if not digest_key:
+            return {}
+
+        def callback(state: dict[str, Any], now: int):
+            section = self._daily_digest_section(state)
+            status = section.setdefault("status", {})
+            record = status.get(digest_key)
+            return dict(record) if isinstance(record, dict) else {}
+
+        return dict(self._with_state_lock(callback) or {})
+
+    async def update_daily_digest_status(self, digest_id: str, **fields: Any) -> dict[str, Any]:
+        digest_key = str(digest_id or "").strip()
+        if not digest_key:
+            return {}
+
+        def callback(state: dict[str, Any], now: int):
+            section = self._daily_digest_section(state)
+            status = section.setdefault("status", {})
+            record = status.get(digest_key)
+            if not isinstance(record, dict):
+                record = {}
+            for key, value in fields.items():
+                if value is None:
+                    continue
+                record[key] = value
+            record["updated_at"] = now
+            status[digest_key] = record
+            self._write_disk_state(state)
+            return dict(record)
+
+        return dict(self._with_state_lock(callback) or {})
+
     async def claim_dispatch(self, fingerprint: str, ttl_seconds: int = 120) -> bool:
         """发送前占位，避免并发实例重复发送同一条消息。"""
         key = self._dispatch_guard_key(fingerprint)
@@ -248,6 +365,13 @@ class FeedStorage:
             keys.append(link_fingerprint)
         return keys
 
+    def build_digest_archive_key(self, item: dict[str, Any]) -> str:
+        link_fingerprint = self.build_link_fingerprint(item)
+        if link_fingerprint:
+            return link_fingerprint
+        seen_keys = self.build_seen_keys(item)
+        return seen_keys[0] if seen_keys else ""
+
     def plugin_cache_dir(self) -> Path:
         """如需大文件缓存，请按规范写入 data/plugin_data/{plugin_name}/。"""
         if StarTools is not None:
@@ -278,6 +402,70 @@ class FeedStorage:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         with self._state_path.open("w", encoding="utf-8") as fp:
             json.dump(state, fp, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _daily_digest_section(state: dict[str, Any]) -> dict[str, Any]:
+        section = state.setdefault("daily_digest", {})
+        if not isinstance(section, dict):
+            section = {}
+            state["daily_digest"] = section
+        section.setdefault("archive", {})
+        section.setdefault("status", {})
+        return section
+
+    def _build_digest_archive_record(self, item: dict[str, Any], now: int) -> dict[str, Any] | None:
+        archive_key = self.build_digest_archive_key(item)
+        if not archive_key:
+            return None
+        seen_keys = self.build_seen_keys(item)
+        return {
+            "archive_key": archive_key,
+            "item_key": str(self.build_dedup_key(item)).strip(),
+            "seen_keys": seen_keys,
+            "feed_id": str(item.get("feed_id", "")).strip(),
+            "feed_title": str(item.get("feed_title", "") or item.get("source", "")).strip(),
+            "title": str(item.get("title", "")).strip(),
+            "summary": str(item.get("summary", "") or item.get("content", "") or "").strip(),
+            "link": str(item.get("link", "")).strip(),
+            "image_url": str(item.get("image_url", "")).strip(),
+            "published_at": str(item.get("published_at", "")).strip(),
+            "collected_at": now,
+        }
+
+    def _prune_digest_archive(
+        self,
+        archive: dict[str, Any],
+        now: int,
+        retention_seconds: int,
+    ) -> None:
+        cutoff = now - max(int(retention_seconds), 1)
+        expired_keys = [
+            key
+            for key, record in archive.items()
+            if not isinstance(record, dict) or int(record.get("collected_at", 0) or 0) < cutoff
+        ]
+        for key in expired_keys:
+            archive.pop(key, None)
+
+    @classmethod
+    def _record_window_timestamp(cls, record: dict[str, Any]) -> int:
+        published_ts = cls._parse_iso_timestamp(str(record.get("published_at", "")).strip())
+        if published_ts is not None:
+            return published_ts
+        return int(record.get("collected_at", 0) or 0)
+
+    @staticmethod
+    def _parse_iso_timestamp(raw_value: str) -> int | None:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.astimezone(timezone.utc).timestamp())
 
     async def _read_raw_from_backend(self, key: str) -> Any:
         if self._get_kv_data is None:

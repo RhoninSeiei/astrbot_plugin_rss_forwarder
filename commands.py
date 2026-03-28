@@ -18,6 +18,15 @@ class RSSCommands:
             return
 
         sub = tokens[1].lower() if len(tokens) >= 2 else ""
+        if sub == "digest":
+            digest_sub = tokens[2].lower() if len(tokens) >= 3 else ""
+            if digest_sub == "run":
+                async for result in self.rss_digest_run(event):
+                    yield result
+                return
+            yield event.plain_result("用法：/rss digest run [digest_id]")
+            return
+
         route_map = {
             "list": self.rss_list,
             "status": self.rss_status,
@@ -32,7 +41,7 @@ class RSSCommands:
         handler = route_map.get(sub)
         if handler is None:
             yield event.plain_result(
-                "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|reset|test [sample text]]"
+                "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|reset|test [sample text]|digest run [digest_id]]"
             )
             return
 
@@ -48,6 +57,7 @@ class RSSCommands:
         lines = [
             "RSS 概览：",
             f"- feeds={len(config.feeds)} jobs={len(config.jobs)} targets={len(config.targets)}",
+            f"- 日报任务：{len(config.daily_digests)}",
             f"- 运行状态：{'运行中' if scheduler.running else '未运行'}",
             f"- 暂停任务：{', '.join(sorted(paused_jobs)) if paused_jobs else '无'}",
             "",
@@ -63,6 +73,18 @@ class RSSCommands:
                 f"- {job.id} [{job_status}] feeds={len(job.feed_ids)} targets={len(job.target_ids)} "
                 f"最近成功={recent_success} 最近错误={recent_error}"
             )
+
+        if config.daily_digests:
+            lines.extend(["", "日报任务列表："])
+            for digest in config.daily_digests:
+                status = await scheduler.storage.get_daily_digest_status(digest.id)
+                digest_status = "启用" if digest.enabled else "禁用"
+                recent_sent = self._format_unix_time(status.get("last_sent_at"))
+                recent_error = str(status.get("last_error", "") or "无")
+                lines.append(
+                    f"- {digest.id} [{digest_status}] feeds={len(digest.feed_ids)} targets={len(digest.target_ids)} "
+                    f"send={digest.send_time} 最近发送={recent_sent} 最近错误={recent_error}"
+                )
 
         yield event.plain_result("\n".join(lines))
 
@@ -150,6 +172,22 @@ class RSSCommands:
         deleted = await scheduler.storage.clear_seen()
         yield event.plain_result(f"已清空去重记录：{deleted} 条。")
 
+    async def rss_digest_run(self, event: AstrMessageEvent):
+        digest_id = self._extract_param_at(event, index=3)
+        if not digest_id:
+            yield event.plain_result("用法：/rss digest run [digest_id]")
+            return
+
+        ok = await self.scheduler.run_daily_digest_once(digest_id)
+        if not ok:
+            yield event.plain_result(f"日报触发失败：未找到或未启用任务（{digest_id}）")
+            return
+
+        result = self.scheduler.digest_results.get(digest_id)
+        yield event.plain_result(
+            f"已触发日报 {digest_id}。最近执行={self._format_success_time(result)} 最近错误={self._format_last_error(result)}"
+        )
+
     async def rss_status(self, event: AstrMessageEvent):
         scheduler = self.scheduler
         config = scheduler.config
@@ -169,9 +207,27 @@ class RSSCommands:
             "RSS 状态：",
             f"- 调度器：{'运行中' if scheduler.running else '未运行'}",
             f"- feeds={len(config.feeds)} jobs={len(config.jobs)} targets={len(config.targets)}",
+            f"- 日报任务={len(config.daily_digests)}",
             f"- 最近成功：{recent_success}",
             f"- 最近错误：{recent_error}",
         ]
+        if config.daily_digests:
+            latest_digest_sent = "暂无"
+            latest_digest_error = "无"
+            digest_sent_times = []
+            digest_errors = []
+            for digest in config.daily_digests:
+                status = await scheduler.storage.get_daily_digest_status(digest.id)
+                if status.get("last_sent_at"):
+                    digest_sent_times.append(int(status["last_sent_at"]))
+                if status.get("last_error"):
+                    digest_errors.append(str(status["last_error"]))
+            if digest_sent_times:
+                latest_digest_sent = self._format_unix_time(max(digest_sent_times))
+            if digest_errors:
+                latest_digest_error = digest_errors[-1]
+            lines.append(f"- 日报最近发送：{latest_digest_sent}")
+            lines.append(f"- 日报最近错误：{latest_digest_error}")
         yield event.plain_result("\n".join(lines))
 
     async def rss_pause(self, event: AstrMessageEvent):
@@ -213,6 +269,12 @@ class RSSCommands:
         return tokens[2].strip() if len(tokens) >= 3 else ""
 
     @staticmethod
+    def _extract_param_at(event: AstrMessageEvent, index: int) -> str:
+        message_text = RSSCommands._get_message_text(event)
+        tokens = message_text.strip().split()
+        return tokens[index].strip() if len(tokens) > index else ""
+
+    @staticmethod
     def _extract_tail_text(event: AstrMessageEvent) -> str:
         message_text = RSSCommands._get_message_text(event)
         parts = message_text.strip().split(maxsplit=2)
@@ -242,3 +304,15 @@ class RSSCommands:
         if result is None or not result.error_summary:
             return "无"
         return result.error_summary
+
+    @staticmethod
+    def _format_unix_time(raw_value) -> str:
+        try:
+            timestamp_value = int(raw_value or 0)
+        except (TypeError, ValueError):
+            return "暂无"
+        if timestamp_value <= 0:
+            return "暂无"
+        from datetime import datetime
+
+        return datetime.fromtimestamp(timestamp_value).strftime("%Y-%m-%d %H:%M:%S")

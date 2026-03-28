@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -77,6 +78,86 @@ class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
 
             await storage.confirm_dispatch("fingerprint-1", ttl_seconds=3600)
             self.assertFalse(await storage.claim_dispatch("fingerprint-1", ttl_seconds=30))
+
+    async def test_archive_digest_items_and_query_window(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = FeedStorage(storage_dir=tmpdir)
+            now_ts = 1774699200
+            item = {
+                "feed_id": "feed-1",
+                "feed_title": "Feed",
+                "guid": "guid-1",
+                "title": "Title",
+                "summary": "Summary",
+                "link": "https://example.com/post/1",
+                "published_at": "2026-03-28T06:00:00+00:00",
+                "image_url": "https://example.com/a.jpg",
+            }
+
+            original_time = time.time
+            try:
+                time.time = lambda: now_ts
+                await storage.archive_digest_items([item])
+                await storage.archive_digest_items([dict(item, title="Updated Title")])
+            finally:
+                time.time = original_time
+
+            items = await storage.list_digest_items(
+                ["feed-1"],
+                window_start_ts=1774656000,
+                window_end_ts=1774742400,
+                limit=10,
+            )
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["title"], "Updated Title")
+            self.assertEqual(items[0]["item_key"], "guid-1")
+
+    async def test_list_digest_items_falls_back_to_collected_at_when_published_at_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = FeedStorage(storage_dir=tmpdir)
+            now_ts = 1774699200
+            item = {
+                "feed_id": "feed-1",
+                "feed_title": "Feed",
+                "guid": "guid-2",
+                "title": "Collected Title",
+                "summary": "Summary",
+                "link": "https://example.com/post/2",
+                "published_at": "",
+            }
+
+            original_time = time.time
+            try:
+                time.time = lambda: now_ts
+                await storage.archive_digest_items([item])
+            finally:
+                time.time = original_time
+
+            items = await storage.list_digest_items(
+                ["feed-1"],
+                window_start_ts=1774695600,
+                window_end_ts=1774702800,
+                limit=10,
+            )
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["title"], "Collected Title")
+
+    async def test_daily_digest_status_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = FeedStorage(storage_dir=tmpdir)
+
+            await storage.update_daily_digest_status(
+                "digest-1",
+                last_schedule_date="2026-03-27",
+                last_item_count=5,
+                last_error="",
+            )
+            status = await storage.get_daily_digest_status("digest-1")
+
+            self.assertEqual(status["last_schedule_date"], "2026-03-27")
+            self.assertEqual(status["last_item_count"], 5)
 
 
 if __name__ == "__main__":
