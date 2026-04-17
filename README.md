@@ -16,6 +16,12 @@
 
 ## 更新日志
 
+### v0.4.2
+
+- 新增 `jobs[].dedup_ttl_seconds`，支持为不同轮询任务单独设置去重记录保留时间。
+- 新增 `docs/llm/` Markdown 文档库，用于记录项目结构、线上环境约束、关键决策与路线图。
+- 适合保留窗口差异较大的 RSS 源分别设置去重时效，例如短窗口源沿用全局值，长窗口源单独延长。
+
 ### v0.4.1
 
 - 调整插件面板中的草稿保存行为：新建 `feed`、`target`、`job` 默认关闭，可先保存未填完的条目。
@@ -99,6 +105,7 @@
   - `interval_seconds`（推荐）
   - `cron`（可填，当前版本回退到 interval）
   - `batch_size`
+  - `dedup_ttl_seconds`（填 `0` 表示继承全局 TTL）
   - `enabled`
 - `daily_digests[]`
   - `id`（唯一）
@@ -137,6 +144,7 @@
 
 说明：
 - 去重记录会同时写入 AstrBot KV 与 `data/plugin_data/astrbot_rss/state.json`
+- `jobs[].dedup_ttl_seconds` 大于 `0` 时，会覆盖全局 `dedup_ttl_seconds`；填 `0` 时继续使用全局值
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
 - `startup_delay_seconds` 默认为 `45`，用于给平台适配器和主动消息通道预留启动时间
 - `translation` 下的全部字段都可在 AstrBot 插件面板中配置，无需手动修改 JSON 文件
@@ -257,10 +265,11 @@
 - Guides:
   - simple / listen-message-event / send-message / plugin-config
   - ai / storage / html-to-pic / session-control / other
+- 文档索引：见 [docs/llm/README.md](./docs/llm/README.md)
 
 ## 路线图
 
-见 [ROADMAP.md](./ROADMAP.md)。
+见 [ROADMAP.md](./ROADMAP.md) 与 [docs/llm/roadmap.md](./docs/llm/roadmap.md)。
 
 ## 已知限制
 

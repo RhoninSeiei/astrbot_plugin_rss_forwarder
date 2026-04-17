@@ -152,6 +152,21 @@ class ConfigTranslationTests(unittest.TestCase):
         with self.assertRaises(ConfigValidationError):
             RSSConfig.from_context(conf)
 
+    def test_job_dedup_ttl_seconds_can_override_global_default(self):
+        conf = _minimal_runtime_conf()
+        conf["jobs"][0]["dedup_ttl_seconds"] = 3888000
+
+        cfg = RSSConfig.from_context(conf)
+
+        self.assertEqual(cfg.jobs[0].dedup_ttl_seconds, 3888000)
+
+    def test_job_dedup_ttl_seconds_must_be_non_negative(self):
+        conf = _minimal_runtime_conf()
+        conf["jobs"][0]["dedup_ttl_seconds"] = -1
+
+        with self.assertRaises(ConfigValidationError):
+            RSSConfig.from_context(conf)
+
     def test_disabled_draft_entries_can_be_saved(self):
         conf = {
             "feeds": [

@@ -46,6 +46,7 @@ class JobConfig:
     cron: str = ""
     interval_seconds: int = 0
     batch_size: int = 10
+    dedup_ttl_seconds: int = 0
     enabled: bool = True
 
 
@@ -167,6 +168,7 @@ class RSSConfig:
                 cron=str(item.get("cron", "")).strip(),
                 interval_seconds=int(item.get("interval_seconds", 0) or 0),
                 batch_size=int(item.get("batch_size", 10)),
+                dedup_ttl_seconds=int(item.get("dedup_ttl_seconds", 0) or 0),
                 enabled=bool(item.get("enabled", True)),
             )
             for item in jobs_raw
@@ -349,6 +351,7 @@ class RSSConfig:
                 target_ids=enabled_targets,
                 interval_seconds=300,
                 batch_size=10,
+                dedup_ttl_seconds=0,
                 enabled=True,
             )
         ]
@@ -453,6 +456,10 @@ class RSSConfig:
                 )
             if job.batch_size <= 0:
                 raise ConfigValidationError(f"jobs[{job.id}].batch_size 必须 > 0")
+            if job.dedup_ttl_seconds < 0:
+                raise ConfigValidationError(
+                    f"jobs[{job.id}].dedup_ttl_seconds 必须 >= 0"
+                )
 
             missing_feeds = [fid for fid in job.feed_ids if fid not in feed_ids]
             if missing_feeds:

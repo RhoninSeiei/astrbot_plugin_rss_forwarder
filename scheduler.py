@@ -647,6 +647,12 @@ class RSSScheduler:
         for key in keys:
             await self._storage.mark_seen(key, ttl_seconds=ttl_seconds)
 
+    def _job_dedup_ttl_seconds(self, job: JobConfig) -> int:
+        job_ttl = int(getattr(job, "dedup_ttl_seconds", 0) or 0)
+        if job_ttl > 0:
+            return job_ttl
+        return int(getattr(self._config, "dedup_ttl_seconds", 0) or 0)
+
     async def _get_daily_digest_status(self, digest_id: str) -> dict[str, Any]:
         getter = getattr(self._storage, "get_daily_digest_status", None)
         if not callable(getter):
@@ -689,6 +695,7 @@ class RSSScheduler:
         async with job_lock:
             started_at = datetime.now()
             started_perf = time.perf_counter()
+            dedup_ttl_seconds = self._job_dedup_ttl_seconds(job)
             fetched_count = 0
             pushed_count = 0
             parsed_count = 0
@@ -732,7 +739,7 @@ class RSSScheduler:
                         continue
                     seen_in_run.update(seen_keys)
                     if self._should_mark_history_only(item, feed_state_map, bootstrap_only=True):
-                        await self._mark_seen_all(seen_keys, ttl_seconds=self._config.dedup_ttl_seconds)
+                        await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
                         skipped_history_count += 1
                         continue
 
@@ -749,7 +756,7 @@ class RSSScheduler:
                         ):
                             await self._mark_seen_all(
                                 seen_keys,
-                                ttl_seconds=self._config.dedup_ttl_seconds,
+                                ttl_seconds=dedup_ttl_seconds,
                             )
                             skipped_dispatch_duplicate_count += dispatch_result.skipped_duplicate_count
                             continue
@@ -760,13 +767,13 @@ class RSSScheduler:
                         if permanent_or_disabled and dispatch_result.transient_failure_count == 0:
                             await self._mark_seen_all(
                                 seen_keys,
-                                ttl_seconds=self._config.dedup_ttl_seconds,
+                                ttl_seconds=dedup_ttl_seconds,
                             )
                             skipped_invalid_target_count += 1
                             continue
                         dispatch_fail_count += 1
                         continue
-                    await self._mark_seen_all(seen_keys, ttl_seconds=self._config.dedup_ttl_seconds)
+                    await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
                     pushed_count += 1
 
                 feed_meta = self._extract_feed_meta(raw_items)

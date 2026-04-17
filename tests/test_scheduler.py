@@ -151,6 +151,64 @@ class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(storage.marked, [("item-1", 123)])
 
+    async def test_job_level_dedup_ttl_overrides_global_default(self):
+        class FakeStorage:
+            def __init__(self):
+                self.marked = []
+
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            async def has_seen(self, item_id):
+                return False
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                self.marked.append((item_id, ttl_seconds))
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [{"feed_id": "feed-1", "guid": "item-1", "published_at": ""}]
+
+        class FakeDispatcher:
+            async def dispatch(self, item):
+                return DispatchResult(success_count=1)
+
+        config = types.SimpleNamespace(
+            jobs=[],
+            dedup_ttl_seconds=123,
+            poll_interval_seconds=300,
+        )
+        job = types.SimpleNamespace(
+            id="job-1",
+            feed_ids=["feed-1"],
+            enabled=True,
+            interval_seconds=300,
+            dedup_ttl_seconds=3888000,
+        )
+        storage = FakeStorage()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=FakeDispatcher(),
+            storage=storage,
+            pipeline=None,
+        )
+
+        await scheduler._run_job_once_guarded(job)
+
+        self.assertEqual(storage.marked, [("item-1", 3888000)])
+
 
 class SchedulerTaskCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_cancels_stale_job_tasks(self):

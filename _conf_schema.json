@@ -119,6 +119,12 @@
             "default": 10,
             "description": "每次推送最大条数"
           },
+          "dedup_ttl_seconds": {
+            "type": "int",
+            "default": 0,
+            "description": "任务级去重记录保留时间（秒）",
+            "hint": "填 0 表示继承全局 dedup_ttl_seconds；填正数则仅覆盖当前轮询任务。"
+          },
           "enabled": {
             "type": "bool",
             "default": false,
