@@ -209,6 +209,71 @@ class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(storage.marked, [("item-1", 3888000)])
 
+    async def test_job_level_dedup_ttl_is_used_when_checking_seen_records(self):
+        class FakeStorage:
+            def __init__(self):
+                self.seen_calls = []
+
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                self.seen_calls.append((item_id, ttl_seconds))
+                return True
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                raise AssertionError("seen item should not be marked again")
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [{"feed_id": "feed-1", "guid": "item-1", "published_at": ""}]
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.count = 0
+
+            async def dispatch(self, item):
+                self.count += 1
+                return DispatchResult(success_count=1)
+
+        config = types.SimpleNamespace(
+            jobs=[],
+            dedup_ttl_seconds=123,
+            poll_interval_seconds=300,
+        )
+        job = types.SimpleNamespace(
+            id="job-1",
+            feed_ids=["feed-1"],
+            enabled=True,
+            interval_seconds=300,
+            dedup_ttl_seconds=3888000,
+        )
+        storage = FakeStorage()
+        dispatcher = FakeDispatcher()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=dispatcher,
+            storage=storage,
+            pipeline=None,
+        )
+
+        await scheduler._run_job_once_guarded(job)
+
+        self.assertEqual(storage.seen_calls, [("item-1", 3888000)])
+        self.assertEqual(dispatcher.count, 0)
+
 
 class SchedulerTaskCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_cancels_stale_job_tasks(self):

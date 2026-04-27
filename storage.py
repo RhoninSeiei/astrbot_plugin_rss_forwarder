@@ -85,7 +85,7 @@ class FeedStorage:
             return
         await self._delete_kv_data(key)
 
-    async def has_seen(self, item_id: str) -> bool:
+    async def has_seen(self, item_id: str, ttl_seconds: int | None = None) -> bool:
         await self._get_dedup_version()
 
         # NOTE:
@@ -101,11 +101,22 @@ class FeedStorage:
                 self._seen_ids.discard(item_id)
             return False
 
+        now = int(time.time())
         expire_at = int(record.get("expire_at", 0))
-        if expire_at and expire_at < int(time.time()):
+        effective_expire_at = self._effective_expire_at(record, ttl_seconds)
+        if expire_at and expire_at < now:
+            if effective_expire_at and effective_expire_at >= now:
+                record["expire_at"] = effective_expire_at
+                await self.put(self._content_key(item_id), record)
+                self._seen_ids.add(item_id)
+                return True
             await self.delete(self._content_key(item_id))
             self._seen_ids.discard(item_id)
             return False
+
+        if effective_expire_at and effective_expire_at > expire_at:
+            record["expire_at"] = effective_expire_at
+            await self.put(self._content_key(item_id), record)
 
         self._seen_ids.add(item_id)
         return True
@@ -510,6 +521,15 @@ class FeedStorage:
         # 仅依赖内存缓存；首次使用前由 _get_dedup_version 初始化。
         version = self._dedup_version if self._dedup_version is not None else 0
         return f"{self.CONTENT_KEY_PREFIX}v{version}:{item_id}"
+
+    @staticmethod
+    def _effective_expire_at(record: dict[str, Any], ttl_seconds: int | None) -> int:
+        if ttl_seconds is None or ttl_seconds <= 0:
+            return 0
+        updated_at = int(record.get("updated_at", 0) or 0)
+        if updated_at <= 0:
+            return 0
+        return updated_at + int(ttl_seconds)
 
     def _dispatch_guard_key(self, fingerprint: str) -> str:
         value = str(fingerprint or "").strip()

@@ -637,9 +637,15 @@ class RSSScheduler:
         item_id = str(self._storage.build_dedup_key(item)).strip()
         return [item_id] if item_id else []
 
-    async def _has_seen_any(self, keys: list[str]) -> bool:
+    async def _has_seen_any(self, keys: list[str], ttl_seconds: int | None = None) -> bool:
+        has_seen = self._storage.has_seen
+        accepts_ttl = self._accepts_keyword(has_seen, "ttl_seconds")
         for key in keys:
-            if await self._storage.has_seen(key):
+            if accepts_ttl:
+                seen = await has_seen(key, ttl_seconds=ttl_seconds)
+            else:
+                seen = await has_seen(key)
+            if seen:
                 return True
         return False
 
@@ -734,7 +740,7 @@ class RSSScheduler:
                             str(item.get("title", "")).strip(),
                         )
                         continue
-                    if await self._has_seen_any(seen_keys):
+                    if await self._has_seen_any(seen_keys, ttl_seconds=dedup_ttl_seconds):
                         skipped_seen_count += 1
                         continue
                     seen_in_run.update(seen_keys)
@@ -857,6 +863,14 @@ class RSSScheduler:
             in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
         ]
         return len(positional_or_keyword_params) >= expected_count
+
+    @staticmethod
+    def _accepts_keyword(func, name: str) -> bool:
+        signature = inspect.signature(func)
+        return any(
+            param.name == name or param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
 
     @classmethod
     def _should_mark_history_only(

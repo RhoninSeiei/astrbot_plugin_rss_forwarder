@@ -21,6 +21,26 @@ class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertIn("content_seen:v0:item-1", payload["kv"])
 
+    async def test_expired_record_can_use_longer_effective_ttl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = FeedStorage(storage_dir=tmpdir)
+            original_time = time.time
+            try:
+                time.time = lambda: 1_000_000
+                await storage.mark_seen("item-1", ttl_seconds=7 * 24 * 60 * 60)
+
+                time.time = lambda: 1_000_000 + 8 * 24 * 60 * 60
+                self.assertTrue(
+                    await storage.has_seen("item-1", ttl_seconds=50 * 24 * 60 * 60)
+                )
+            finally:
+                time.time = original_time
+
+            state_path = Path(tmpdir) / "state.json"
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            record = payload["kv"]["content_seen:v0:item-1"]
+            self.assertEqual(record["expire_at"], 1_000_000 + 50 * 24 * 60 * 60)
+
     def test_build_seen_keys_include_normalized_link_fingerprint(self):
         storage = FeedStorage(storage_dir=".")
 
@@ -102,12 +122,16 @@ class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 time.time = original_time
 
-            items = await storage.list_digest_items(
-                ["feed-1"],
-                window_start_ts=1774656000,
-                window_end_ts=1774742400,
-                limit=10,
-            )
+            try:
+                time.time = lambda: now_ts
+                items = await storage.list_digest_items(
+                    ["feed-1"],
+                    window_start_ts=1774656000,
+                    window_end_ts=1774742400,
+                    limit=10,
+                )
+            finally:
+                time.time = original_time
 
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["title"], "Updated Title")
@@ -134,12 +158,16 @@ class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 time.time = original_time
 
-            items = await storage.list_digest_items(
-                ["feed-1"],
-                window_start_ts=1774695600,
-                window_end_ts=1774702800,
-                limit=10,
-            )
+            try:
+                time.time = lambda: now_ts
+                items = await storage.list_digest_items(
+                    ["feed-1"],
+                    window_start_ts=1774695600,
+                    window_end_ts=1774702800,
+                    limit=10,
+                )
+            finally:
+                time.time = original_time
 
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["title"], "Collected Title")
