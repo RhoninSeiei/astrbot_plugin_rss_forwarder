@@ -2,7 +2,7 @@
 
 [中文](./README.md) | [English](./README.en.md)
 
-`astrbot_plugin_rss_forwarder` は、AstrBot 向けの RSS / RSSHub 配信オーケストレーション用プラグインです。複数フィードを取得し、管理画面で構成したルールに従って指定チャットへ配信します。
+`astrbot_plugin_rss_forwarder` は、AstrBot 向けの RSS / RSSHub / Twitter 配信オーケストレーション用プラグインです。複数フィードを取得し、管理画面で構成したルールに従って指定チャットへ配信します。
 
 ## 位置付け
 
@@ -16,6 +16,7 @@
 ## 主な機能
 
 - 複数フィード対応（フィード単位で有効/無効）。
+- `feeds[].source_type=twitter` による Twitter/Nitter ソース対応。画像と動画の送信を個別に切り替えられます。
 - 認証モード：`none` / `query` / `header`。
 - ジョブ単位の配信ルーティング（複数 feed + 複数 target）。
 - `daily_digests[]` による独立した日報タスク。
@@ -101,6 +102,13 @@
 - `startup_delay_seconds` の既定値は `45` 秒です
 - `translation.*` 配下の項目はすべて AstrBot のプラグイン管理画面から設定できます
 - `daily_digests[]` は即時配信ジョブと独立して動作し、即時配信を有効にしていない feed でも日報対象にできます
+- Twitter feed では `source_type=twitter`、`username` を設定し、必要に応じて `nitter_url`、`proxy_url`、`send_images`、`send_videos` を設定します
+- `nitter_url` には自前の Nitter サービスも指定できます
+- `display_source`、`display_time`、`display_link` はテキスト配信と画像カードの両方に適用されます
+- Twitter feed では `send_link=false` により元ツイートリンクだけを非表示にできます。ソースはユーザー名として表示されます
+- Nitter の詳細ページが一時失敗または制限された場合、そのツイートを越えて `since_id` を進めず、次回以降に再試行します
+- Twitter feed は初回有効化時に最新ツイートのカーソルを記録し、その後の新規ツイートのみ配信します
+- Twitter リンク認識と合併転送メッセージはこの段階では統合していません
 
 主な日報項目:
 

@@ -52,6 +52,29 @@
 - `1110001`：`604800` 秒。
 - `2110002`：`4320000` 秒。
 
+## Twitter/Nitter 源整合
+
+### 当前范围
+
+- 只整合定时采集、普通推送、去重、翻译与日报归档。
+- 暂缓迁移 Twitter 链接识别。
+- 暂缓迁移合并转发消息。
+
+### 设计选择
+
+- Twitter 推主作为 `feeds[]` 的一种源类型，通过 `source_type=twitter` 表示。
+- Nitter 解析结果转换为统一 item，继续复用现有 job、target、pipeline、storage 与 dispatcher。
+- 推文主去重键使用 `twitter:{username}:{tweet_id}`，同时保留规范化链接指纹。
+- Twitter 首次启用时记录最新 `since_id`，后续轮询只发送新增推文。
+- 图片和视频发送由 `feeds[].send_images`、`feeds[].send_videos` 分别控制。
+- 原推文链接发送由 `feeds[].send_link` 单独控制；普通 RSS 链接显示由全局 `display_link` 控制。
+- 来源、时间、链接显示由 `display_source`、`display_time`、`display_link` 控制，文本推送与图片图卡共用同一组开关。
+- Twitter 媒体优先缓存到 `data/plugin_data/astrbot_rss/twitter_media` 后以本地文件发送，降低代理环境下图片和视频发送失败的概率。
+
+### 原因
+
+RSS 插件已有日报聚合能力，合并转发与日报场景重叠。实时推送使用普通消息链承载文字、图片和视频，结构更简单，也减少视频放入合并转发节点导致的超时问题。
+
 ## 运维原则
 
 - 线上只允许单插件热重载。

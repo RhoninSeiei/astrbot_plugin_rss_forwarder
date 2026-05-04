@@ -2,7 +2,7 @@
 
 [中文](./README.md) | [日本語](./README.ja.md)
 
-`astrbot_plugin_rss_forwarder` is an AstrBot plugin focused on RSS / RSSHub delivery orchestration. It fetches updates from multiple feeds and proactively pushes them to configured chat targets using panel-driven routing rules.
+`astrbot_plugin_rss_forwarder` is an AstrBot plugin focused on RSS / RSSHub / Twitter delivery orchestration. It fetches updates from multiple feeds and proactively pushes them to configured chat targets using panel-driven routing rules.
 
 ## Positioning
 
@@ -16,6 +16,7 @@ This project is not meant to be a drop-in clone of [`Soulter/astrbot_plugin_rss`
 ## Highlights
 
 - Multiple feed sources with per-feed enable/disable.
+- Twitter/Nitter sources via `feeds[].source_type=twitter`, with separate image/video delivery switches.
 - Auth modes: `none`, `query` (`?key=...`), `header` (`Authorization: Bearer ...`).
 - Job-based routing (`feeds[] -> targets[]`).
 - Independent daily digest jobs via `daily_digests[]`.
@@ -100,6 +101,13 @@ Notes:
 - `startup_delay_seconds` defaults to `45` so platform adapters have time to become ready
 - All `translation.*` fields are available in AstrBot plugin UI
 - `daily_digests[]` works independently from realtime jobs, so a feed can be archived and summarized even if it is never pushed as an immediate RSS message
+- For Twitter feeds, set `source_type=twitter`, fill `username`, and optionally set `nitter_url`, `proxy_url`, `send_images`, and `send_videos`
+- `nitter_url` can point to a self-hosted Nitter service
+- `display_source`, `display_time`, and `display_link` control source/time/link visibility in both text pushes and image cards
+- Twitter feeds can set `send_link=false` to hide the original tweet link while keeping the username source
+- Temporary Nitter detail-page failures or rate limits do not advance `since_id` past the failed tweet, so later polls can retry it
+- Twitter feeds record the latest tweet cursor on the first enabled poll, then push only later tweets
+- Twitter link recognition and merged-forward messages are not part of this integration stage
 
 Daily digest fields:
 

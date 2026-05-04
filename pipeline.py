@@ -419,7 +419,7 @@ class FeedPipeline:
                 "Authorization": f"Bearer {token}",
                 "X-GitHub-Api-Version": "2022-11-28",
                 "Content-Type": "application/json",
-                "User-Agent": "astrbot_plugin_rss_forwarder/0.4.3 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+                "User-Agent": "astrbot_plugin_rss_forwarder/0.5.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
             },
             method="POST",
         )
@@ -468,7 +468,7 @@ class FeedPipeline:
             data=body,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "astrbot_plugin_rss_forwarder/0.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+                "User-Agent": "astrbot_plugin_rss_forwarder/0.5.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
             },
             method="POST",
         )

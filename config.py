@@ -24,6 +24,13 @@ DEFAULT_DAILY_DIGEST_PROMPT = (
 class FeedConfig:
     id: str
     url: str
+    source_type: str = "rss"
+    username: str = ""
+    nitter_url: str = ""
+    proxy_url: str = ""
+    send_images: bool = True
+    send_videos: bool = True
+    send_link: bool = True
     auth_mode: str = "none"
     key: str = ""
     enabled: bool = True
@@ -109,6 +116,9 @@ class RSSConfig:
     dedup_ttl_seconds: int = 7 * 24 * 60 * 60
     startup_delay_seconds: int = 45
     render_mode: str = "text"
+    display_source: bool = True
+    display_time: bool = True
+    display_link: bool = True
     summary_max_chars: int = 280
     render_card_template: RenderCardTemplateConfig = field(default_factory=RenderCardTemplateConfig)
 
@@ -144,6 +154,14 @@ class RSSConfig:
             FeedConfig(
                 id=str(item.get("id", "")).strip(),
                 url=str(item.get("url", "")).strip(),
+                source_type=str(item.get("source_type", "rss")).strip().lower()
+                or "rss",
+                username=str(item.get("username", "")).strip().lstrip("@"),
+                nitter_url=str(item.get("nitter_url", "")).strip(),
+                proxy_url=str(item.get("proxy_url", "")).strip(),
+                send_images=bool(item.get("send_images", True)),
+                send_videos=bool(item.get("send_videos", True)),
+                send_link=bool(item.get("send_link", True)),
                 auth_mode=str(item.get("auth_mode", "none")).strip() or "none",
                 key=str(item.get("key", "")).strip(),
                 enabled=bool(item.get("enabled", True)),
@@ -277,6 +295,9 @@ class RSSConfig:
             dedup_ttl_seconds=int(runtime_conf.get("dedup_ttl_seconds", 7 * 24 * 60 * 60)),
             startup_delay_seconds=int(runtime_conf.get("startup_delay_seconds", 45)),
             render_mode=str(runtime_conf.get("render_mode", "text")).strip() or "text",
+            display_source=bool(runtime_conf.get("display_source", True)),
+            display_time=bool(runtime_conf.get("display_time", True)),
+            display_link=bool(runtime_conf.get("display_link", True)),
             summary_max_chars=int(runtime_conf.get("summary_max_chars", 280)),
             render_card_template=RenderCardTemplateConfig(
                 title=str(
@@ -370,7 +391,23 @@ class RSSConfig:
                 continue
             if not feed.id:
                 raise ConfigValidationError("feeds.id 不能为空")
-            self._validate_url(feed.url, f"feeds[{feed.id}].url")
+            if feed.source_type not in {"rss", "twitter"}:
+                raise ConfigValidationError(
+                    f"feeds[{feed.id}].source_type 必须是 rss 或 twitter"
+                )
+            if feed.source_type == "rss":
+                self._validate_url(feed.url, f"feeds[{feed.id}].url")
+            else:
+                if not feed.username:
+                    raise ConfigValidationError(
+                        f"feeds[{feed.id}].username 不能为空"
+                    )
+                if feed.url:
+                    self._validate_url(feed.url, f"feeds[{feed.id}].url")
+                if feed.nitter_url:
+                    self._validate_url(feed.nitter_url, f"feeds[{feed.id}].nitter_url")
+                if feed.proxy_url:
+                    self._validate_proxy_url(feed.proxy_url, f"feeds[{feed.id}].proxy_url")
             if feed.auth_mode not in {"none", "query", "header"}:
                 raise ConfigValidationError(
                     f"feeds[{feed.id}].auth_mode 非法: {feed.auth_mode}"
@@ -527,6 +564,12 @@ class RSSConfig:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ConfigValidationError(f"{field_name} 不是合法 URL: {url}")
+
+    @staticmethod
+    def _validate_proxy_url(url: str, field_name: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https", "socks4", "socks5", "socks5h"} or not parsed.netloc:
+            raise ConfigValidationError(f"{field_name} 不是合法代理 URL: {url}")
 
     @staticmethod
     def _validate_send_time(value: str, field_name: str) -> None:

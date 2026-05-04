@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | [日本語](./README.ja.md)
 
-`astrbot_plugin_rss_forwarder` 是一个面向 AstrBot 的 RSS / RSSHub 推送编排插件，用于从多个订阅源拉取内容，并将结果按可视化配置的路由规则主动推送到指定平台会话（群/频道/私聊）。
+`astrbot_plugin_rss_forwarder` 是一个面向 AstrBot 的 RSS / RSSHub / Twitter 推送编排插件，用于从多个订阅源拉取内容，并将结果按可视化配置的路由规则主动推送到指定平台会话（群/频道/私聊）。
 
 ## 定位
 
@@ -15,6 +15,17 @@
 
 
 ## 更新日志
+
+### v0.5.0
+
+- 新增 Twitter/Nitter 源支持：在 `feeds[]` 中设置 `source_type=twitter` 后，可填写推主用户名并复用现有 job/target 推送。
+- Twitter 推文会转换为统一条目，继续使用任务级去重 TTL、发送前重复拦截、翻译链路与日报归档。
+- 新增 `send_images` 与 `send_videos`，可分别控制 Twitter 推送是否附带图片和视频。
+- 新增 `display_source`、`display_time`、`display_link`，文本推送与图片图卡均可控制是否显示来源、时间、链接。
+- 新增 `send_link`，可单独关闭 Twitter 推送里的原推文链接。
+- 新增 `nitter_url` 与 `proxy_url`，可为 Twitter 源指定 Nitter 镜像站和抓取代理。
+- Nitter 详情页临时失败或限流时不会提前跳过该推文，后续轮询会继续尝试。
+- 链接识别和合并转发未并入本版本，实时推送采用普通消息形式发送文字、图片与视频。
 
 ### v0.4.3
 
@@ -65,7 +76,8 @@
 
 ## 功能
 
-- 支持多 RSS 源（每个源可单独启用/禁用）。
+- 支持多 RSS / Twitter 源（每个源可单独启用/禁用）。
+- 支持 Twitter/Nitter 源：按推主用户名采集时间线，并可分别控制是否附带图片、视频。
 - 支持鉴权：
   - `none`：公开链接；
   - `query`：在 URL 上自动附加 `key`；
@@ -94,6 +106,13 @@
 - `feeds[]`
   - `id`（唯一）
   - `url`
+  - `source_type`：`rss|twitter`
+  - `username`（仅 `twitter` 生效）
+  - `nitter_url`（仅 `twitter` 生效，可留空）
+  - `proxy_url`（仅 `twitter` 生效，可留空）
+  - `send_images`（仅 `twitter` 生效）
+  - `send_videos`（仅 `twitter` 生效）
+  - `send_link`（仅 `twitter` 生效）
   - `auth_mode`：`none|query|header`
   - `key`
   - `enabled`
@@ -144,6 +163,9 @@
   - `dedup_ttl_seconds`
   - `startup_delay_seconds`
   - `render_mode`（`text|image`）
+  - `display_source`
+  - `display_time`
+  - `display_link`
   - `summary_max_chars`
   - `render_card_template`
 
@@ -155,6 +177,13 @@
 - `translation` 下的全部字段都可在 AstrBot 插件面板中配置，无需手动修改 JSON 文件
 - `daily_digests` 与 `jobs` 相互独立；只配置日报时，不会自动生成即时推送任务
 - 日报默认在窗口内无条目时跳过发送，并在状态中记录 `empty_window`
+- `source_type=twitter` 时，`url` 可留空；如需指定 Nitter 镜像站，优先填写 `nitter_url`
+- `nitter_url` 支持填写自建 Nitter 服务地址，例如 `https://nitter.example.com`
+- `display_source`、`display_time`、`display_link` 同时作用于文本推送与图片图卡
+- Twitter 源可通过 `send_link=false` 单独隐藏原推文链接；来源仍显示为推主用户名
+- Twitter 源首次启用时会先记录当前最新推文游标，后续轮询才发送新推文，避免首次启用时刷屏
+- Twitter 图片和视频会优先缓存到 `data/plugin_data/astrbot_rss/twitter_media` 后以本地文件发送，便于代理环境使用
+- Twitter 源暂不处理聊天中的 Twitter/X 链接，也不使用合并转发消息
 
 ## 示例配置
 
@@ -164,10 +193,23 @@
     {
       "id": "rsshub_it",
       "url": "https://rsshub.example.com/36kr/newsflash",
+      "source_type": "rss",
       "auth_mode": "query",
       "key": "YOUR_RSSHUB_KEY",
       "enabled": true,
       "timeout": 10
+    },
+    {
+      "id": "twitter_maka_ngs",
+      "source_type": "twitter",
+      "username": "maka_ngs",
+      "nitter_url": "https://nitter.example.com",
+      "proxy_url": "",
+      "send_images": true,
+      "send_videos": true,
+      "send_link": true,
+      "enabled": true,
+      "timeout": 15
     }
   ],
   "targets": [
@@ -181,7 +223,7 @@
   "jobs": [
     {
       "id": "it_news",
-      "feed_ids": ["rsshub_it"],
+      "feed_ids": ["rsshub_it", "twitter_maka_ngs"],
       "target_ids": ["tg_group_a"],
       "interval_seconds": 300,
       "batch_size": 10,
@@ -219,7 +261,10 @@
     "github_models_timeout_seconds": 15,
     "github_models_token_file": "github.token"
   },
-  "render_mode": "text"
+  "render_mode": "text",
+  "display_source": true,
+  "display_time": true,
+  "display_link": true
 }
 ```
 
@@ -247,6 +292,7 @@
 - `google_translate_enabled = true` 时，依赖 Google Cloud Translation API Key。
 - `github_models_enabled = true` 时，默认从 `data/github.token` 读取 GitHub token，也可使用 `ASTRBOT_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN`。
 - 翻译顺序：LLM -> Google -> GitHub Models。若仅开启其中一层，则直接使用该层。
+- `source_type=twitter` 时，依赖可访问的 Nitter 镜像站；如运行环境访问受限，可在 feed 中配置 `proxy_url`。
 
 若上述 AstrBot 能力未配置，本插件会记录日志并自动降级，不影响基础 RSS 文本推送。
 

@@ -328,6 +328,7 @@ class FeedStorage:
         last_modified: str | None = None,
         last_success_time: int | None = None,
         bootstrap_done: bool | None = None,
+        since_id: str | None = None,
     ) -> dict[str, Any]:
         state = await self.get_feed_state(feed_id)
         if etag is not None:
@@ -338,6 +339,8 @@ class FeedStorage:
             state["last_success_time"] = last_success_time
         if bootstrap_done is not None:
             state["bootstrap_done"] = bool(bootstrap_done)
+        if since_id is not None:
+            state["since_id"] = str(since_id or "").strip()
         await self.put(self._feed_state_key(feed_id), state)
         return state
 
@@ -439,6 +442,20 @@ class FeedStorage:
             "summary": str(item.get("summary", "") or item.get("content", "") or "").strip(),
             "link": str(item.get("link", "")).strip(),
             "image_url": str(item.get("image_url", "")).strip(),
+            "image_urls": [
+                str(url).strip()
+                for url in item.get("image_urls", [])
+                if str(url).strip()
+            ]
+            if isinstance(item.get("image_urls", []), list)
+            else [],
+            "video_urls": [
+                str(url).strip()
+                for url in item.get("video_urls", [])
+                if str(url).strip()
+            ]
+            if isinstance(item.get("video_urls", []), list)
+            else [],
             "published_at": str(item.get("published_at", "")).strip(),
             "collected_at": now,
         }

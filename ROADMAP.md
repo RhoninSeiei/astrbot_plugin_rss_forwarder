@@ -3,6 +3,7 @@
 ## Current Focus
 
 - Stable RSS / RSSHub fetching
+- Twitter / Nitter source fetching through the same job and target model
 - Restart-safe deduplication
 - Panel-driven feed / target / job routing
 - Safer startup behavior and delivery retry handling
@@ -13,7 +14,7 @@
 - Automatic translation for pushed content
 - Automatic summarization with configurable profiles
 - Agent-assisted webpage expansion beyond raw feed excerpts
-- Agent-assisted extraction of article images and richer media payloads
+- More robust multi-image and video delivery across platform adapters
 - More granular delivery policies and conditional routing
 - Better observability for feed health, target health, and delivery history
 - Richer project memory under `docs/llm/` for future maintenance

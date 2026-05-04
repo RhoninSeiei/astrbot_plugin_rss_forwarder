@@ -1,5 +1,17 @@
 # 更新日志
 
+## v0.5.0
+
+- 新增 Twitter/Nitter 源支持，可在 `feeds[]` 中将 `source_type` 设置为 `twitter`，按推主用户名采集时间线并复用现有 job/target 推送。
+- Twitter 推文会转换为统一条目结构，继续使用现有任务级去重 TTL、发送前重复拦截、翻译链路和日报归档。
+- 新增 `feeds[].send_images` 与 `feeds[].send_videos`，可分别控制 Twitter 推送是否附带图片和视频。
+- 新增 `display_source`、`display_time`、`display_link`，文本推送与图片图卡均可控制是否显示来源、时间、链接。
+- 新增 `feeds[].send_link`，可单独关闭 Twitter 推送里的原推文链接。
+- 新增 `feeds[].nitter_url` 与 `feeds[].proxy_url`，支持为 Twitter 源配置 Nitter 镜像站和抓取代理。
+- Twitter 图片和视频会优先缓存到插件数据目录后以本地文件发送，减少代理环境下媒体发送失败。
+- 修复 Nitter 详情页临时失败或限流时 `since_id` 过早推进的问题，失败推文会在后续轮询继续尝试。
+- 暂未迁移链接识别与合并转发能力，实时推送采用“文字 + 图片 + 视频”的普通消息形式。
+
 ## v0.4.3
 
 - 修复任务级去重时效上线后，旧 7 天缓存记录过期仍会被当作新内容推送的问题。

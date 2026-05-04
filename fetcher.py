@@ -8,6 +8,7 @@ from astrbot.api import logger
 
 from .config import RSSConfig
 from .storage import FeedStorage
+from .twitter_source import TwitterTimelineFetcher
 
 
 @dataclass(slots=True)
@@ -25,6 +26,8 @@ class FeedFetcher:
     def __init__(self, config: RSSConfig, storage: FeedStorage) -> None:
         self._config = config
         self._storage = storage
+        self._twitter_fetcher = TwitterTimelineFetcher()
+        self._twitter_media_cache_dir = storage.plugin_cache_dir() / "twitter_media"
 
     async def fetch(self, job) -> list[dict[str, Any]]:
         feed_ids = list(getattr(job, "feed_ids", []) or [])
@@ -36,6 +39,12 @@ class FeedFetcher:
         for feed_id in feed_ids:
             feed = feed_map.get(feed_id)
             if feed is None:
+                continue
+            if getattr(feed, "source_type", "rss") == "twitter":
+                fetched_twitter = await self._fetch_single_twitter_feed(feed)
+                if fetched_twitter is None:
+                    continue
+                items.append(fetched_twitter)
                 continue
             fetched = await self._fetch_single_feed(feed)
             if fetched is None:
@@ -84,10 +93,27 @@ class FeedFetcher:
             logger.warning("fetch feed=%s failed: %s", feed.id, exc)
             return None
 
+    async def _fetch_single_twitter_feed(self, feed) -> dict[str, Any] | None:
+        state = await self._storage.get_feed_state(feed.id)
+        fetched = await self._twitter_fetcher.fetch(
+            feed,
+            state,
+            cache_dir=self._twitter_media_cache_dir,
+        )
+        if fetched is None:
+            return None
+        return {
+            "feed_id": fetched.feed_id,
+            "source_type": "twitter",
+            "items": fetched.items,
+            "since_id": fetched.since_id,
+            "status": fetched.status,
+        }
+
     @staticmethod
     def _build_url_and_headers(feed) -> tuple[str, dict[str, str]]:
         headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.4.3 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1",
         }
         url = feed.url

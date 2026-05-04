@@ -2,14 +2,17 @@
 
 ## 版本
 
-- 仓库版本：`0.4.3`
-- 市场版本：`v0.4.3`
+- 仓库版本：`0.5.0`
+- 市场版本：`v0.5.0`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
 - 运行时注册名：`astrbot_rss`
 
 ## 当前能力
 
 - 多 feed、多 target、多 job 的 RSS 推送编排。
+- Twitter/Nitter 源 `feeds[].source_type=twitter`，支持按推主用户名采集时间线。
+- Twitter 源可通过 `feeds[].send_images` 与 `feeds[].send_videos` 分别控制图片和视频发送。
+- 即时推送可通过 `display_source`、`display_time`、`display_link` 控制来源、时间、链接展示。
 - 持久化去重、启动延迟、历史条目抑制、失效 target 抑制。
 - 中文翻译增强，顺序为 `LLM -> Google Translate -> GitHub Models`。
 - 日报任务 `daily_digests[]`，支持文本与图片两种发送形式。

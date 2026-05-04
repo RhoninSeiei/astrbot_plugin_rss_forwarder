@@ -76,6 +76,48 @@ class _FakeStorage:
         self.pending.discard(fingerprint)
 
 
+class _Plain:
+    def __init__(self, text=""):
+        self.text = text
+
+
+class _Image:
+    def __init__(self, url=""):
+        self.url = url
+        self.path = ""
+
+    @classmethod
+    def fromURL(cls, url):
+        return cls(url=url)
+
+    @classmethod
+    def fromFileSystem(cls, path):
+        item = cls(url="")
+        item.path = path
+        return item
+
+
+class _Video:
+    def __init__(self, url=""):
+        self.url = url
+        self.path = ""
+
+    @classmethod
+    def fromURL(cls, url):
+        return cls(url=url)
+
+    @classmethod
+    def fromFileSystem(cls, path):
+        item = cls(url="")
+        item.path = path
+        return item
+
+
+class _MessageChain:
+    def __init__(self, chain=None):
+        self.chain = chain or []
+
+
 class DispatcherTests(unittest.IsolatedAsyncioTestCase):
     def _build_config(self):
         return RSSConfig.from_context(
@@ -245,6 +287,143 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.success_count, 1)
         self.assertEqual(context.sent[0], ("default:GroupMessage:1", "digest-image"))
+
+    async def test_twitter_text_dispatch_includes_multiple_images_and_videos(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        dispatcher._resolve_image_cls = lambda: _Image
+        dispatcher._resolve_video_cls = lambda: _Video
+
+        item = {
+            "job_id": "job-1",
+            "source_type": "twitter",
+            "guid": "twitter:alice:1",
+            "title": "@alice",
+            "summary": "hello",
+            "link": "https://x.com/alice/status/1",
+            "image_urls": [
+                "https://nitter.example.com/pic/a.jpg",
+                "https://nitter.example.com/pic/b.jpg",
+            ],
+            "video_urls": ["https://nitter.example.com/video/a.mp4"],
+            "image_paths": ["/tmp/a.jpg"],
+            "video_paths": ["/tmp/a.mp4"],
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        payload = context.sent[0][1]
+        self.assertIsInstance(payload, _MessageChain)
+        self.assertEqual(sum(isinstance(part, _Image) for part in payload.chain), 1)
+        self.assertEqual(sum(isinstance(part, _Video) for part in payload.chain), 1)
+        image = next(part for part in payload.chain if isinstance(part, _Image))
+        video = next(part for part in payload.chain if isinstance(part, _Video))
+        self.assertEqual(image.path, "/tmp/a.jpg")
+        self.assertEqual(video.path, "/tmp/a.mp4")
+
+    async def test_display_flags_hide_source_time_and_twitter_link(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        config = RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-1",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:GroupMessage:1",
+                        "enabled": True,
+                    }
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-1"],
+                        "interval_seconds": 300,
+                        "enabled": True,
+                    }
+                ],
+                "display_source": False,
+                "display_time": False,
+                "display_link": True,
+            }
+        )
+        dispatcher = FeedDispatcher(context=context, config=config, storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+
+        item = {
+            "job_id": "job-1",
+            "source_type": "twitter",
+            "guid": "twitter:alice:2",
+            "title": "@alice",
+            "summary": "hello",
+            "source": "Twitter @alice",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://x.com/alice/status/2",
+            "send_link": False,
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        plain = context.sent[0][1].chain[0].text
+        self.assertIn("@alice", plain)
+        self.assertIn("hello", plain)
+        self.assertNotIn("来源：", plain)
+        self.assertNotIn("时间：", plain)
+        self.assertNotIn("https://x.com/alice/status/2", plain)
+
+    async def test_display_flags_hide_image_card_meta_and_link(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        config = RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-1",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:GroupMessage:1",
+                        "enabled": True,
+                    }
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-1"],
+                        "interval_seconds": 300,
+                        "enabled": True,
+                    }
+                ],
+                "display_source": False,
+                "display_time": False,
+                "display_link": False,
+            }
+        )
+        dispatcher = FeedDispatcher(context=context, config=config, storage=storage)
+
+        html = dispatcher._build_card_html(
+            {
+                "job_id": "job-1",
+                "guid": "item-1",
+                "title": "Title",
+                "summary": "Summary",
+                "source": "Feed",
+                "published_at": "2026-05-05T00:00:00+00:00",
+                "link": "https://example.com/post",
+            }
+        )
+
+        self.assertNotIn("来源：", html)
+        self.assertNotIn("时间：", html)
+        self.assertNotIn("https://example.com/post", html)
 
 
 if __name__ == "__main__":

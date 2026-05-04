@@ -15,7 +15,54 @@
           "url": {
             "type": "string",
             "default": "",
-            "description": "RSS/Atom 源地址"
+            "description": "RSS/Atom 源地址",
+            "hint": "source_type=rss 时必须填写；source_type=twitter 时可留空并使用默认 Nitter。"
+          },
+          "source_type": {
+            "type": "string",
+            "default": "rss",
+            "options": [
+              "rss",
+              "twitter"
+            ],
+            "description": "源类型",
+            "hint": "rss=普通 RSS/Atom；twitter=通过 Nitter 抓取指定推主时间线。"
+          },
+          "username": {
+            "type": "string",
+            "default": "",
+            "description": "Twitter 推主用户名",
+            "hint": "仅 source_type=twitter 生效，填写不带 @ 的用户名。"
+          },
+          "nitter_url": {
+            "type": "string",
+            "default": "",
+            "description": "Nitter 镜像站地址",
+            "hint": "仅 source_type=twitter 生效。留空时使用 https://nitter.net；也可在 url 字段填写。"
+          },
+          "proxy_url": {
+            "type": "string",
+            "default": "",
+            "description": "Twitter/Nitter 抓取代理地址",
+            "hint": "仅 source_type=twitter 生效。示例：http://127.0.0.1:7890；留空使用运行环境默认网络。"
+          },
+          "send_images": {
+            "type": "bool",
+            "default": true,
+            "description": "Twitter 推送附带图片",
+            "hint": "仅 source_type=twitter 生效；关闭后仍保留文字与链接。"
+          },
+          "send_videos": {
+            "type": "bool",
+            "default": true,
+            "description": "Twitter 推送附带视频",
+            "hint": "仅 source_type=twitter 生效；视频发送失败时会回退为视频链接。"
+          },
+          "send_link": {
+            "type": "bool",
+            "default": true,
+            "description": "Twitter 推送附带原推文链接",
+            "hint": "仅 source_type=twitter 生效；关闭后仍会显示推主来源和正文。"
           },
           "auth_mode": {
             "type": "string",
@@ -355,6 +402,24 @@
       "image"
     ],
     "description": "消息渲染模式：text(纯文本+链接) / image(图文卡片)"
+  },
+  "display_source": {
+    "type": "bool",
+    "default": true,
+    "description": "推送中显示来源",
+    "hint": "同时作用于文本推送与图片图卡。Twitter 来源显示为推主用户名。"
+  },
+  "display_time": {
+    "type": "bool",
+    "default": true,
+    "description": "推送中显示时间",
+    "hint": "同时作用于文本推送与图片图卡。"
+  },
+  "display_link": {
+    "type": "bool",
+    "default": true,
+    "description": "推送中显示链接",
+    "hint": "同时作用于文本推送与图片图卡；Twitter 源还可用 feed 内 send_link 单独关闭。"
   },
   "summary_max_chars": {
     "type": "int",

@@ -47,11 +47,15 @@
 
 ### `fetcher.py`
 
-HTTP 抓取。负责 feed 请求、鉴权方式、ETag 与 Last-Modified 相关元数据处理。
+HTTP 抓取。负责 feed 请求、鉴权方式、ETag、Last-Modified 与 Twitter 源游标相关元数据处理。
+
+### `twitter_source.py`
+
+Twitter/Nitter 源适配器。负责通过 Nitter HTML 获取推主时间线、提取推文详情，并把图片、视频、推文链接等原始字段交给解析层。
 
 ### `parser.py`
 
-RSS 解析。负责将源数据转换为统一 item 结构，并保留 `guid`、`link`、发布时间、图片等字段。
+RSS 与 Twitter 原始数据解析。负责将源数据转换为统一 item 结构，并保留 `guid`、`link`、发布时间、图片、视频等字段。
 
 ### `commands.py`
 
@@ -70,7 +74,7 @@ RSS 解析。负责将源数据转换为统一 item 结构，并保留 `guid`、
 
 ### 即时推送
 
-1. `scheduler.py` 按 job 拉取 feed。
+1. `scheduler.py` 按 job 拉取 feed，普通 RSS 由 `fetcher.py` 处理，Twitter 源由 `twitter_source.py` 处理。
 2. `parser.py` 解析为统一 item。
 3. `storage.py` 归档日报素材。
 4. `scheduler.py` 检查批次内去重与持久化去重。

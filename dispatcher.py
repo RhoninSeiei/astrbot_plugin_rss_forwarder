@@ -119,7 +119,7 @@ class FeedDispatcher:
         source = str(item.get("source", "") or item.get("feed_title", "")).strip() or "未知来源"
         published_at = self._format_time(item)
         summary, truncated = self._truncate_summary(item)
-        link = str(item.get("link", "")).strip()
+        link = str(item.get("link", "")).strip() if self._should_display_link(item) else ""
 
         return {
             "title": title,
@@ -134,6 +134,19 @@ class FeedDispatcher:
     def _normalize_text(value: Any) -> str:
         text = str(value or "").strip()
         return " ".join(text.split())
+
+    def _should_display_source(self, item: dict[str, Any] | None = None) -> bool:
+        return bool(getattr(self._config, "display_source", True))
+
+    def _should_display_time(self, item: dict[str, Any] | None = None) -> bool:
+        return bool(getattr(self._config, "display_time", True))
+
+    def _should_display_link(self, item: dict[str, Any] | None = None) -> bool:
+        if not bool(getattr(self._config, "display_link", True)):
+            return False
+        if item and str(item.get("source_type", "") or "").strip().lower() == "twitter":
+            return bool(item.get("send_link", True))
+        return True
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -169,13 +182,32 @@ class FeedDispatcher:
             ),
             "render_mode": str(self._config.render_mode or "text").strip(),
         }
-        image_url = str(item.get("image_url", "") or "").strip()
+        image_paths = self._item_image_paths(item)
+        if image_paths:
+            local_hashes = []
+            for image_path in image_paths:
+                image_digest = await self._hash_local_file(image_path)
+                if image_digest:
+                    local_hashes.append(image_digest)
+            if local_hashes:
+                payload["image_file_sha256"] = local_hashes
+        has_local_image_hash = bool(payload.get("image_file_sha256"))
+        image_url = "" if has_local_image_hash else str(item.get("image_url", "") or "").strip()
         if image_url:
             image_digest = await self._hash_image_bytes(image_url)
             if image_digest:
                 payload["image_sha256"] = image_digest
             else:
                 payload["image_url"] = self._normalize_url(image_url)
+        image_urls = [] if has_local_image_hash else self._item_image_urls(item)
+        if image_urls:
+            payload["image_urls"] = [self._normalize_url(url) for url in image_urls]
+        video_paths = self._item_video_paths(item)
+        if video_paths:
+            payload["video_paths"] = [hashlib.sha256(path.encode("utf-8")).hexdigest() for path in video_paths]
+        video_urls = [] if video_paths else self._item_video_urls(item)
+        if video_urls:
+            payload["video_urls"] = [self._normalize_url(url) for url in video_urls]
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -204,10 +236,32 @@ class FeedDispatcher:
         except (HTTPError, URLError, OSError, ValueError):
             return ""
 
+    async def _hash_local_file(self, path: str) -> str:
+        try:
+            return await asyncio.to_thread(self._hash_local_file_sync, path)
+        except (OSError, ValueError):
+            return ""
+
+    def _hash_local_file_sync(self, path: str) -> str:
+        digest = hashlib.sha256()
+        total = 0
+        with open(path, "rb") as fp:
+            while True:
+                chunk = fp.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > self._IMAGE_HASH_MAX_BYTES:
+                    raise ValueError("local_image_too_large_for_hash")
+                digest.update(chunk)
+        if total <= 0:
+            return ""
+        return digest.hexdigest()
+
     def _hash_image_bytes_sync(self, image_url: str) -> str:
         request = Request(
             image_url,
-            headers={"User-Agent": "AstrBotRSSForwarder/0.4.3"},
+            headers={"User-Agent": "AstrBotRSSForwarder/0.5.0"},
         )
         digest = hashlib.sha256()
         total = 0
@@ -301,11 +355,26 @@ class FeedDispatcher:
 
             return Image
 
+    @staticmethod
+    def _resolve_video_cls():
+        try:
+            from astrbot.api.message_components import Video
+
+            return Video
+        except Exception:
+            from astrbot.core.message.components import Video
+
+            return Video
+
     def _create_message_chain(
         self,
         text_lines: list[str],
         link_line: str | None = None,
         image_url: str | None = None,
+        image_urls: list[str] | None = None,
+        video_urls: list[str] | None = None,
+        image_paths: list[str] | None = None,
+        video_paths: list[str] | None = None,
     ):
         MessageChain = self._resolve_messagechain_cls()
         Plain = self._resolve_plain_cls()
@@ -317,12 +386,43 @@ class FeedDispatcher:
 
         components: list[Any] = [Plain(plain_text)]
 
-        if image_url:
+        local_image_added = False
+        for image_path in self._dedupe_urls(image_paths or []):
             try:
                 Image = self._resolve_image_cls()
-                components.append(Image.fromURL(image_url))
+                components.append(Image.fromFileSystem(image_path))
+                local_image_added = True
+            except Exception as exc:
+                logger.warning("build local image component failed, fallback to url if any: %s", exc)
+
+        normalized_image_urls = self._dedupe_urls(
+            []
+            if local_image_added
+            else list(image_urls or []) + ([image_url] if image_url else [])
+        )
+        for current_image_url in normalized_image_urls:
+            try:
+                Image = self._resolve_image_cls()
+                components.append(Image.fromURL(current_image_url))
             except Exception as exc:
                 logger.warning("build image component failed, keep text only: %s", exc)
+
+        local_video_added = False
+        for video_path in self._dedupe_urls(video_paths or []):
+            try:
+                Video = self._resolve_video_cls()
+                components.append(Video.fromFileSystem(video_path))
+                local_video_added = True
+            except Exception as exc:
+                logger.warning("build local video component failed, fallback to url if any: %s", exc)
+
+        for video_url in self._dedupe_urls([] if local_video_added else video_urls or []):
+            try:
+                Video = self._resolve_video_cls()
+                components.append(Video.fromURL(video_url))
+            except Exception as exc:
+                logger.warning("build video component failed, fallback to link: %s", exc)
+                components.append(Plain(f"视频：{video_url}"))
 
         try:
             return MessageChain(chain=components)
@@ -346,13 +446,17 @@ class FeedDispatcher:
         link_text = self._safe_format(template.link_text, data)
         link = data["link"]
         image_url = str(item.get("image_url", "") or "").strip()
+        image_urls = self._item_image_urls(item)
+        video_urls = self._item_video_urls(item)
+        image_paths = self._item_image_paths(item)
+        video_paths = self._item_video_paths(item)
 
         text_lines = [
             line
             for line in [
                 title,
-                f"来源：{source}" if source else "",
-                f"时间：{published_at}" if published_at else "",
+                f"来源：{source}" if source and self._should_display_source(item) else "",
+                f"时间：{published_at}" if published_at and self._should_display_time(item) else "",
                 summary,
             ]
             if line
@@ -362,7 +466,15 @@ class FeedDispatcher:
             link_line = ""
             if link:
                 link_line = f"{link_text}: {link}" if data["truncated"] == "1" else link
-            return self._create_message_chain(text_lines, link_line or None, image_url or None)
+            return self._create_message_chain(
+                text_lines,
+                link_line or None,
+                image_url or None,
+                image_urls=image_urls,
+                video_urls=video_urls,
+                image_paths=image_paths,
+                video_paths=video_paths,
+            )
         except Exception as exc:  # pragma: no cover - 依赖运行环境
             logger.error("build text MessageChain failed: %s", exc)
             raise
@@ -376,10 +488,17 @@ class FeedDispatcher:
         summary = escape(self._safe_format(template.summary, data))
         link = escape(data["link"])
         link_text = escape(self._safe_format(template.link_text, data) or "查看全文")
+        meta_parts = []
+        if source and self._should_display_source(item):
+            meta_parts.append(f"来源：{source}")
+        if published_at and self._should_display_time(item):
+            meta_parts.append(f"时间：{published_at}")
+        meta = " · ".join(meta_parts)
 
         footer = ""
-        if link:
+        if link and self._should_display_link(item):
             footer = f'<a class="link" href="{link}">{link_text}</a>'
+        meta_html = f"<div class='meta'>{meta}</div>" if meta else ""
 
         return (
             "<html><head><meta charset='utf-8' /><style>"
@@ -390,7 +509,7 @@ class FeedDispatcher:
             ".summary{color:#1f2937;font-size:15px;line-height:1.7;white-space:pre-wrap;}"
             ".link{display:inline-block;margin-top:12px;color:#2563eb;text-decoration:none;font-weight:600;}"
             "</style></head><body>"
-            f"<div class='card'><div class='title'>{title}</div><div class='meta'>来源：{source} · 时间：{published_at}</div>"
+            f"<div class='card'><div class='title'>{title}</div>{meta_html}"
             f"<div class='summary'>{summary}</div>{footer}</div></body></html>"
         )
 
@@ -471,6 +590,134 @@ class FeedDispatcher:
                 return chain
             raise
 
+    def _build_local_image_only_chain(self, image_path: str):
+        MessageChain = self._resolve_messagechain_cls()
+        Image = self._resolve_image_cls()
+
+        try:
+            return MessageChain(chain=[Image.fromFileSystem(image_path)])
+        except TypeError:
+            chain = MessageChain()
+            if hasattr(chain, "chain"):
+                chain.chain = [Image.fromFileSystem(image_path)]
+                return chain
+            raise
+
+    def _build_video_only_chain(self, video_url: str):
+        MessageChain = self._resolve_messagechain_cls()
+        Plain = self._resolve_plain_cls()
+
+        try:
+            Video = self._resolve_video_cls()
+            component = Video.fromURL(video_url)
+        except Exception as exc:
+            logger.warning("build video component failed, fallback to link: %s", exc)
+            component = Plain(f"视频：{video_url}")
+
+        try:
+            return MessageChain(chain=[component])
+        except TypeError:
+            chain = MessageChain()
+            if hasattr(chain, "chain"):
+                chain.chain = [component]
+                return chain
+            raise
+
+    def _build_local_video_only_chain(self, video_path: str):
+        MessageChain = self._resolve_messagechain_cls()
+        Plain = self._resolve_plain_cls()
+
+        try:
+            Video = self._resolve_video_cls()
+            component = Video.fromFileSystem(video_path)
+        except Exception as exc:
+            logger.warning("build local video component failed, fallback to text: %s", exc)
+            component = Plain(f"视频文件：{video_path}")
+
+        try:
+            return MessageChain(chain=[component])
+        except TypeError:
+            chain = MessageChain()
+            if hasattr(chain, "chain"):
+                chain.chain = [component]
+                return chain
+            raise
+
+    def _build_source_media_payloads(self, item: dict[str, Any]) -> list[Any]:
+        payloads: list[Any] = []
+        image_paths = self._item_image_paths(item)
+        video_paths = self._item_video_paths(item)
+        local_image_added = False
+        for image_path in image_paths:
+            try:
+                image_chain = self._build_local_image_only_chain(image_path)
+                payloads.append(self._as_chain_result_if_possible(item, image_chain))
+                local_image_added = True
+            except Exception as exc:
+                logger.warning("build local source image payload failed: %s", exc)
+        for image_url in ([] if local_image_added else self._item_image_urls(item)):
+            try:
+                image_chain = self._build_image_only_chain(image_url)
+                payloads.append(self._as_chain_result_if_possible(item, image_chain))
+            except Exception as exc:
+                logger.warning("build source image payload failed: %s", exc)
+        local_video_added = False
+        for video_path in video_paths:
+            try:
+                video_chain = self._build_local_video_only_chain(video_path)
+                payloads.append(self._as_chain_result_if_possible(item, video_chain))
+                local_video_added = True
+            except Exception as exc:
+                logger.warning("build local source video payload failed: %s", exc)
+        for video_url in ([] if local_video_added else self._item_video_urls(item)):
+            try:
+                video_chain = self._build_video_only_chain(video_url)
+                payloads.append(self._as_chain_result_if_possible(item, video_chain))
+            except Exception as exc:
+                logger.warning("build source video payload failed: %s", exc)
+        return payloads
+
+    @classmethod
+    def _item_image_urls(cls, item: dict[str, Any]) -> list[str]:
+        urls = item.get("image_urls", [])
+        if isinstance(urls, list):
+            return cls._dedupe_urls([str(url).strip() for url in urls if str(url).strip()])
+        image_url = str(item.get("image_url", "") or "").strip()
+        return [image_url] if image_url else []
+
+    @classmethod
+    def _item_image_paths(cls, item: dict[str, Any]) -> list[str]:
+        paths = item.get("image_paths", [])
+        if not isinstance(paths, list):
+            return []
+        return cls._dedupe_urls([str(path).strip() for path in paths if str(path).strip()])
+
+    @classmethod
+    def _item_video_urls(cls, item: dict[str, Any]) -> list[str]:
+        urls = item.get("video_urls", [])
+        if not isinstance(urls, list):
+            return []
+        return cls._dedupe_urls([str(url).strip() for url in urls if str(url).strip()])
+
+    @classmethod
+    def _item_video_paths(cls, item: dict[str, Any]) -> list[str]:
+        paths = item.get("video_paths", [])
+        if not isinstance(paths, list):
+            return []
+        return cls._dedupe_urls([str(path).strip() for path in paths if str(path).strip()])
+
+    @staticmethod
+    def _dedupe_urls(urls: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for url in urls:
+            text = str(url or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
     async def html_render(self, html: str):
         if hasattr(self.context, "html_render"):
             return await self.context.html_render(html)
@@ -502,16 +749,11 @@ class FeedDispatcher:
             logger.warning("skip dispatch: no available targets for item=%s", item)
             return DispatchResult()
 
-        extra_image_payload = None
+        extra_payloads: list[Any] = []
         if self._config.render_mode == "image":
             payload, source_image_already_included = await self._build_image_payload(item)
-            image_url = str(item.get("image_url", "") or "").strip()
-            if image_url and not source_image_already_included:
-                try:
-                    image_chain = self._build_image_only_chain(image_url)
-                    extra_image_payload = self._as_chain_result_if_possible(item, image_chain)
-                except Exception as exc:
-                    logger.warning("build extra source image payload failed: %s", exc)
+            if not source_image_already_included:
+                extra_payloads.extend(self._build_source_media_payloads(item))
         else:
             try:
                 chain = self._build_text_message_chain(item)
@@ -538,12 +780,12 @@ class FeedDispatcher:
                 await self.context.send_message(unified_msg_origin, payload)
                 result.success_count += 1
                 await self._confirm_dispatch(fingerprint)
-                if extra_image_payload is not None:
+                for extra_payload in extra_payloads:
                     try:
-                        await self.context.send_message(unified_msg_origin, extra_image_payload)
+                        await self.context.send_message(unified_msg_origin, extra_payload)
                     except Exception as exc:
                         logger.warning(
-                            "extra source image send failed origin=%s: %s",
+                            "extra source media send failed origin=%s: %s",
                             unified_msg_origin,
                             exc,
                         )

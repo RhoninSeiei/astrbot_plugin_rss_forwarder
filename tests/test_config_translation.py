@@ -167,6 +167,81 @@ class ConfigTranslationTests(unittest.TestCase):
         with self.assertRaises(ConfigValidationError):
             RSSConfig.from_context(conf)
 
+    def test_twitter_feed_parses_media_switches(self):
+        conf = _minimal_runtime_conf()
+        conf["feeds"] = [
+            {
+                "id": "tw-1",
+                "source_type": "twitter",
+                "username": "@alice",
+                "nitter_url": "https://nitter.example.com",
+                "proxy_url": "http://127.0.0.1:7890",
+                "send_images": False,
+                "send_videos": True,
+                "send_link": False,
+                "enabled": True,
+            }
+        ]
+        conf["jobs"][0]["feed_ids"] = ["tw-1"]
+
+        cfg = RSSConfig.from_context(conf)
+
+        feed = cfg.feeds[0]
+        self.assertEqual(feed.source_type, "twitter")
+        self.assertEqual(feed.username, "alice")
+        self.assertEqual(feed.nitter_url, "https://nitter.example.com")
+        self.assertEqual(feed.proxy_url, "http://127.0.0.1:7890")
+        self.assertFalse(feed.send_images)
+        self.assertTrue(feed.send_videos)
+        self.assertFalse(feed.send_link)
+
+    def test_display_flags_parse(self):
+        conf = _minimal_runtime_conf()
+        conf.update(
+            {
+                "display_source": False,
+                "display_time": False,
+                "display_link": False,
+            }
+        )
+
+        cfg = RSSConfig.from_context(conf)
+
+        self.assertFalse(cfg.display_source)
+        self.assertFalse(cfg.display_time)
+        self.assertFalse(cfg.display_link)
+
+    def test_enabled_twitter_feed_requires_username(self):
+        conf = _minimal_runtime_conf()
+        conf["feeds"] = [
+            {
+                "id": "tw-1",
+                "source_type": "twitter",
+                "enabled": True,
+            }
+        ]
+        conf["jobs"][0]["feed_ids"] = ["tw-1"]
+
+        with self.assertRaises(ConfigValidationError):
+            RSSConfig.from_context(conf)
+
+    def test_twitter_feed_accepts_socks_proxy_url(self):
+        conf = _minimal_runtime_conf()
+        conf["feeds"] = [
+            {
+                "id": "tw-1",
+                "source_type": "twitter",
+                "username": "alice",
+                "proxy_url": "socks5://127.0.0.1:7891",
+                "enabled": True,
+            }
+        ]
+        conf["jobs"][0]["feed_ids"] = ["tw-1"]
+
+        cfg = RSSConfig.from_context(conf)
+
+        self.assertEqual(cfg.feeds[0].proxy_url, "socks5://127.0.0.1:7891")
+
     def test_disabled_draft_entries_can_be_saved(self):
         conf = {
             "feeds": [

@@ -25,6 +25,13 @@ class FeedParser:
         entries: list[dict[str, Any]] = []
         for raw in raw_items:
             feed_id = str(raw.get("feed_id", "")).strip()
+            if str(raw.get("source_type", "")).strip().lower() == "twitter":
+                parsed_twitter = self._parse_twitter(feed_id, raw)
+                for item in parsed_twitter:
+                    if job is not None:
+                        item.setdefault("job_id", getattr(job, "id", ""))
+                    entries.append(item)
+                continue
             body = str(raw.get("body", "") or "")
             if not body:
                 continue
@@ -37,6 +44,57 @@ class FeedParser:
             except Exception as exc:
                 logger.warning("parse feed=%s failed: %s", feed_id, exc)
         return entries
+
+    def _parse_twitter(self, feed_id: str, raw: dict[str, Any]) -> list[dict[str, Any]]:
+        feed_title = str(raw.get("feed_title", "") or "").strip()
+        result: list[dict[str, Any]] = []
+        raw_items = raw.get("items", []) or []
+        if not isinstance(raw_items, list):
+            return []
+
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            username = str(item.get("username", "") or "").strip().lstrip("@")
+            tweet_id = str(item.get("tweet_id", "") or "").strip()
+            if not username or not tweet_id:
+                continue
+            screen_name = str(item.get("screen_name", "") or "").strip() or username
+            images = self._normalize_string_list(item.get("images", []))
+            videos = self._normalize_string_list(item.get("videos", []))
+            image_paths = self._normalize_string_list(item.get("image_paths", []))
+            video_paths = self._normalize_string_list(item.get("video_paths", []))
+            text = str(item.get("text", "") or "").strip()
+            source = feed_title or f"Twitter @{username}"
+            title = f"@{username}"
+            if screen_name and screen_name != username:
+                title = f"@{username} ({screen_name})"
+            link = str(item.get("link", "") or "").strip() or f"https://x.com/{username}/status/{tweet_id}"
+            result.append(
+                {
+                    "feed_id": feed_id,
+                    "feed_title": source,
+                    "source_type": "twitter",
+                    "title": title,
+                    "link": link,
+                    "guid": f"twitter:{username}:{tweet_id}",
+                    "summary": text,
+                    "published_at": str(item.get("published_at", "") or "").strip(),
+                    "source": source,
+                    "image_url": images[0] if images else "",
+                    "image_urls": images,
+                    "video_urls": videos,
+                    "image_paths": image_paths,
+                    "video_paths": video_paths,
+                    "username": username,
+                    "tweet_id": tweet_id,
+                    "screen_name": screen_name,
+                    "nitter_link": str(item.get("nitter_link", "") or "").strip(),
+                    "is_r18": bool(item.get("is_r18", False)),
+                    "send_link": bool(item.get("send_link", True)),
+                }
+            )
+        return result
 
     def _parse_xml(self, feed_id: str, xml_text: str) -> list[dict[str, Any]]:
         root = ET.fromstring(xml_text)
@@ -166,6 +224,17 @@ class FeedParser:
             return False
         parsed = urlparse(url)
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    @staticmethod
+    def _normalize_string_list(value) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                result.append(text)
+        return result
 
     @staticmethod
     def _strip_ns(tag: str) -> str:

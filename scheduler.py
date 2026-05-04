@@ -442,6 +442,7 @@ class RSSScheduler:
                     last_modified=meta.get("last_modified"),
                     last_success_time=now_ts,
                     bootstrap_done=True,
+                    since_id=meta.get("since_id"),
                 )
                 logger.info(
                     "digest-feed=%s collected: fetched=%s parsed=%s",
@@ -792,6 +793,7 @@ class RSSScheduler:
                         last_modified=meta.get("last_modified"),
                         last_success_time=now_ts,
                         bootstrap_done=True,
+                        since_id=meta.get("since_id"),
                     )
             except Exception as exc:
                 error_summary = f"{type(exc).__name__}: {exc}"
@@ -845,11 +847,13 @@ class RSSScheduler:
                 continue
             etag = str(raw_item.get("etag", "")).strip()
             last_modified = str(raw_item.get("last_modified", "")).strip()
-            if not etag and not last_modified:
+            since_id = str(raw_item.get("since_id", "")).strip()
+            if not etag and not last_modified and not since_id:
                 continue
             meta_by_feed[feed_id] = {
                 "etag": etag,
                 "last_modified": last_modified,
+                "since_id": since_id,
             }
         return meta_by_feed
 
