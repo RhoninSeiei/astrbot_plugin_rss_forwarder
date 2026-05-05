@@ -14,7 +14,8 @@
 - 插件目录：`/volume1/docker/astrbot/data/plugins/astrbot_plugin_rss_forwarder`
 - 配置文件：`/volume1/docker/astrbot/data/config/astrbot_plugin_rss_forwarder_config.json`
 - 面板认证配置：`/volume1/docker/astrbot/data/cmd_config.json`
-- 状态文件：`/volume1/docker/astrbot/data/plugin_data/astrbot_rss/state.json`
+- 状态文件：`/volume1/docker/astrbot/data/plugin_data/astrbot_plugin_rss_forwarder/state.json`
+- 旧状态文件：`/volume1/docker/astrbot/data/plugin_data/astrbot_rss/state.json`，新状态文件缺失时会自动复制
 
 ## 单插件热重载
 

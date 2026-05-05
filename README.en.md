@@ -36,6 +36,12 @@ This project is not meant to be a drop-in clone of [`Soulter/astrbot_plugin_rss`
 - startup-delay and retry-guard logic for unstable platform readiness
 - a clearer path for future LLM and agent enrichment features
 
+## Twitter/Nitter References
+
+The Twitter/Nitter integration references [`Ars1027/astrbot_plugin_twitter`](https://github.com/Ars1027/astrbot_plugin_twitter) and the deployment-oriented fork [`RhoninSeiei/astrbot_plugin_twitter`](https://github.com/RhoninSeiei/astrbot_plugin_twitter). Its Nitter timeline parsing, `since_id` cursor handling, and media cache design informed this plugin's implementation.
+
+The original Twitter plugin remains a better fit for Twitter-only usage, in-chat follow management, link recognition, and merged-forward delivery. This plugin treats Twitter/Nitter as one feed source type, then reuses the existing feeds, jobs, targets, deduplication, translation, and daily digest pipeline.
+
 ## Panel Configuration
 
 The plugin ships `_conf_schema.json`, so all major settings can be edited from AstrBot plugin UI:
@@ -96,15 +102,16 @@ Example:
 ```
 
 Notes:
-- Dedup state is persisted to both AstrBot KV and `data/plugin_data/astrbot_rss/state.json`
+- Dedup state is persisted to both AstrBot KV and `data/plugin_data/astrbot_plugin_rss_forwarder/state.json`
 - Items older than a feed's `last_success_time` are marked seen without being pushed again
 - `startup_delay_seconds` defaults to `45` so platform adapters have time to become ready
 - All `translation.*` fields are available in AstrBot plugin UI
 - `daily_digests[]` works independently from realtime jobs, so a feed can be archived and summarized even if it is never pushed as an immediate RSS message
-- For Twitter feeds, set `source_type=twitter`, fill `username`, and optionally set `nitter_url`, `proxy_url`, `send_images`, and `send_videos`
+- For Twitter feeds, set `source_type=twitter`, fill `username`, and optionally set `nitter_url`, `proxy_url`, `send_images`, `send_videos`, and `max_new_items`
 - `nitter_url` can point to a self-hosted Nitter service
 - `display_source`, `display_time`, and `display_link` control source/time/link visibility in both text pushes and image cards
 - Twitter feeds can set `send_link=false` to hide the original tweet link while keeping the username source
+- Twitter feeds default to `max_new_items=1`, so only the latest new tweet is fetched per poll; set it to `0` to fetch all new tweets
 - Temporary Nitter detail-page failures or rate limits do not advance `since_id` past the failed tweet, so later polls can retry it
 - Twitter feeds record the latest tweet cursor on the first enabled poll, then push only later tweets
 - Twitter link recognition and merged-forward messages are not part of this integration stage

@@ -1,5 +1,13 @@
 # 更新日志
 
+## v0.5.1
+
+- 运行时注册名统一为 `astrbot_plugin_rss_forwarder`，并自动从旧 `astrbot_rss` 状态目录迁移去重记录。
+- 插件面板的源配置改为 `RSS/Twitter 源配置`，新增条目时可分别选择 `RSS/Atom 源` 与 `Twitter/Nitter 源`。
+- 旧配置中的 `__template_key=feed` 会按 `source_type` 自动迁移为 `rss_feed` 或 `twitter_feed`，迁移后会保存回面板配置。
+- 新增 `feeds[].max_new_items`，Twitter/Nitter 源默认每轮只抓取最新 1 条新推文，填 `0` 时抓取全部新推文。
+- README 补充 Twitter/Nitter 功能参考来源与差异说明，便于用户按实际需求选择插件。
+
 ## v0.5.0
 
 - 新增 Twitter/Nitter 源支持，可在 `feeds[]` 中将 `source_type` 设置为 `twitter`，按推主用户名采集时间线并复用现有 job/target 推送。

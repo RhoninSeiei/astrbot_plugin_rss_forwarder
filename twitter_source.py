@@ -56,6 +56,7 @@ class TwitterTimelineFetcher:
         base_url = self._resolve_nitter_url(feed)
         proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
         timeout = max(int(getattr(feed, "timeout", 10) or 10), 1)
+        max_new_items = max(int(getattr(feed, "max_new_items", 1) or 0), 0)
 
         try:
             timeline_html = await asyncio.to_thread(
@@ -74,6 +75,8 @@ class TwitterTimelineFetcher:
 
         latest_id = timeline_ids[0]
         new_ids = self._select_new_ids(timeline_ids, since_id)
+        if max_new_items > 0:
+            new_ids = new_ids[:max_new_items]
         if not since_id:
             return TwitterFetchResult(feed_id=feed.id, items=[], since_id=latest_id)
 
@@ -134,7 +137,7 @@ class TwitterTimelineFetcher:
             return TwitterTimelineFetcher._open_text_with_httpx(url, proxy_url, timeout)
 
         headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.1 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.6",
         }

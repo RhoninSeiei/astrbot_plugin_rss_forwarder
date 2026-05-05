@@ -68,8 +68,9 @@
 - Twitter 首次启用时记录最新 `since_id`，后续轮询只发送新增推文。
 - 图片和视频发送由 `feeds[].send_images`、`feeds[].send_videos` 分别控制。
 - 原推文链接发送由 `feeds[].send_link` 单独控制；普通 RSS 链接显示由全局 `display_link` 控制。
+- 每轮 Twitter 抓取数量由 `feeds[].max_new_items` 控制，默认值 `1` 用于减少详情页请求并抑制积压推文刷屏。
 - 来源、时间、链接显示由 `display_source`、`display_time`、`display_link` 控制，文本推送与图片图卡共用同一组开关。
-- Twitter 媒体优先缓存到 `data/plugin_data/astrbot_rss/twitter_media` 后以本地文件发送，降低代理环境下图片和视频发送失败的概率。
+- Twitter 媒体优先缓存到 `data/plugin_data/astrbot_plugin_rss_forwarder/twitter_media` 后以本地文件发送，降低代理环境下图片和视频发送失败的概率。
 
 ### 原因
 

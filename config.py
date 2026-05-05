@@ -31,6 +31,7 @@ class FeedConfig:
     send_images: bool = True
     send_videos: bool = True
     send_link: bool = True
+    max_new_items: int = 1
     auth_mode: str = "none"
     key: str = ""
     enabled: bool = True
@@ -145,6 +146,14 @@ class RSSConfig:
         else:
             runtime_conf = getattr(context_or_config, "config", {}) or {}
 
+        if cls._migrate_panel_template_keys(runtime_conf):
+            save_config = getattr(runtime_conf, "save_config", None)
+            if callable(save_config):
+                try:
+                    save_config()
+                except Exception as exc:
+                    logger.warning("failed to save migrated feed template keys: %s", exc)
+
         feeds_raw = cls._normalize_collection(runtime_conf.get("feeds", []))
         targets_raw = cls._normalize_collection(runtime_conf.get("targets", []))
         jobs_raw = cls._normalize_collection(runtime_conf.get("jobs", []))
@@ -162,6 +171,7 @@ class RSSConfig:
                 send_images=bool(item.get("send_images", True)),
                 send_videos=bool(item.get("send_videos", True)),
                 send_link=bool(item.get("send_link", True)),
+                max_new_items=int(item.get("max_new_items", 1) or 0),
                 auth_mode=str(item.get("auth_mode", "none")).strip() or "none",
                 key=str(item.get("key", "")).strip(),
                 enabled=bool(item.get("enabled", True)),
@@ -328,6 +338,27 @@ class RSSConfig:
         return config
 
     @staticmethod
+    def _migrate_panel_template_keys(runtime_conf) -> bool:
+        if not isinstance(runtime_conf, dict):
+            return False
+        feeds = runtime_conf.get("feeds", [])
+        if not isinstance(feeds, list):
+            return False
+        changed = False
+        for feed in feeds:
+            if not isinstance(feed, dict):
+                continue
+            template_key = str(feed.get("__template_key", "") or "").strip()
+            if template_key and template_key != "feed":
+                continue
+            source_type = str(feed.get("source_type", "rss") or "rss").strip().lower()
+            feed["__template_key"] = (
+                "twitter_feed" if source_type == "twitter" else "rss_feed"
+            )
+            changed = True
+        return changed
+
+    @staticmethod
     def _normalize_collection(value) -> list[dict]:
         """兼容 AstrBot 配置面板与手工 JSON 的多种写法，统一为 list[dict]。"""
         if isinstance(value, list):
@@ -408,6 +439,10 @@ class RSSConfig:
                     self._validate_url(feed.nitter_url, f"feeds[{feed.id}].nitter_url")
                 if feed.proxy_url:
                     self._validate_proxy_url(feed.proxy_url, f"feeds[{feed.id}].proxy_url")
+                if feed.max_new_items < 0:
+                    raise ConfigValidationError(
+                        f"feeds[{feed.id}].max_new_items 必须 >= 0"
+                    )
             if feed.auth_mode not in {"none", "query", "header"}:
                 raise ConfigValidationError(
                     f"feeds[{feed.id}].auth_mode 非法: {feed.auth_mode}"

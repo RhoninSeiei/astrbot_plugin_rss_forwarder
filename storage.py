@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,11 +30,13 @@ class FeedStorage:
 
     def __init__(
         self,
-        plugin_name: str = "astrbot_rss",
+        plugin_name: str = "astrbot_plugin_rss_forwarder",
         get_kv_data: Callable[[str], Awaitable[Any]] | None = None,
         put_kv_data: Callable[[str, Any], Awaitable[Any]] | None = None,
         delete_kv_data: Callable[[str], Awaitable[Any]] | None = None,
         storage_dir: str | Path | None = None,
+        legacy_plugin_names: list[str] | None = None,
+        legacy_storage_dirs: list[str | Path] | None = None,
     ) -> None:
         self._plugin_name = plugin_name
         self._get_kv_data = get_kv_data
@@ -44,8 +47,42 @@ class FeedStorage:
         self._dedup_version: int | None = None
         cache_root = Path(storage_dir) if storage_dir is not None else self.plugin_cache_dir()
         self._state_path = cache_root / "state.json"
+        self._migrate_legacy_state(
+            legacy_plugin_names=legacy_plugin_names or [],
+            legacy_storage_dirs=[Path(path) for path in legacy_storage_dirs or []],
+            explicit_storage_dir=storage_dir is not None,
+        )
         self._state_loaded = False
         self._disk_state: dict[str, Any] = {"kv": {}}
+
+    def _migrate_legacy_state(
+        self,
+        *,
+        legacy_plugin_names: list[str],
+        legacy_storage_dirs: list[Path],
+        explicit_storage_dir: bool,
+    ) -> None:
+        if self._state_path.exists():
+            return
+
+        candidates = list(legacy_storage_dirs)
+        if not explicit_storage_dir:
+            for legacy_name in legacy_plugin_names:
+                legacy_name = str(legacy_name or "").strip()
+                if not legacy_name or legacy_name == self._plugin_name:
+                    continue
+                candidates.append(self._resolve_plugin_cache_dir(legacy_name))
+
+        for legacy_dir in candidates:
+            legacy_state = Path(legacy_dir) / "state.json"
+            if not legacy_state.exists():
+                continue
+            try:
+                self._state_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_state, self._state_path)
+                return
+            except OSError:
+                continue
 
     async def get(self, key: str, default: Any = None) -> Any:
         """封装 KV 读取。"""
@@ -388,12 +425,16 @@ class FeedStorage:
 
     def plugin_cache_dir(self) -> Path:
         """如需大文件缓存，请按规范写入 data/plugin_data/{plugin_name}/。"""
+        return self._resolve_plugin_cache_dir(self._plugin_name)
+
+    @staticmethod
+    def _resolve_plugin_cache_dir(plugin_name: str) -> Path:
         if StarTools is not None:
             try:
-                return Path(StarTools.get_data_dir(self._plugin_name))
+                return Path(StarTools.get_data_dir(plugin_name))
             except Exception:
                 pass
-        return Path("data") / "plugin_data" / self._plugin_name
+        return Path("data") / "plugin_data" / plugin_name
 
     async def _ensure_state_loaded(self) -> None:
         if self._state_loaded:

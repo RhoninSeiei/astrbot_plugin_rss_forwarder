@@ -1,10 +1,10 @@
 {
   "feeds": {
     "type": "template_list",
-    "description": "RSS 源配置",
+    "description": "RSS/Twitter 源配置",
     "templates": {
-      "feed": {
-        "name": "RSS 源",
+      "rss_feed": {
+        "name": "RSS/Atom 源",
         "hint": "配置一个 RSS/Atom 源",
         "items": {
           "id": {
@@ -12,57 +12,17 @@
             "default": "",
             "description": "Feed 唯一 ID"
           },
+          "source_type": {
+            "type": "string",
+            "default": "rss",
+            "description": "源类型",
+            "invisible": true
+          },
           "url": {
             "type": "string",
             "default": "",
             "description": "RSS/Atom 源地址",
-            "hint": "source_type=rss 时必须填写；source_type=twitter 时可留空并使用默认 Nitter。"
-          },
-          "source_type": {
-            "type": "string",
-            "default": "rss",
-            "options": [
-              "rss",
-              "twitter"
-            ],
-            "description": "源类型",
-            "hint": "rss=普通 RSS/Atom；twitter=通过 Nitter 抓取指定推主时间线。"
-          },
-          "username": {
-            "type": "string",
-            "default": "",
-            "description": "Twitter 推主用户名",
-            "hint": "仅 source_type=twitter 生效，填写不带 @ 的用户名。"
-          },
-          "nitter_url": {
-            "type": "string",
-            "default": "",
-            "description": "Nitter 镜像站地址",
-            "hint": "仅 source_type=twitter 生效。留空时使用 https://nitter.net；也可在 url 字段填写。"
-          },
-          "proxy_url": {
-            "type": "string",
-            "default": "",
-            "description": "Twitter/Nitter 抓取代理地址",
-            "hint": "仅 source_type=twitter 生效。示例：http://127.0.0.1:7890；留空使用运行环境默认网络。"
-          },
-          "send_images": {
-            "type": "bool",
-            "default": true,
-            "description": "Twitter 推送附带图片",
-            "hint": "仅 source_type=twitter 生效；关闭后仍保留文字与链接。"
-          },
-          "send_videos": {
-            "type": "bool",
-            "default": true,
-            "description": "Twitter 推送附带视频",
-            "hint": "仅 source_type=twitter 生效；视频发送失败时会回退为视频链接。"
-          },
-          "send_link": {
-            "type": "bool",
-            "default": true,
-            "description": "Twitter 推送附带原推文链接",
-            "hint": "仅 source_type=twitter 生效；关闭后仍会显示推主来源和正文。"
+            "hint": "启用 RSS/Atom 源时必须填写。"
           },
           "auth_mode": {
             "type": "string",
@@ -88,6 +48,76 @@
           "timeout": {
             "type": "int",
             "default": 10,
+            "description": "抓取请求超时时间（秒）"
+          }
+        }
+      },
+      "twitter_feed": {
+        "name": "Twitter/Nitter 源",
+        "hint": "配置一个通过 Nitter 抓取的 Twitter/X 推主时间线",
+        "items": {
+          "id": {
+            "type": "string",
+            "default": "",
+            "description": "Feed 唯一 ID"
+          },
+          "source_type": {
+            "type": "string",
+            "default": "twitter",
+            "description": "源类型",
+            "invisible": true
+          },
+          "username": {
+            "type": "string",
+            "default": "",
+            "description": "Twitter 推主用户名",
+            "hint": "填写不带 @ 的用户名。"
+          },
+          "nitter_url": {
+            "type": "string",
+            "default": "",
+            "description": "Nitter 镜像站地址",
+            "hint": "留空时使用 https://nitter.net；也可填写自建 Nitter 服务。"
+          },
+          "proxy_url": {
+            "type": "string",
+            "default": "",
+            "description": "Twitter/Nitter 抓取代理地址",
+            "hint": "示例：http://127.0.0.1:7890 或 socks5://127.0.0.1:7891；留空使用运行环境默认网络。"
+          },
+          "send_images": {
+            "type": "bool",
+            "default": true,
+            "description": "Twitter 推送附带图片",
+            "hint": "关闭后仍保留文字与链接。"
+          },
+          "send_videos": {
+            "type": "bool",
+            "default": true,
+            "description": "Twitter 推送附带视频",
+            "hint": "视频发送失败时会回退为视频链接。"
+          },
+          "send_link": {
+            "type": "bool",
+            "default": true,
+            "description": "Twitter 推送附带原推文链接",
+            "hint": "关闭后仍会显示推主来源和正文。"
+          },
+          "max_new_items": {
+            "type": "int",
+            "default": 1,
+            "description": "Twitter 每轮最多抓取新推文数",
+            "hint": "默认只抓取最新 1 条，减少请求并避免历史推文刷屏；填 0 表示抓取全部新推文。"
+          },
+          "enabled": {
+            "type": "bool",
+            "default": false,
+            "description": "是否启用该源",
+            "hint": "新建条目默认关闭，补全 Feed ID 与用户名后再启用。"
+          },
+          "timeout": {
+            "type": "int",
+            "default": 30,
             "description": "抓取请求超时时间（秒）"
           }
         }

@@ -16,6 +16,14 @@
 
 ## 更新日志
 
+### v0.5.1
+
+- 运行时注册名统一为 `astrbot_plugin_rss_forwarder`，旧 `astrbot_rss` 状态目录会自动迁移到新插件数据目录。
+- 插件面板中的源配置改名为 `RSS/Twitter 源配置`，新增条目时可分别选择 `RSS/Atom 源` 与 `Twitter/Nitter 源`。
+- 旧配置中的 `__template_key=feed` 会按 `source_type` 自动迁移为 `rss_feed` 或 `twitter_feed`，并保存回面板配置。
+- 新增 `max_new_items`，Twitter/Nitter 源默认每轮只抓取最新 1 条新推文，填 `0` 时抓取全部新推文。
+- README 补充 Twitter/Nitter 功能参考来源与差异说明。
+
 ### v0.5.0
 
 - 新增 Twitter/Nitter 源支持：在 `feeds[]` 中设置 `source_type=twitter` 后，可填写推主用户名并复用现有 job/target 推送。
@@ -99,24 +107,19 @@
 - 已实现启动阶段的稳态保护，减少平台未就绪时的误推送和误重试。
 - 为后续 LLM/Agent 增强保留了清晰的处理管线。
 
+## Twitter/Nitter 功能参考与致谢
+
+本插件的 Twitter/Nitter 源实现参考了 [`Ars1027/astrbot_plugin_twitter`](https://github.com/Ars1027/astrbot_plugin_twitter) 以及实际部署中维护的 [`RhoninSeiei/astrbot_plugin_twitter`](https://github.com/RhoninSeiei/astrbot_plugin_twitter)。其中 Nitter 时间线读取、`since_id` 游标、媒体缓存等思路对本插件的设计有重要帮助。
+
+两者定位不同：`astrbot_plugin_twitter` 更适合只需要 Twitter/X 推送、会话内关注管理、链接识别与合并转发的场景；本插件把 Twitter/Nitter 作为 `feeds[]` 的一种来源，统一进入 feed、job、target、去重、翻译和日报管线。只需要 Twitter 功能的用户，仍可按实际需求优先考虑原插件。
+
 ## 配置（插件面板）
 
 本插件使用 `_conf_schema.json`，可在 AstrBot 插件面板中直接可视化配置：
 
-- `feeds[]`
-  - `id`（唯一）
-  - `url`
-  - `source_type`：`rss|twitter`
-  - `username`（仅 `twitter` 生效）
-  - `nitter_url`（仅 `twitter` 生效，可留空）
-  - `proxy_url`（仅 `twitter` 生效，可留空）
-  - `send_images`（仅 `twitter` 生效）
-  - `send_videos`（仅 `twitter` 生效）
-  - `send_link`（仅 `twitter` 生效）
-  - `auth_mode`：`none|query|header`
-  - `key`
-  - `enabled`
-  - `timeout`
+- `feeds[]`：面板中显示为 `RSS/Twitter 源配置`，新增条目时分为 `RSS/Atom 源` 与 `Twitter/Nitter 源`
+- `RSS/Atom 源`：`id`、`url`、`auth_mode`、`key`、`enabled`、`timeout`
+- `Twitter/Nitter 源`：`id`、`username`、`nitter_url`、`proxy_url`、`send_images`、`send_videos`、`send_link`、`max_new_items`、`enabled`、`timeout`
 - `targets[]`
   - `id`（唯一）
   - `platform`
@@ -170,7 +173,7 @@
   - `render_card_template`
 
 说明：
-- 去重记录会同时写入 AstrBot KV 与 `data/plugin_data/astrbot_rss/state.json`
+- 去重记录会同时写入 AstrBot KV 与 `data/plugin_data/astrbot_plugin_rss_forwarder/state.json`
 - `jobs[].dedup_ttl_seconds` 大于 `0` 时，会覆盖全局 `dedup_ttl_seconds`；填 `0` 时继续使用全局值
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
 - `startup_delay_seconds` 默认为 `45`，用于给平台适配器和主动消息通道预留启动时间
@@ -182,7 +185,8 @@
 - `display_source`、`display_time`、`display_link` 同时作用于文本推送与图片图卡
 - Twitter 源可通过 `send_link=false` 单独隐藏原推文链接；来源仍显示为推主用户名
 - Twitter 源首次启用时会先记录当前最新推文游标，后续轮询才发送新推文，避免首次启用时刷屏
-- Twitter 图片和视频会优先缓存到 `data/plugin_data/astrbot_rss/twitter_media` 后以本地文件发送，便于代理环境使用
+- Twitter 源默认 `max_new_items=1`，每轮只抓取最新 1 条新推文；填 `0` 时会抓取全部新推文
+- Twitter 图片和视频会优先缓存到 `data/plugin_data/astrbot_plugin_rss_forwarder/twitter_media` 后以本地文件发送，便于代理环境使用
 - Twitter 源暂不处理聊天中的 Twitter/X 链接，也不使用合并转发消息
 
 ## 示例配置
@@ -208,6 +212,7 @@
       "send_images": true,
       "send_videos": true,
       "send_link": true,
+      "max_new_items": 1,
       "enabled": true,
       "timeout": 15
     }
@@ -275,7 +280,7 @@
 
 若你遇到 `ModuleNotFoundError: No module named 'commands'`，这是由于旧版本插件使用了顶层导入方式（`from commands import ...`）导致的。
 
-本仓库已修复为包内相对导入（`from .commands import ...`），可被 AstrBot 面板按 `astrbot_rss.main` 正确加载。
+本仓库已修复为包内相对导入（`from .commands import ...`），可被 AstrBot 面板按 `astrbot_plugin_rss_forwarder.main` 正确加载。
 
 ### 2) 依赖对比（相对 AstrBot 默认环境）
 

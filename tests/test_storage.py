@@ -8,6 +8,11 @@ from storage import FeedStorage
 
 
 class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_plugin_name_matches_package_name(self):
+        storage = FeedStorage(storage_dir=".")
+
+        self.assertEqual(storage._plugin_name, "astrbot_plugin_rss_forwarder")
+
     async def test_persists_seen_records_to_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = FeedStorage(storage_dir=tmpdir)
@@ -20,6 +25,37 @@ class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(state_path.exists())
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertIn("content_seen:v0:item-1", payload["kv"])
+
+    async def test_migrates_legacy_plugin_state_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            legacy_dir = root / "astrbot_rss"
+            current_dir = root / "astrbot_plugin_rss_forwarder"
+            legacy_dir.mkdir(parents=True)
+            (legacy_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "kv": {
+                            "content_seen:v0:item-1": {
+                                "id": "item-1",
+                                "expire_at": int(time.time()) + 3600,
+                                "updated_at": int(time.time()),
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            storage = FeedStorage(
+                plugin_name="astrbot_plugin_rss_forwarder",
+                storage_dir=current_dir,
+                legacy_storage_dirs=[legacy_dir],
+            )
+
+            self.assertTrue(await storage.has_seen("item-1"))
+            self.assertTrue((current_dir / "state.json").exists())
 
     async def test_expired_record_can_use_longer_effective_ttl(self):
         with tempfile.TemporaryDirectory() as tmpdir:

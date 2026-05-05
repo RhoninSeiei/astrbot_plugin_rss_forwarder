@@ -1,6 +1,9 @@
+import ast
+import json
 import sys
 import types
 import unittest
+from pathlib import Path
 
 astrbot_module = types.ModuleType("astrbot")
 astrbot_api_module = types.ModuleType("astrbot.api")
@@ -179,6 +182,7 @@ class ConfigTranslationTests(unittest.TestCase):
                 "send_images": False,
                 "send_videos": True,
                 "send_link": False,
+                "max_new_items": 2,
                 "enabled": True,
             }
         ]
@@ -194,6 +198,83 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertFalse(feed.send_images)
         self.assertTrue(feed.send_videos)
         self.assertFalse(feed.send_link)
+        self.assertEqual(feed.max_new_items, 2)
+
+    def test_legacy_feed_template_key_migrates_to_source_specific_template(self):
+        conf = _minimal_runtime_conf()
+        conf["feeds"] = [
+            {
+                "__template_key": "feed",
+                "id": "rss-1",
+                "url": "https://example.com/rss",
+                "enabled": True,
+            },
+            {
+                "__template_key": "feed",
+                "id": "tw-1",
+                "source_type": "twitter",
+                "username": "alice",
+                "enabled": True,
+            },
+        ]
+        conf["jobs"][0]["feed_ids"] = ["rss-1", "tw-1"]
+
+        RSSConfig.from_context(conf)
+
+        self.assertEqual(conf["feeds"][0]["__template_key"], "rss_feed")
+        self.assertEqual(conf["feeds"][1]["__template_key"], "twitter_feed")
+
+    def test_legacy_feed_template_key_migration_saves_panel_config(self):
+        class SavingConfig(dict):
+            saved = False
+
+            def save_config(self):
+                self.saved = True
+
+        conf = SavingConfig(_minimal_runtime_conf())
+        conf["feeds"] = [
+            {
+                "__template_key": "feed",
+                "id": "rss-1",
+                "url": "https://example.com/rss",
+                "enabled": True,
+            }
+        ]
+        conf["jobs"][0]["feed_ids"] = ["rss-1"]
+
+        RSSConfig.from_context(conf)
+
+        self.assertTrue(conf.saved)
+
+    def test_schema_uses_source_specific_feed_templates(self):
+        schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["feeds"]["description"], "RSS/Twitter 源配置")
+        templates = schema["feeds"]["templates"]
+        self.assertIn("rss_feed", templates)
+        self.assertIn("twitter_feed", templates)
+        self.assertNotIn("feed", templates)
+        self.assertEqual(templates["rss_feed"]["items"]["source_type"]["default"], "rss")
+        self.assertTrue(templates["rss_feed"]["items"]["source_type"]["invisible"])
+        self.assertEqual(
+            templates["twitter_feed"]["items"]["source_type"]["default"],
+            "twitter",
+        )
+        self.assertTrue(templates["twitter_feed"]["items"]["source_type"]["invisible"])
+        self.assertNotIn("username", templates["rss_feed"]["items"])
+        self.assertNotIn("auth_mode", templates["twitter_feed"]["items"])
+        self.assertIn("max_new_items", templates["twitter_feed"]["items"])
+
+    def test_runtime_register_name_matches_package_name(self):
+        tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+        register_call = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "register":
+                register_call = node
+                break
+
+        self.assertIsNotNone(register_call)
+        self.assertEqual(register_call.args[0].value, "astrbot_plugin_rss_forwarder")
 
     def test_display_flags_parse(self):
         conf = _minimal_runtime_conf()

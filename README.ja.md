@@ -35,6 +35,12 @@
 - プラットフォーム未準備時の誤送信や誤再試行を抑える保護
 - 将来の LLM / Agent 拡張に向けた構造
 
+## Twitter/Nitter 参考
+
+Twitter/Nitter 統合は [`Ars1027/astrbot_plugin_twitter`](https://github.com/Ars1027/astrbot_plugin_twitter) と、実運用向けフォーク [`RhoninSeiei/astrbot_plugin_twitter`](https://github.com/RhoninSeiei/astrbot_plugin_twitter) を参考にしています。Nitter タイムライン取得、`since_id` カーソル、メディアキャッシュの考え方を本プラグインの実装に取り入れています。
+
+Twitter 専用運用、チャット内でのフォロー管理、リンク認識、合併転送が中心であれば元プラグインが適しています。本プラグインでは Twitter/Nitter を feed の一種として扱い、既存の feed、job、target、重複排除、翻訳、日報処理を共用します。
+
 ## 設定
 
 `_conf_schema.json` により、AstrBot のプラグイン管理画面から主要項目を編集できます。
@@ -97,15 +103,16 @@
 ```
 
 補足:
-- 重複排除状態は AstrBot KV と `data/plugin_data/astrbot_rss/state.json` の両方に保存されます
+- 重複排除状態は AstrBot KV と `data/plugin_data/astrbot_plugin_rss_forwarder/state.json` の両方に保存されます
 - `last_success_time` より古い記事は再送せず、既読扱いのみ行います
 - `startup_delay_seconds` の既定値は `45` 秒です
 - `translation.*` 配下の項目はすべて AstrBot のプラグイン管理画面から設定できます
 - `daily_digests[]` は即時配信ジョブと独立して動作し、即時配信を有効にしていない feed でも日報対象にできます
-- Twitter feed では `source_type=twitter`、`username` を設定し、必要に応じて `nitter_url`、`proxy_url`、`send_images`、`send_videos` を設定します
+- Twitter feed では `source_type=twitter`、`username` を設定し、必要に応じて `nitter_url`、`proxy_url`、`send_images`、`send_videos`、`max_new_items` を設定します
 - `nitter_url` には自前の Nitter サービスも指定できます
 - `display_source`、`display_time`、`display_link` はテキスト配信と画像カードの両方に適用されます
 - Twitter feed では `send_link=false` により元ツイートリンクだけを非表示にできます。ソースはユーザー名として表示されます
+- Twitter feed の既定値は `max_new_items=1` で、毎回最新 1 件だけを取得します。`0` にすると新規ツイートをすべて取得します
 - Nitter の詳細ページが一時失敗または制限された場合、そのツイートを越えて `since_id` を進めず、次回以降に再試行します
 - Twitter feed は初回有効化時に最新ツイートのカーソルを記録し、その後の新規ツイートのみ配信します
 - Twitter リンク認識と合併転送メッセージはこの段階では統合していません

@@ -12,10 +12,10 @@ from .storage import FeedStorage
 
 
 @register(
-    "astrbot_rss",
+    "astrbot_plugin_rss_forwarder",
     "AstrBot RSS Forwarder",
     "面向 AstrBot 的 RSS/RSSHub/Twitter 推送编排插件",
-    "0.5.0",
+    "0.5.1",
 )
 class RSSPlugin(Star, RSSCommands):
     def __init__(self, context: Context, config=None):
@@ -33,7 +33,8 @@ class RSSPlugin(Star, RSSCommands):
                 pass
         parser = FeedParser()
         storage = FeedStorage(
-            plugin_name="astrbot_rss",
+            plugin_name="astrbot_plugin_rss_forwarder",
+            legacy_plugin_names=["astrbot_rss"],
             get_kv_data=getattr(self, "get_kv_data", None),
             put_kv_data=getattr(self, "put_kv_data", None),
             delete_kv_data=getattr(self, "delete_kv_data", None),

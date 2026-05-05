@@ -2,16 +2,17 @@
 
 ## 版本
 
-- 仓库版本：`0.5.0`
-- 市场版本：`v0.5.0`
+- 仓库版本：`0.5.1`
+- 市场版本：`v0.5.1`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
-- 运行时注册名：`astrbot_rss`
+- 运行时注册名：`astrbot_plugin_rss_forwarder`
 
 ## 当前能力
 
 - 多 feed、多 target、多 job 的 RSS 推送编排。
 - Twitter/Nitter 源 `feeds[].source_type=twitter`，支持按推主用户名采集时间线。
 - Twitter 源可通过 `feeds[].send_images` 与 `feeds[].send_videos` 分别控制图片和视频发送。
+- Twitter 源可通过 `feeds[].max_new_items` 控制每轮抓取的新推文数量，默认只取最新 1 条。
 - 即时推送可通过 `display_source`、`display_time`、`display_link` 控制来源、时间、链接展示。
 - 持久化去重、启动延迟、历史条目抑制、失效 target 抑制。
 - 中文翻译增强，顺序为 `LLM -> Google Translate -> GitHub Models`。
@@ -46,7 +47,8 @@
 - 插件目录：`/volume1/docker/astrbot/data/plugins/astrbot_plugin_rss_forwarder`
 - 配置文件：`/volume1/docker/astrbot/data/config/astrbot_plugin_rss_forwarder_config.json`
 - 面板配置：`/volume1/docker/astrbot/data/cmd_config.json`
-- 去重状态：`/volume1/docker/astrbot/data/plugin_data/astrbot_rss/state.json`
+- 去重状态：`/volume1/docker/astrbot/data/plugin_data/astrbot_plugin_rss_forwarder/state.json`
+- 旧状态兼容：首次使用新运行时注册名时，会从 `/volume1/docker/astrbot/data/plugin_data/astrbot_rss/state.json` 复制旧去重记录
 - GitHub token：`/volume1/docker/astrbot/data/github.token`
 
 ## 运维约束

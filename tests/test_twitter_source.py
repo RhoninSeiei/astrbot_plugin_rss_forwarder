@@ -70,6 +70,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
             send_images = True
             send_videos = True
             send_link = True
+            max_new_items = 0
 
         fetcher = TwitterTimelineFetcher()
 
@@ -98,6 +99,52 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.since_id, "200")
         self.assertEqual([item["tweet_id"] for item in result.items], ["200"])
+
+    async def test_fetch_limits_detail_requests_to_latest_new_tweet(self):
+        class Feed:
+            id = "tw-1"
+            username = "alice"
+            nitter_url = "https://nitter.example.com"
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            send_images = True
+            send_videos = True
+            send_link = True
+            max_new_items = 1
+
+        opened_urls = []
+        fetcher = TwitterTimelineFetcher()
+
+        def fake_open_text(url, proxy_url, timeout):
+            opened_urls.append(url)
+            if url.endswith("/alice"):
+                return """
+                <div class="timeline-item"><a class="tweet-link" href="/alice/status/300"></a></div>
+                <div class="timeline-item"><a class="tweet-link" href="/alice/status/200"></a></div>
+                <div class="timeline-item"><a class="tweet-link" href="/alice/status/100"></a></div>
+                """
+            return """
+            <div class="main-tweet">
+              <a class="fullname">Alice</a>
+              <div class="tweet-content media-body">limited item</div>
+            </div>
+            """
+
+        original_open_text = TwitterTimelineFetcher._open_text
+        TwitterTimelineFetcher._open_text = staticmethod(fake_open_text)
+        try:
+            result = await fetcher.fetch(Feed(), {"since_id": "50"})
+        finally:
+            TwitterTimelineFetcher._open_text = original_open_text
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.since_id, "300")
+        self.assertEqual([item["tweet_id"] for item in result.items], ["300"])
+        self.assertEqual(
+            [url for url in opened_urls if "/status/" in url],
+            ["https://nitter.example.com/alice/status/300"],
+        )
 
 
 if __name__ == "__main__":
