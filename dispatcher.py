@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,8 +31,9 @@ class FeedDispatcher:
     _IMAGE_HASH_TIMEOUT_SECONDS = 8
     _IMAGE_HASH_MAX_BYTES = 8 * 1024 * 1024
 
-    def __init__(self, context, config: RSSConfig, storage=None) -> None:
+    def __init__(self, context, config: RSSConfig, storage=None, renderer=None) -> None:
         self.context = context
+        self._renderer = renderer or context
         self._config = config
         self._storage = storage
         self._target_map = {
@@ -719,9 +721,34 @@ class FeedDispatcher:
         return result
 
     async def html_render(self, html: str):
-        if hasattr(self.context, "html_render"):
-            return await self.context.html_render(html)
+        render_func = getattr(self._renderer, "html_render", None)
+        if not callable(render_func) and self._renderer is not self.context:
+            render_func = getattr(self.context, "html_render", None)
+        if callable(render_func):
+            if self._html_render_accepts_data_arg(render_func):
+                return await render_func(html, {})
+            return await render_func(html)
         raise RuntimeError("context.html_render is not available")
+
+    @staticmethod
+    def _html_render_accepts_data_arg(render_func) -> bool:
+        try:
+            signature = inspect.signature(render_func)
+        except (TypeError, ValueError):
+            return True
+        positional_params = [
+            param
+            for param in signature.parameters.values()
+            if param.kind
+            in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.VAR_POSITIONAL,
+            }
+        ]
+        if any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in positional_params):
+            return True
+        return len(positional_params) >= 2
 
     @staticmethod
     def _as_chain_result_if_possible(item: dict[str, Any], message_chain):
@@ -733,14 +760,18 @@ class FeedDispatcher:
                 logger.warning("event.chain_result failed, fallback to message_chain: %s", exc)
         return message_chain
 
-    @staticmethod
-    def _as_image_result_if_possible(item: dict[str, Any], image_result):
+    def _as_image_result_if_possible(self, item: dict[str, Any], image_result):
         event = item.get("event")
         if event and hasattr(event, "image_result"):
             try:
                 return event.image_result(image_result)
             except Exception as exc:
                 logger.warning("event.image_result failed, fallback to image_result: %s", exc)
+        if isinstance(image_result, str) and image_result.strip():
+            try:
+                return self._build_image_only_chain(image_result.strip())
+            except Exception as exc:
+                logger.warning("build rendered image chain failed, fallback to image_result: %s", exc)
         return image_result
 
     async def dispatch(self, item: dict) -> DispatchResult:
@@ -818,10 +849,19 @@ class FeedDispatcher:
         render_mode = str(digest.get("render_mode", "text") or "text").strip().lower()
         try:
             if render_mode == "image":
-                payload = self._as_image_result_if_possible(
-                    digest,
-                    await self._build_daily_digest_image_payload(digest),
-                )
+                try:
+                    payload = self._as_image_result_if_possible(
+                        digest,
+                        await self._build_daily_digest_image_payload(digest),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "daily digest image render failed, fallback to text mode id=%s: %s",
+                        digest.get("id", ""),
+                        exc,
+                    )
+                    chain = self._build_daily_digest_text_chain(digest)
+                    payload = self._as_chain_result_if_possible(digest, chain)
             else:
                 chain = self._build_daily_digest_text_chain(digest)
                 payload = self._as_chain_result_if_possible(digest, chain)

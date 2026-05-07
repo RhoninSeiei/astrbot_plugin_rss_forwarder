@@ -118,6 +118,18 @@ class _MessageChain:
         self.chain = chain or []
 
 
+class _StarRenderer:
+    def __init__(self, fail: bool = False):
+        self.fail = fail
+        self.calls: list[tuple[str, dict]] = []
+
+    async def html_render(self, tmpl, data, return_url=True, options=None):
+        self.calls.append((tmpl, data))
+        if self.fail:
+            raise RuntimeError("render unavailable")
+        return "digest-image"
+
+
 class DispatcherTests(unittest.IsolatedAsyncioTestCase):
     def _build_config(self):
         return RSSConfig.from_context(
@@ -271,6 +283,8 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         context.html_render = html_render
         storage = _FakeStorage()
         dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_image_cls = lambda: _Image
 
         digest = {
             "id": "digest-2",
@@ -286,7 +300,123 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         result = await dispatcher.dispatch_daily_digest(digest)
 
         self.assertEqual(result.success_count, 1)
-        self.assertEqual(context.sent[0], ("default:GroupMessage:1", "digest-image"))
+        payload = context.sent[0][1]
+        self.assertIsInstance(payload, _MessageChain)
+        self.assertEqual(payload.chain[0].url, "digest-image")
+
+    async def test_daily_digest_image_render_uses_star_html_render_signature(self):
+        context = _FakeContext()
+        renderer = _StarRenderer()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(
+            context=context,
+            config=self._build_config(),
+            storage=storage,
+            renderer=renderer,
+        )
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        digest = {
+            "id": "digest-star-render",
+            "title": "图卡日报",
+            "target_ids": ["target-1"],
+            "render_mode": "image",
+            "window_start_text": "2026-03-27 09:00",
+            "window_end_text": "2026-03-28 09:00",
+            "item_count": 1,
+            "content": "1. [Feed] Title",
+        }
+
+        result = await dispatcher.dispatch_daily_digest(digest)
+
+        self.assertEqual(result.success_count, 1)
+        payload = context.sent[0][1]
+        self.assertIsInstance(payload, _MessageChain)
+        self.assertEqual(payload.chain[0].url, "digest-image")
+        self.assertEqual(renderer.calls[0][1], {})
+
+    async def test_image_render_active_send_wraps_rendered_url_as_image_chain(self):
+        context = _FakeContext()
+        async def html_render(_html):
+            return "rendered-card-url"
+
+        context.html_render = html_render
+        storage = _FakeStorage()
+        config = RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-1",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:GroupMessage:1",
+                        "enabled": True,
+                    }
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-1"],
+                        "interval_seconds": 300,
+                        "enabled": True,
+                    }
+                ],
+                "render_mode": "image",
+            }
+        )
+        dispatcher = FeedDispatcher(context=context, config=config, storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        item = {
+            "job_id": "job-1",
+            "guid": "guid-image",
+            "title": "Title",
+            "summary": "Summary",
+            "link": "https://example.com/post",
+            "published_at": "2026-03-27T00:00:00+00:00",
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        payload = context.sent[0][1]
+        self.assertIsInstance(payload, _MessageChain)
+        self.assertEqual(payload.chain[0].url, "rendered-card-url")
+
+    async def test_daily_digest_image_render_falls_back_to_text_when_render_fails(self):
+        context = _FakeContext()
+        renderer = _StarRenderer(fail=True)
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(
+            context=context,
+            config=self._build_config(),
+            storage=storage,
+            renderer=renderer,
+        )
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+
+        digest = {
+            "id": "digest-image-fallback",
+            "title": "图卡日报",
+            "target_ids": ["target-1"],
+            "render_mode": "image",
+            "window_start_text": "2026-03-27 09:00",
+            "window_end_text": "2026-03-28 09:00",
+            "item_count": 1,
+            "content": "1. [Feed] Title",
+        }
+
+        result = await dispatcher.dispatch_daily_digest(digest)
+
+        self.assertEqual(result.success_count, 1)
+        payload = context.sent[0][1]
+        self.assertIsInstance(payload, _MessageChain)
+        self.assertIn("图卡日报", payload.chain[0].text)
+        self.assertIn("1. [Feed] Title", payload.chain[0].text)
 
     async def test_twitter_text_dispatch_includes_multiple_images_and_videos(self):
         context = _FakeContext()

@@ -137,7 +137,7 @@ class TwitterTimelineFetcher:
             return TwitterTimelineFetcher._open_text_with_httpx(url, proxy_url, timeout)
 
         headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.1 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.6",
         }

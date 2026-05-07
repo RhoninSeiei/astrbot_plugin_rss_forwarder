@@ -2,8 +2,8 @@
 
 ## 版本
 
-- 仓库版本：`0.5.1`
-- 市场版本：`v0.5.1`
+- 仓库版本：`0.5.2`
+- 市场版本：`v0.5.2`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
 - 运行时注册名：`astrbot_plugin_rss_forwarder`
 
@@ -17,6 +17,7 @@
 - 持久化去重、启动延迟、历史条目抑制、失效 target 抑制。
 - 中文翻译增强，顺序为 `LLM -> Google Translate -> GitHub Models`。
 - 日报任务 `daily_digests[]`，支持文本与图片两种发送形式。
+- 日报图片模式使用插件自身的 `Star.html_render`，并在渲染失败时回退文本日报。
 - 发送前指纹查重，包含文本身份信息与图片 `sha256`。
 - 任务级去重记录保留时间 `jobs[].dedup_ttl_seconds`。
 
