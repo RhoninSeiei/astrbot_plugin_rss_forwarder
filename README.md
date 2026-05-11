@@ -31,6 +31,119 @@
 - 支持三级翻译链路：LLM、Google Translate、GitHub Models。
 - 支持 text / image 两种渲染模式（image 使用 `html_render`）。
 
+## 快速配置图示
+
+本插件的核心配置由三类对象组成：源、目标和轮询任务。源负责提供内容，目标负责指定发送位置，轮询任务负责把一个或多个源发送到一个或多个目标。
+
+```mermaid
+flowchart LR
+    A["RSS/Atom 源"] --> C["轮询任务 Job"]
+    B["Twitter/Nitter 源"] --> C
+    D["推送目标 Target"] --> C
+    C --> E["精确去重"]
+    E --> F["语义重复判定"]
+    F --> G["翻译/摘要"]
+    G --> H["群/频道/私聊"]
+```
+
+单次轮询时，插件会按任务配置读取源、过滤旧内容、执行去重，再把新内容发送到目标。
+
+```mermaid
+sequenceDiagram
+    participant Job as 轮询任务
+    participant Feed as RSS/Twitter 源
+    participant Dedup as 去重与语义判定
+    participant Target as 推送目标
+    Job->>Feed: 按 interval_seconds 拉取内容
+    Feed-->>Job: 返回新条目
+    Job->>Dedup: 检查链接、GUID 和语义候选
+    Dedup-->>Job: 返回新内容或重复内容
+    Job->>Target: 发送新内容
+```
+
+## 从零开始配置
+
+建议按“先建源、再建目标、最后建任务”的顺序配置。以下示例均为占位数据，`example.com`、`example_account`、`qq:group:example` 等值需要替换为实际可用信息。
+
+### 1. 配置 RSS 源
+
+在插件面板的 `feeds[]` 中新增一项，类型选择 `RSS/Atom 源`。
+
+| 字段 | 示例值 | 用途 |
+| --- | --- | --- |
+| `id` | `vendor_blog_rss` | 供任务引用的唯一名称 |
+| `url` | `https://example.com/feed.xml` | RSS/Atom 订阅地址 |
+| `source_type` | `rss` | 源类型 |
+| `auth_mode` | `none` | 公开 RSS 保持默认值即可 |
+| `enabled` | `true` | 启用该源 |
+| `timeout` | `10` | 拉取超时时间 |
+
+需要 RSSHub 鉴权时，可把 `auth_mode` 改为 `query` 或 `header`，再填写 `key`。
+
+### 2. 配置 Twitter/Nitter 源
+
+在插件面板的 `feeds[]` 中新增一项，类型选择 `Twitter/Nitter 源`。
+
+| 字段 | 示例值 | 用途 |
+| --- | --- | --- |
+| `id` | `vendor_status_twitter` | 供任务引用的唯一名称 |
+| `source_type` | `twitter` | 源类型 |
+| `username` | `example_account` | Twitter/X 用户名，填写不带 `@` 的账号名 |
+| `nitter_url` | `https://nitter.example.com` | 可访问的 Nitter 镜像站 |
+| `send_images` | `true` | 是否发送推文图片 |
+| `send_videos` | `true` | 是否发送视频链接或媒体 |
+| `send_link` | `true` | 是否附带原推文链接 |
+| `max_new_items` | `1` | 每轮最多发送的新推文数量 |
+| `enabled` | `true` | 启用该源 |
+
+Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新推文，避免首次启用时发送大量历史内容。
+
+### 3. 配置推送目标
+
+在插件面板的 `targets[]` 中新增一项。`unified_msg_origin` 是 AstrBot 用于识别会话的统一标识，实际值以 AstrBot 会话信息或平台适配器提供的信息为准。
+
+| 字段 | 示例值 | 用途 |
+| --- | --- | --- |
+| `id` | `notification_group` | 供任务引用的唯一名称 |
+| `platform` | `qq` | 平台名称 |
+| `unified_msg_origin` | `qq:group:example` | 群、频道或私聊会话标识 |
+| `enabled` | `true` | 启用该目标 |
+
+示例中的 `qq:group:example` 仅表示格式占位，请勿照抄。
+
+### 4. 配置轮询任务
+
+在插件面板的 `jobs[]` 中新增一项，把已经创建的源和目标填入任务。
+
+| 字段 | 示例值 | 用途 |
+| --- | --- | --- |
+| `id` | `news_poll` | 任务唯一名称 |
+| `feed_ids[]` | `vendor_blog_rss`、`vendor_status_twitter` | 需要读取的源 |
+| `target_ids[]` | `notification_group` | 需要发送的目标 |
+| `interval_seconds` | `300` | 每 300 秒轮询一次 |
+| `batch_size` | `5` | 每轮最多推送条目数 |
+| `dedup_ttl_seconds` | `604800` | 精确去重记录保留 7 天 |
+| `semantic_dedup_enabled` | `true` | 开启任务级语义重复判定 |
+| `semantic_dedup_provider_id` | 从模型列表选择 | 用于重复判定的 AstrBot 模型 |
+| `semantic_dedup_ttl_seconds` | `86400` | 语义候选保留 24 小时 |
+| `semantic_dedup_max_candidates` | `20` | 每条新内容最多比较 20 条候选 |
+| `semantic_dedup_min_confidence` | `0.82` | 判为重复所需置信度 |
+| `enabled` | `true` | 启用该任务 |
+
+语义重复判定只在同一个轮询任务内生效。多个源报道同一事件时，模型会比较新条目和该任务近期候选内容，置信度达到阈值后保留首条代表新闻。
+
+### 5. 手动检查
+
+配置保存后，可在会话中使用以下指令检查配置和执行状态。
+
+```text
+/rss list
+/rss status
+/rss run news_poll
+```
+
+`/rss run news_poll` 会立即执行一次指定任务，适合在正式等待排期前检查源、目标和模型配置是否正常。
+
 ## 与 `astrbot_plugin_rss` 的主要区别
 
 - 更强调“推送编排”而不是基础订阅。
@@ -136,18 +249,18 @@
 {
   "feeds": [
     {
-      "id": "rsshub_it",
-      "url": "https://rsshub.example.com/36kr/newsflash",
+      "id": "vendor_blog_rss",
+      "url": "https://example.com/feed.xml",
       "source_type": "rss",
-      "auth_mode": "query",
-      "key": "YOUR_RSSHUB_KEY",
+      "auth_mode": "none",
+      "key": "",
       "enabled": true,
       "timeout": 10
     },
     {
-      "id": "twitter_maka_ngs",
+      "id": "vendor_status_twitter",
       "source_type": "twitter",
-      "username": "maka_ngs",
+      "username": "example_account",
       "nitter_url": "https://nitter.example.com",
       "proxy_url": "",
       "send_images": true,
@@ -160,28 +273,34 @@
   ],
   "targets": [
     {
-      "id": "tg_group_a",
-      "platform": "telegram",
-      "unified_msg_origin": "telegram:group:xxxx",
+      "id": "notification_group",
+      "platform": "qq",
+      "unified_msg_origin": "qq:group:example",
       "enabled": true
     }
   ],
   "jobs": [
     {
-      "id": "it_news",
-      "feed_ids": ["rsshub_it", "twitter_maka_ngs"],
-      "target_ids": ["tg_group_a"],
+      "id": "news_poll",
+      "feed_ids": ["vendor_blog_rss", "vendor_status_twitter"],
+      "target_ids": ["notification_group"],
       "interval_seconds": 300,
-      "batch_size": 10,
+      "batch_size": 5,
+      "dedup_ttl_seconds": 604800,
+      "semantic_dedup_enabled": true,
+      "semantic_dedup_provider_id": "",
+      "semantic_dedup_ttl_seconds": 86400,
+      "semantic_dedup_max_candidates": 20,
+      "semantic_dedup_min_confidence": 0.82,
       "enabled": true
     }
   ],
   "daily_digests": [
     {
-      "id": "daily_chip_cn",
-      "title": "芯片日报",
-      "feed_ids": ["rsshub_it"],
-      "target_ids": ["tg_group_a"],
+      "id": "daily_news_digest",
+      "title": "每日新闻摘要",
+      "feed_ids": ["vendor_blog_rss"],
+      "target_ids": ["notification_group"],
       "send_time": "09:00",
       "window_hours": 24,
       "max_items": 20,
