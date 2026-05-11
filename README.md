@@ -2,6 +2,10 @@
 
 [English](./README.en.md) | [日本語](./README.ja.md)
 
+<p align="center">
+  <img src="./logo.png" alt="AstrBot RSS Forwarder Logo" width="128">
+</p>
+
 `astrbot_plugin_rss_forwarder` 是一个面向 AstrBot 的 RSS / RSSHub / Twitter 推送编排插件，用于从多个订阅源拉取内容，并将结果按可视化配置的路由规则主动推送到指定平台会话（群/频道/私聊）。
 
 ## 定位
@@ -63,74 +67,37 @@ sequenceDiagram
 
 ## 从零开始配置
 
-建议按“先建源、再建目标、最后建任务”的顺序配置。以下示例均为占位数据，`example.com`、`example_account`、`qq:group:example` 等值需要替换为实际可用信息。
+建议按“先建源、再建目标、最后建任务”的顺序配置。以下截图均为脱敏示意图，`example.com`、`example_account`、`qq:group:example` 等值只表示填写位置，实际配置时需要替换为真实可用信息。
 
 ### 1. 配置 RSS 源
 
-在插件面板的 `feeds[]` 中新增一项，类型选择 `RSS/Atom 源`。
-
-| 字段 | 示例值 | 用途 |
-| --- | --- | --- |
-| `id` | `vendor_blog_rss` | 供任务引用的唯一名称 |
-| `url` | `https://example.com/feed.xml` | RSS/Atom 订阅地址 |
-| `source_type` | `rss` | 源类型 |
-| `auth_mode` | `none` | 公开 RSS 保持默认值即可 |
-| `enabled` | `true` | 启用该源 |
-| `timeout` | `10` | 拉取超时时间 |
-
-需要 RSSHub 鉴权时，可把 `auth_mode` 改为 `query` 或 `header`，再填写 `key`。
+在插件面板的 `feeds[]` 中新增一项，类型选择 `RSS/Atom 源`。最少需要填写 `id` 与 `url`，公开 RSS 的 `auth_mode` 保持 `none` 即可。
 
 ### 2. 配置 Twitter/Nitter 源
 
-在插件面板的 `feeds[]` 中新增一项，类型选择 `Twitter/Nitter 源`。
+同样在 `feeds[]` 中新增一项，类型选择 `Twitter/Nitter 源`。最少需要填写 `id` 与 `username`；运行环境无法访问默认 Nitter 服务时，再填写 `nitter_url` 或 `proxy_url`。
 
-| 字段 | 示例值 | 用途 |
-| --- | --- | --- |
-| `id` | `vendor_status_twitter` | 供任务引用的唯一名称 |
-| `source_type` | `twitter` | 源类型 |
-| `username` | `example_account` | Twitter/X 用户名，填写不带 `@` 的账号名 |
-| `nitter_url` | `https://nitter.example.com` | 可访问的 Nitter 镜像站 |
-| `send_images` | `true` | 是否发送推文图片 |
-| `send_videos` | `true` | 是否发送视频链接或媒体 |
-| `send_link` | `true` | 是否附带原推文链接 |
-| `max_new_items` | `1` | 每轮最多发送的新推文数量 |
-| `enabled` | `true` | 启用该源 |
+![RSS/Twitter 源配置面板示意](./docs/assets/rss-forwarder-panel-feeds.svg)
 
-Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新推文，避免首次启用时发送大量历史内容。
+Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新推文，避免首次启用时发送大量历史内容。`max_new_items=1` 适合多数推送场景，可以减少请求并避免一次发送过多历史内容。
 
 ### 3. 配置推送目标
 
 在插件面板的 `targets[]` 中新增一项。`unified_msg_origin` 是 AstrBot 用于识别会话的统一标识，实际值以 AstrBot 会话信息或平台适配器提供的信息为准。
 
-| 字段 | 示例值 | 用途 |
-| --- | --- | --- |
-| `id` | `notification_group` | 供任务引用的唯一名称 |
-| `platform` | `qq` | 平台名称 |
-| `unified_msg_origin` | `qq:group:example` | 群、频道或私聊会话标识 |
-| `enabled` | `true` | 启用该目标 |
+![推送目标配置面板示意](./docs/assets/rss-forwarder-panel-targets.svg)
 
-示例中的 `qq:group:example` 仅表示格式占位，请勿照抄。
+最少需要填写 `id`、`platform` 与 `unified_msg_origin`。截图中的 `qq:group:example` 仅表示格式占位，请勿照抄。
 
 ### 4. 配置轮询任务
 
 在插件面板的 `jobs[]` 中新增一项，把已经创建的源和目标填入任务。
 
-| 字段 | 示例值 | 用途 |
-| --- | --- | --- |
-| `id` | `news_poll` | 任务唯一名称 |
-| `feed_ids[]` | `vendor_blog_rss`、`vendor_status_twitter` | 需要读取的源 |
-| `target_ids[]` | `notification_group` | 需要发送的目标 |
-| `interval_seconds` | `300` | 每 300 秒轮询一次 |
-| `batch_size` | `5` | 每轮最多推送条目数 |
-| `dedup_ttl_seconds` | `604800` | 精确去重记录保留 7 天 |
-| `semantic_dedup_enabled` | `true` | 开启任务级语义重复判定 |
-| `semantic_dedup_provider_id` | 从模型列表选择 | 用于重复判定的 AstrBot 模型 |
-| `semantic_dedup_ttl_seconds` | `86400` | 语义候选保留 24 小时 |
-| `semantic_dedup_max_candidates` | `20` | 每条新内容最多比较 20 条候选 |
-| `semantic_dedup_min_confidence` | `0.82` | 判为重复所需置信度 |
-| `enabled` | `true` | 启用该任务 |
+![轮询任务配置面板示意](./docs/assets/rss-forwarder-panel-job.svg)
 
-语义重复判定只在同一个轮询任务内生效。多个源报道同一事件时，模型会比较新条目和该任务近期候选内容，置信度达到阈值后保留首条代表新闻。
+最少需要填写 `id`、`feed_ids[]`、`target_ids[]` 与 `interval_seconds`。如果多个源经常报道同一事件，可以开启 `semantic_dedup_enabled`，并在 `semantic_dedup_provider_id` 中从 AstrBot 模型列表选择一个模型。
+
+语义重复判定只在同一个轮询任务内生效。多个源报道同一事件时，模型会比较新条目和该任务近期候选内容，置信度达到阈值后保留首条代表新闻。`semantic_dedup_ttl_seconds` 控制候选保留时间，过期候选会自动移出判定输入。
 
 ### 5. 手动检查
 

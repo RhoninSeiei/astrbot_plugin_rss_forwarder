@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820" role="img" aria-labelledby="title desc">
+  <title id="title">轮询任务配置面板示意</title>
+  <desc id="desc">使用占位数据展示 AstrBot RSS Forwarder 插件面板中的轮询任务和语义重复判定配置。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f4f6fb; }
+      .panel { fill: #ffffff; stroke: #d8deea; stroke-width: 1; }
+      .sidebar { fill: #182132; }
+      .sidebar-text { fill: #cbd5e1; font: 16px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .sidebar-active { fill: #2b5cff; }
+      .h1 { fill: #111827; font: 700 28px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .h2 { fill: #1f2937; font: 700 20px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .label { fill: #475569; font: 14px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .value { fill: #111827; font: 15px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .hint { fill: #64748b; font: 13px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .tab { fill: #eef3ff; stroke: #c7d2fe; stroke-width: 1; }
+      .input { fill: #f8fafc; stroke: #d8deea; stroke-width: 1; }
+      .chip { fill: #e8f2ff; stroke: #bfdbfe; stroke-width: 1; }
+      .chip-text { fill: #1d4ed8; font: 13px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .toggle-on { fill: #2b5cff; }
+      .toggle-knob { fill: #ffffff; }
+      .section { fill: #f8fafc; stroke: #d8deea; stroke-width: 1; }
+      .callout { fill: #eefdf5; stroke: #bbf7d0; stroke-width: 1; }
+      .callout-text { fill: #166534; font: 14px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="820"/>
+  <rect class="sidebar" width="240" height="820"/>
+  <text x="28" y="48" fill="#ffffff" font-family="Noto Sans CJK SC, Microsoft YaHei, Arial, sans-serif" font-size="22" font-weight="700">AstrBot</text>
+  <rect class="sidebar-active" x="20" y="112" width="200" height="44" rx="10"/>
+  <text class="sidebar-text" x="36" y="140" fill="#ffffff">插件管理</text>
+  <text class="sidebar-text" x="36" y="200">模型服务</text>
+  <text class="sidebar-text" x="36" y="248">消息平台</text>
+  <text class="sidebar-text" x="36" y="296">系统设置</text>
+
+  <rect class="panel" x="272" y="32" width="952" height="748" rx="16"/>
+  <text class="h1" x="304" y="78">AstrBot RSS Forwarder</text>
+  <text class="hint" x="304" y="106">插件配置示意图，所有内容均为占位数据</text>
+  <text class="label" x="326" y="153">RSS/Twitter 源配置</text>
+  <text class="label" x="502" y="153">推送目标配置</text>
+  <rect class="tab" x="650" y="130" width="106" height="36" rx="18"/>
+  <text x="676" y="153" fill="#1d4ed8" font-family="Noto Sans CJK SC, Microsoft YaHei, Arial, sans-serif" font-size="13">任务配置</text>
+
+  <rect class="panel" x="304" y="192" width="868" height="520" rx="12"/>
+  <text class="h2" x="328" y="232">轮询任务</text>
+  <text class="hint" x="328" y="258">一个任务把多个源发送到多个目标，并在任务内部执行去重和语义重复判定。</text>
+
+  <text class="label" x="328" y="304">任务唯一 ID</text>
+  <rect class="input" x="328" y="318" width="300" height="40" rx="8"/>
+  <text class="value" x="344" y="343">news_poll</text>
+  <text class="label" x="660" y="304">轮询间隔</text>
+  <rect class="input" x="660" y="318" width="180" height="40" rx="8"/>
+  <text class="value" x="676" y="343">300 秒</text>
+  <text class="label" x="872" y="304">每轮最多推送</text>
+  <rect class="input" x="872" y="318" width="160" height="40" rx="8"/>
+  <text class="value" x="888" y="343">5 条</text>
+
+  <text class="label" x="328" y="396">关联的 feed ID 列表</text>
+  <rect class="section" x="328" y="412" width="380" height="64" rx="10"/>
+  <rect class="chip" x="348" y="430" width="142" height="28" rx="14"/>
+  <text class="chip-text" x="364" y="449">vendor_blog_rss</text>
+  <rect class="chip" x="506" y="430" width="174" height="28" rx="14"/>
+  <text class="chip-text" x="522" y="449">vendor_status_twitter</text>
+  <text class="label" x="748" y="396">关联的 target ID 列表</text>
+  <rect class="section" x="748" y="412" width="300" height="64" rx="10"/>
+  <rect class="chip" x="768" y="430" width="166" height="28" rx="14"/>
+  <text class="chip-text" x="784" y="449">notification_group</text>
+
+  <rect class="section" x="328" y="520" width="720" height="122" rx="12"/>
+  <text class="h2" x="352" y="556">语义重复判定</text>
+  <text class="hint" x="352" y="582">同一任务中多个源报道同一事件时，模型会保留首条代表新闻。</text>
+  <text class="label" x="352" y="622">启用语义重复判定</text>
+  <rect class="toggle-on" x="504" y="604" width="58" height="30" rx="15"/>
+  <circle class="toggle-knob" cx="546" cy="619" r="12"/>
+  <text class="label" x="600" y="622">语义判定模型</text>
+  <rect class="input" x="704" y="596" width="300" height="40" rx="8"/>
+  <text class="value" x="720" y="621">从 AstrBot 模型列表选择</text>
+
+  <rect class="callout" x="304" y="736" width="868" height="44" rx="10"/>
+  <text class="callout-text" x="328" y="764">语义判定候选只在当前任务内维护，多个任务之间互不影响。</text>
+</svg>

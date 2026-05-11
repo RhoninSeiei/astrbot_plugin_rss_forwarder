@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">推送目标配置面板示意</title>
+  <desc id="desc">使用占位数据展示 AstrBot RSS Forwarder 插件面板中的推送目标配置。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f4f6fb; }
+      .panel { fill: #ffffff; stroke: #d8deea; stroke-width: 1; }
+      .sidebar { fill: #182132; }
+      .sidebar-text { fill: #cbd5e1; font: 16px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .sidebar-active { fill: #2b5cff; }
+      .h1 { fill: #111827; font: 700 28px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .h2 { fill: #1f2937; font: 700 20px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .label { fill: #475569; font: 14px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .value { fill: #111827; font: 15px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .hint { fill: #64748b; font: 13px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .tab { fill: #eef3ff; stroke: #c7d2fe; stroke-width: 1; }
+      .input { fill: #f8fafc; stroke: #d8deea; stroke-width: 1; }
+      .toggle-on { fill: #2b5cff; }
+      .toggle-knob { fill: #ffffff; }
+      .callout { fill: #fff7ed; stroke: #fed7aa; stroke-width: 1; }
+      .callout-text { fill: #9a3412; font: 14px "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .step { fill: #2b5cff; }
+      .step-text { fill: #ffffff; font: 700 15px Arial, sans-serif; }
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="720"/>
+  <rect class="sidebar" width="240" height="720"/>
+  <text x="28" y="48" fill="#ffffff" font-family="Noto Sans CJK SC, Microsoft YaHei, Arial, sans-serif" font-size="22" font-weight="700">AstrBot</text>
+  <rect class="sidebar-active" x="20" y="112" width="200" height="44" rx="10"/>
+  <text class="sidebar-text" x="36" y="140" fill="#ffffff">插件管理</text>
+  <text class="sidebar-text" x="36" y="200">模型服务</text>
+  <text class="sidebar-text" x="36" y="248">消息平台</text>
+  <text class="sidebar-text" x="36" y="296">系统设置</text>
+
+  <rect class="panel" x="272" y="32" width="952" height="640" rx="16"/>
+  <text class="h1" x="304" y="78">AstrBot RSS Forwarder</text>
+  <text class="hint" x="304" y="106">插件配置示意图，所有内容均为占位数据</text>
+  <text class="label" x="326" y="153">RSS/Twitter 源配置</text>
+  <rect class="tab" x="500" y="130" width="150" height="36" rx="18"/>
+  <text x="522" y="153" fill="#1d4ed8" font-family="Noto Sans CJK SC, Microsoft YaHei, Arial, sans-serif" font-size="13">推送目标配置</text>
+  <text class="label" x="682" y="153">任务配置</text>
+
+  <rect class="panel" x="304" y="192" width="868" height="360" rx="12"/>
+  <text class="h2" x="328" y="232">推送目标</text>
+  <text class="hint" x="328" y="258">用于定义消息发送到哪个平台会话。新建条目默认关闭，补全后再启用。</text>
+  <circle class="step" cx="348" cy="314" r="16"/>
+  <text class="step-text" x="344" y="320">1</text>
+  <text class="label" x="378" y="310">目标唯一 ID</text>
+  <rect class="input" x="378" y="324" width="310" height="40" rx="8"/>
+  <text class="value" x="394" y="349">notification_group</text>
+  <circle class="step" cx="748" cy="314" r="16"/>
+  <text class="step-text" x="744" y="320">2</text>
+  <text class="label" x="778" y="310">平台标识</text>
+  <rect class="input" x="778" y="324" width="230" height="40" rx="8"/>
+  <text class="value" x="794" y="349">qq</text>
+
+  <circle class="step" cx="348" cy="414" r="16"/>
+  <text class="step-text" x="344" y="420">3</text>
+  <text class="label" x="378" y="410">AstrBot 统一会话标识</text>
+  <rect class="input" x="378" y="424" width="510" height="40" rx="8"/>
+  <text class="value" x="394" y="449">qq:group:example</text>
+  <text class="hint" x="906" y="448">占位示例，实际值以 AstrBot 会话信息为准</text>
+
+  <circle class="step" cx="348" cy="510" r="16"/>
+  <text class="step-text" x="344" y="516">4</text>
+  <text class="label" x="378" y="506">是否启用该目标</text>
+  <rect class="toggle-on" x="378" y="522" width="58" height="30" rx="15"/>
+  <circle class="toggle-knob" cx="420" cy="537" r="12"/>
+  <text class="hint" x="452" y="542">确认会话标识可用后开启</text>
+
+  <rect class="callout" x="304" y="584" width="868" height="44" rx="10"/>
+  <text class="callout-text" x="328" y="612">截图中的会话标识是占位值，不包含任何线上群号、频道 ID 或私聊 ID。</text>
+</svg>
