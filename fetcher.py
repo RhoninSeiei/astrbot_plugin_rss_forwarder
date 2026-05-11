@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 from astrbot.api import logger
 
@@ -64,6 +64,7 @@ class FeedFetcher:
         state = await self._storage.get_feed_state(feed.id)
         etag = str(state.get("etag", "")).strip()
         last_modified = str(state.get("last_modified", "")).strip()
+        proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
 
         url, headers = self._build_url_and_headers(feed)
         if etag:
@@ -72,8 +73,22 @@ class FeedFetcher:
             headers["If-Modified-Since"] = last_modified
 
         def _request_once():
+            if self._should_use_httpx(proxy_url):
+                return self._request_with_httpx(
+                    feed_id=feed.id,
+                    url=url,
+                    headers=headers,
+                    proxy_url=proxy_url,
+                    timeout=feed.timeout,
+                )
+
             req = Request(url=url, headers=headers)
-            with urlopen(req, timeout=feed.timeout) as resp:  # noqa: S310
+            opener = (
+                build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+                if proxy_url
+                else build_opener()
+            )
+            with opener.open(req, timeout=feed.timeout) as resp:  # noqa: S310
                 body = resp.read().decode("utf-8", errors="ignore")
                 return FetchedFeed(
                     feed_id=feed.id,
@@ -113,8 +128,13 @@ class FeedFetcher:
     @staticmethod
     def _build_url_and_headers(feed) -> tuple[str, dict[str, str]]:
         headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.7,zh;q=0.6",
         }
         url = feed.url
 
@@ -127,3 +147,38 @@ class FeedFetcher:
             headers["Authorization"] = f"Bearer {feed.key}"
 
         return url, headers
+
+    @staticmethod
+    def _request_with_httpx(
+        *,
+        feed_id: str,
+        url: str,
+        headers: dict[str, str],
+        proxy_url: str,
+        timeout: int,
+    ) -> FetchedFeed:
+        import httpx
+
+        kwargs: dict[str, Any] = {
+            "headers": headers,
+            "timeout": timeout,
+            "follow_redirects": True,
+        }
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        with httpx.Client(**kwargs) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return FetchedFeed(
+                feed_id=feed_id,
+                body=response.text,
+                etag=str(response.headers.get("ETag", "")).strip(),
+                last_modified=str(response.headers.get("Last-Modified", "")).strip(),
+                status=int(response.status_code or 200),
+            )
+
+    @staticmethod
+    def _should_use_httpx(proxy_url: str) -> bool:
+        return str(proxy_url or "").strip().lower().startswith(
+            ("socks://", "socks5://", "socks5h://", "socks4://")
+        )

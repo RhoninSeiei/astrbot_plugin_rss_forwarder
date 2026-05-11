@@ -130,7 +130,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 本插件使用 `_conf_schema.json`，可在 AstrBot 插件面板中直接可视化配置：
 
 - `feeds[]`：面板中显示为 `RSS/Twitter 源配置`，新增条目时分为 `RSS/Atom 源` 与 `Twitter/Nitter 源`
-- `RSS/Atom 源`：`id`、`url`、`auth_mode`、`key`、`enabled`、`timeout`
+- `RSS/Atom 源`：`id`、`url`、`auth_mode`、`key`、`proxy_url`、`enabled`、`timeout`
 - `Twitter/Nitter 源`：`id`、`username`、`nitter_url`、`proxy_url`、`send_images`、`send_videos`、`send_link`、`max_new_items`、`enabled`、`timeout`
 - `targets[]`
   - `id`（唯一）
@@ -203,6 +203,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 - 日报默认在窗口内无条目时跳过发送，并在状态中记录 `empty_window`
 - `source_type=twitter` 时，`url` 可留空；如需指定 Nitter 镜像站，优先填写 `nitter_url`
 - `nitter_url` 支持填写自建 Nitter 服务地址，例如 `https://nitter.example.com`
+- RSS 源也支持 `proxy_url`，适合源站按出口 IP 或请求网络限制访问的情况
 - `display_source`、`display_time`、`display_link` 同时作用于文本推送与图片图卡
 - Twitter 源可通过 `send_link=false` 单独隐藏原推文链接；来源仍显示为推主用户名
 - Twitter 源首次启用时会先记录当前最新推文游标，后续轮询才发送新推文，避免首次启用时刷屏

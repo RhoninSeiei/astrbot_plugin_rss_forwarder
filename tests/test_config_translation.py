@@ -297,6 +297,7 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertNotIn("feed", templates)
         self.assertEqual(templates["rss_feed"]["items"]["source_type"]["default"], "rss")
         self.assertTrue(templates["rss_feed"]["items"]["source_type"]["invisible"])
+        self.assertIn("proxy_url", templates["rss_feed"]["items"])
         self.assertEqual(
             templates["twitter_feed"]["items"]["source_type"]["default"],
             "twitter",

@@ -39,6 +39,12 @@
             "default": "",
             "description": "query/header 使用的鉴权密钥"
           },
+          "proxy_url": {
+            "type": "string",
+            "default": "",
+            "description": "RSS 抓取代理地址",
+            "hint": "示例：http://127.0.0.1:7890；留空使用运行环境默认网络。"
+          },
           "enabled": {
             "type": "bool",
             "default": false,
