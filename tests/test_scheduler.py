@@ -643,6 +643,192 @@ class SchedulerBatchDedupTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class SchedulerSemanticDedupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_semantic_duplicate_marks_seen_and_skips_dispatch(self):
+        class FakeStorage:
+            def __init__(self):
+                self.marked = []
+
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            def build_seen_keys(self, item):
+                return [item["guid"]]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                return False
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                self.marked.append((item_id, ttl_seconds))
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [
+                    {
+                        "feed_id": "feed-1",
+                        "guid": "guid-1",
+                        "title": "NVIDIA unveils RTX 6090",
+                        "summary": "NVIDIA introduced a new GPU.",
+                        "published_at": "",
+                    }
+                ]
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.calls = 0
+
+            async def dispatch(self, item):
+                self.calls += 1
+                return DispatchResult(success_count=1)
+
+        class FakeSemanticDeduper:
+            def __init__(self):
+                self.remembered = []
+
+            async def check(self, job, item, unified_msg_origin=""):
+                return types.SimpleNamespace(
+                    duplicate=True,
+                    matched_record_id="record-1",
+                    confidence=0.91,
+                    reason="same_event",
+                )
+
+            async def remember(self, job, item, seen_keys, ttl_seconds):
+                self.remembered.append((job.id, item.get("guid")))
+
+        config = types.SimpleNamespace(
+            jobs=[],
+            dedup_ttl_seconds=123,
+            poll_interval_seconds=300,
+            targets=[],
+        )
+        job = types.SimpleNamespace(
+            id="job-1",
+            feed_ids=["feed-1"],
+            target_ids=[],
+            enabled=True,
+            interval_seconds=300,
+            dedup_ttl_seconds=123,
+            semantic_dedup_enabled=True,
+        )
+        storage = FakeStorage()
+        dispatcher = FakeDispatcher()
+        semantic = FakeSemanticDeduper()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=dispatcher,
+            storage=storage,
+            pipeline=None,
+            semantic_deduper=semantic,
+        )
+
+        await scheduler._run_job_once_guarded(job)
+
+        self.assertEqual(dispatcher.calls, 0)
+        self.assertEqual(storage.marked, [("guid-1", 123)])
+        self.assertEqual(semantic.remembered, [])
+
+    async def test_successful_dispatch_records_semantic_candidate(self):
+        class FakeStorage:
+            def __init__(self):
+                self.marked = []
+
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            def build_seen_keys(self, item):
+                return [item["guid"]]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                return False
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                self.marked.append((item_id, ttl_seconds))
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [
+                    {
+                        "feed_id": "feed-1",
+                        "guid": "guid-1",
+                        "title": "NVIDIA unveils RTX 6090",
+                        "summary": "NVIDIA introduced a new GPU.",
+                        "published_at": "",
+                    }
+                ]
+
+        class FakeDispatcher:
+            async def dispatch(self, item):
+                return DispatchResult(success_count=1)
+
+        class FakeSemanticDeduper:
+            def __init__(self):
+                self.remembered = []
+
+            async def check(self, job, item, unified_msg_origin=""):
+                return types.SimpleNamespace(
+                    duplicate=False,
+                    matched_record_id="",
+                    confidence=0.0,
+                    reason="not_duplicate",
+                )
+
+            async def remember(self, job, item, seen_keys, ttl_seconds):
+                self.remembered.append((job.id, item.get("guid"), tuple(seen_keys), ttl_seconds))
+
+        config = types.SimpleNamespace(
+            jobs=[],
+            dedup_ttl_seconds=123,
+            poll_interval_seconds=300,
+            targets=[],
+        )
+        job = types.SimpleNamespace(
+            id="job-1",
+            feed_ids=["feed-1"],
+            target_ids=[],
+            enabled=True,
+            interval_seconds=300,
+            dedup_ttl_seconds=123,
+            semantic_dedup_enabled=True,
+        )
+        semantic = FakeSemanticDeduper()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=FakeDispatcher(),
+            storage=FakeStorage(),
+            pipeline=None,
+            semantic_deduper=semantic,
+        )
+
+        await scheduler._run_job_once_guarded(job)
+
+        self.assertEqual(semantic.remembered, [("job-1", "guid-1", ("guid-1",), 123)])
+
+
 class SchedulerTranslationTest(unittest.IsolatedAsyncioTestCase):
     async def test_test_translation_returns_pipeline_error_when_missing(self):
         config = types.SimpleNamespace(jobs=[])

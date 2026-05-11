@@ -69,9 +69,10 @@ class RSSCommands:
             recent_success = self._format_success_time(result)
             recent_error = self._format_last_error(result)
             job_status = "已暂停" if job.id in paused_jobs else ("启用" if job.enabled else "禁用")
+            semantic_status = "开" if getattr(job, "semantic_dedup_enabled", False) else "关"
             lines.append(
                 f"- {job.id} [{job_status}] feeds={len(job.feed_ids)} targets={len(job.target_ids)} "
-                f"最近成功={recent_success} 最近错误={recent_error}"
+                f"语义判重={semantic_status} 最近成功={recent_success} 最近错误={recent_error}"
             )
 
         if config.daily_digests:

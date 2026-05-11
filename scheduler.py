@@ -14,6 +14,7 @@ from .dispatcher import FeedDispatcher
 from .fetcher import FeedFetcher
 from .parser import FeedParser
 from .pipeline import FeedPipeline
+from .semantic_dedup import SemanticDedupResult, SemanticDedupService
 from .storage import FeedStorage
 
 
@@ -50,6 +51,7 @@ class RSSScheduler:
         dispatcher: FeedDispatcher,
         storage: FeedStorage,
         pipeline: FeedPipeline | None = None,
+        semantic_deduper: SemanticDedupService | None = None,
     ) -> None:
         self._config = config
         self._fetcher = fetcher
@@ -57,6 +59,7 @@ class RSSScheduler:
         self._dispatcher = dispatcher
         self._storage = storage
         self._pipeline = pipeline
+        self._semantic_deduper = semantic_deduper
         self._job_tasks: dict[str, asyncio.Task] = {}
         self._job_locks: dict[str, asyncio.Lock] = {}
         self._job_results: dict[str, JobExecutionResult] = {}
@@ -660,6 +663,69 @@ class RSSScheduler:
             return job_ttl
         return int(getattr(self._config, "dedup_ttl_seconds", 0) or 0)
 
+    def _job_semantic_dedup_ttl_seconds(self, job: JobConfig, fallback_ttl_seconds: int) -> int:
+        semantic_ttl = int(getattr(job, "semantic_dedup_ttl_seconds", 0) or 0)
+        if semantic_ttl > 0:
+            return semantic_ttl
+        return max(int(fallback_ttl_seconds), 1)
+
+    async def _check_semantic_duplicate(
+        self,
+        job: JobConfig,
+        item: dict[str, Any],
+    ) -> SemanticDedupResult:
+        if self._semantic_deduper is None:
+            return SemanticDedupResult(reason="not_configured")
+        if not bool(getattr(job, "semantic_dedup_enabled", False)):
+            return SemanticDedupResult(reason="disabled")
+
+        origins = self._resolve_digest_target_origins(getattr(job, "target_ids", []) or [])
+        unified_msg_origin = origins[0] if origins else ""
+        try:
+            return await self._semantic_deduper.check(
+                job,
+                item,
+                unified_msg_origin=unified_msg_origin,
+            )
+        except Exception as exc:
+            logger.warning("semantic dedup check failed job=%s: %s", job.id, exc)
+            return SemanticDedupResult(reason=f"exception:{type(exc).__name__}")
+
+    async def _remember_semantic_candidate(
+        self,
+        job: JobConfig,
+        item: dict[str, Any],
+        seen_keys: list[str],
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        if self._semantic_deduper is None:
+            return
+        if not bool(getattr(job, "semantic_dedup_enabled", False)):
+            return
+        remember = getattr(self._semantic_deduper, "remember", None)
+        if not callable(remember):
+            return
+        try:
+            await remember(job, item, seen_keys, ttl_seconds=ttl_seconds)
+        except Exception as exc:
+            logger.warning("semantic dedup remember failed job=%s: %s", job.id, exc)
+
+    async def _record_semantic_duplicate_match(
+        self,
+        job: JobConfig,
+        result: SemanticDedupResult,
+    ) -> None:
+        if self._semantic_deduper is None or not result.matched_record_id:
+            return
+        marker = getattr(self._semantic_deduper, "record_duplicate_match", None)
+        if not callable(marker):
+            return
+        try:
+            await marker(job, result.matched_record_id)
+        except Exception as exc:
+            logger.warning("semantic dedup duplicate marker failed job=%s: %s", job.id, exc)
+
     async def _get_daily_digest_status(self, digest_id: str) -> dict[str, Any]:
         getter = getattr(self._storage, "get_daily_digest_status", None)
         if not callable(getter):
@@ -709,6 +775,7 @@ class RSSScheduler:
             skipped_seen_count = 0
             skipped_batch_duplicate_count = 0
             skipped_dispatch_duplicate_count = 0
+            skipped_semantic_duplicate_count = 0
             skipped_history_count = 0
             skipped_invalid_target_count = 0
             dispatch_fail_count = 0
@@ -752,6 +819,23 @@ class RSSScheduler:
 
                     event_item = dict(item)
                     event_item.setdefault("job_id", job.id)
+                    semantic_result = await self._check_semantic_duplicate(
+                        job,
+                        event_item,
+                    )
+                    if semantic_result.duplicate:
+                        await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                        await self._record_semantic_duplicate_match(job, semantic_result)
+                        skipped_semantic_duplicate_count += 1
+                        logger.info(
+                            "skip job=%s semantic duplicate item=%s matched=%s confidence=%.2f reason=%s",
+                            job.id,
+                            item_id,
+                            semantic_result.matched_record_id,
+                            semantic_result.confidence,
+                            semantic_result.reason,
+                        )
+                        continue
                     if self._pipeline is not None:
                         event_item = await self._pipeline.process(event_item)
                     dispatch_result = await self._dispatcher.dispatch(event_item)
@@ -781,6 +865,12 @@ class RSSScheduler:
                         dispatch_fail_count += 1
                         continue
                     await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                    await self._remember_semantic_candidate(
+                        job,
+                        event_item,
+                        seen_keys,
+                        ttl_seconds=self._job_semantic_dedup_ttl_seconds(job, dedup_ttl_seconds),
+                    )
                     pushed_count += 1
 
                 feed_meta = self._extract_feed_meta(raw_items)
@@ -808,7 +898,7 @@ class RSSScheduler:
                 error_summary=error_summary,
             )
             logger.info(
-                "job=%s finished: fetched=%s parsed=%s pushed=%s skipped_seen=%s skipped_batch_duplicate=%s skipped_dispatch_duplicate=%s skipped_history=%s skipped_invalid_target=%s dispatch_fail=%s duration_ms=%s error=%s",
+                "job=%s finished: fetched=%s parsed=%s pushed=%s skipped_seen=%s skipped_batch_duplicate=%s skipped_dispatch_duplicate=%s skipped_semantic_duplicate=%s skipped_history=%s skipped_invalid_target=%s dispatch_fail=%s duration_ms=%s error=%s",
                 job.id,
                 fetched_count,
                 parsed_count,
@@ -816,6 +906,7 @@ class RSSScheduler:
                 skipped_seen_count,
                 skipped_batch_duplicate_count,
                 skipped_dispatch_duplicate_count,
+                skipped_semantic_duplicate_count,
                 skipped_history_count,
                 skipped_invalid_target_count,
                 dispatch_fail_count,

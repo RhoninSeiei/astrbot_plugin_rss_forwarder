@@ -55,6 +55,11 @@ class JobConfig:
     interval_seconds: int = 0
     batch_size: int = 10
     dedup_ttl_seconds: int = 0
+    semantic_dedup_enabled: bool = False
+    semantic_dedup_provider_id: str = ""
+    semantic_dedup_ttl_seconds: int = 24 * 60 * 60
+    semantic_dedup_max_candidates: int = 20
+    semantic_dedup_min_confidence: float = 0.82
     enabled: bool = True
 
 
@@ -197,6 +202,15 @@ class RSSConfig:
                 interval_seconds=int(item.get("interval_seconds", 0) or 0),
                 batch_size=int(item.get("batch_size", 10)),
                 dedup_ttl_seconds=int(item.get("dedup_ttl_seconds", 0) or 0),
+                semantic_dedup_enabled=bool(item.get("semantic_dedup_enabled", False)),
+                semantic_dedup_provider_id=str(item.get("semantic_dedup_provider_id", "")).strip(),
+                semantic_dedup_ttl_seconds=int(
+                    item.get("semantic_dedup_ttl_seconds", 24 * 60 * 60) or 0
+                ),
+                semantic_dedup_max_candidates=int(item.get("semantic_dedup_max_candidates", 20) or 0),
+                semantic_dedup_min_confidence=float(
+                    item.get("semantic_dedup_min_confidence", 0.82) or 0
+                ),
                 enabled=bool(item.get("enabled", True)),
             )
             for item in jobs_raw
@@ -404,6 +418,11 @@ class RSSConfig:
                 interval_seconds=300,
                 batch_size=10,
                 dedup_ttl_seconds=0,
+                semantic_dedup_enabled=False,
+                semantic_dedup_provider_id="",
+                semantic_dedup_ttl_seconds=24 * 60 * 60,
+                semantic_dedup_max_candidates=20,
+                semantic_dedup_min_confidence=0.82,
                 enabled=True,
             )
         ]
@@ -532,6 +551,19 @@ class RSSConfig:
                 raise ConfigValidationError(
                     f"jobs[{job.id}].dedup_ttl_seconds 必须 >= 0"
                 )
+            if job.semantic_dedup_enabled:
+                if job.semantic_dedup_ttl_seconds <= 0:
+                    raise ConfigValidationError(
+                        f"jobs[{job.id}].semantic_dedup_ttl_seconds 必须 > 0"
+                    )
+                if job.semantic_dedup_max_candidates <= 0:
+                    raise ConfigValidationError(
+                        f"jobs[{job.id}].semantic_dedup_max_candidates 必须 > 0"
+                    )
+                if not 0 < job.semantic_dedup_min_confidence <= 1:
+                    raise ConfigValidationError(
+                        f"jobs[{job.id}].semantic_dedup_min_confidence 必须在 0 到 1 之间"
+                    )
 
             missing_feeds = [fid for fid in job.feed_ids if fid not in feed_ids]
             if missing_feeds:

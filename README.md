@@ -16,6 +16,12 @@
 
 ## 更新日志
 
+### v0.6.0
+
+- 新增任务级语义重复判定，可为每个轮询任务独立开启。
+- 语义判定模型可从 AstrBot 模型列表中选择，判定记录按任务组隔离。
+- 语义候选会按保留时间自动裁剪，并限制每次送入模型的候选数量，控制模型消耗。
+
 ### v0.5.2
 
 - 修复日报图片模式在主动推送场景下无法调用 AstrBot 渲染接口的问题。
@@ -100,6 +106,7 @@
 - 支持定时执行：`interval_seconds`（已实现）与 `cron`（预留字段，当前回退到 interval）。
 - 支持启动首轮延迟：默认在插件启动后等待 `45` 秒再执行第一次轮询，避免平台适配器尚未就绪时抢跑。
 - 支持去重（KV + TTL）与 feed 状态（ETag/Last-Modified/last_success_time）。
+- 支持任务级语义重复判定：同一轮询任务中多个源报道同一事件时，可通过模型判定后只推送首条代表新闻。
 - 支持管理指令：`/rss list`、`/rss status`、`/rss run [job_id]`、`/rss pause [job_id]`、`/rss resume [job_id]`、`/rss reset`（清空去重记录）。
 - 支持日报汇总：`daily_digests[]`、`/rss digest run [digest_id]`。
 - 支持三级翻译链路：LLM、Google Translate、GitHub Models。
@@ -139,6 +146,11 @@
   - `cron`（可填，当前版本回退到 interval）
   - `batch_size`
   - `dedup_ttl_seconds`（填 `0` 表示继承全局 TTL）
+  - `semantic_dedup_enabled`
+  - `semantic_dedup_provider_id`（可从 AstrBot 模型列表选择）
+  - `semantic_dedup_ttl_seconds`（语义候选保留时间，默认 `86400` 秒）
+  - `semantic_dedup_max_candidates`（每条新内容最多比较的候选数量，默认 `20`）
+  - `semantic_dedup_min_confidence`（判为重复所需置信度，默认 `0.82`）
   - `enabled`
 - `daily_digests[]`
   - `id`（唯一）
@@ -181,6 +193,10 @@
 说明：
 - 去重记录会同时写入 AstrBot KV 与 `data/plugin_data/astrbot_plugin_rss_forwarder/state.json`
 - `jobs[].dedup_ttl_seconds` 大于 `0` 时，会覆盖全局 `dedup_ttl_seconds`；填 `0` 时继续使用全局值
+- `jobs[].semantic_dedup_enabled=true` 时，插件会在精确去重之后、翻译和推送之前做语义重复判定
+- 语义判定只读取当前 `job` 的候选记录，不会跨轮询任务互相影响
+- `jobs[].semantic_dedup_ttl_seconds` 用于控制候选新闻保留时间；过期候选会从模型输入中移除
+- 模型判定超时、缺少 provider 或返回无效 JSON 时，该条内容会继续推送
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
 - `startup_delay_seconds` 默认为 `45`，用于给平台适配器和主动消息通道预留启动时间
 - `translation` 下的全部字段都可在 AstrBot 插件面板中配置，无需手动修改 JSON 文件

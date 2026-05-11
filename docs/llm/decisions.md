@@ -28,6 +28,27 @@
 
 发送前增加原文身份指纹与图片哈希保护，避免并发翻译后文本略有差异时重复发出。
 
+## 任务级语义重复判定
+
+### 设计目的
+
+多个科技新闻源可能在短时间内报道同一事实事件。传统 `guid`、`link` 和同批次键只能识别同一源或同一链接，难以识别 Tom's Hardware、VideoCardz、TechPowerUp 等不同站点对同一新闻的改写。
+
+### 当前选择
+
+- 语义判定作为 `jobs[]` 内的可选能力，默认关闭。
+- `jobs[].semantic_dedup_provider_id` 使用 AstrBot 面板的 provider 选择器，允许为每个轮询任务单独选择判定模型。
+- 判定时机位于精确去重和历史条目抑制之后、翻译与推送之前，减少模型调用次数，并使用源站原文参与判断。
+- 候选记录按 `job_id` 隔离，存储在 `state.json` 的 `semantic_dedup.jobs.<job_id>.records` 下。
+- `jobs[].semantic_dedup_ttl_seconds` 控制候选保留时间，过期记录会从候选表中删除。
+- `jobs[].semantic_dedup_max_candidates` 控制每次送入模型的候选数量。
+- `jobs[].semantic_dedup_min_confidence` 控制判为重复所需置信度。
+- 模型异常、超时、缺少 provider 或返回无效 JSON 时继续推送当前条目。
+
+### 存储含义
+
+语义候选表记录实际推送过的代表新闻标题、摘要、来源、链接和发布时间。该表用于后续语义判定输入，并通过 TTL 裁剪控制长期状态大小与模型输入规模。精确去重记录仍由 `content_seen:v{version}:{item_id}` 负责。
+
 ## 草稿配置保存
 
 新建 `feed`、`target`、`job`、`daily_digest` 默认关闭。配置校验只针对启用项执行，便于先保存草稿，再补齐字段并启用。

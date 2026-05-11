@@ -8,6 +8,7 @@ from .fetcher import FeedFetcher
 from .parser import FeedParser
 from .pipeline import FeedPipeline
 from .scheduler import RSSScheduler
+from .semantic_dedup import SemanticDedupService
 from .storage import FeedStorage
 
 
@@ -15,7 +16,7 @@ from .storage import FeedStorage
     "astrbot_plugin_rss_forwarder",
     "AstrBot RSS Forwarder",
     "面向 AstrBot 的 RSS/RSSHub/Twitter 推送编排插件",
-    "0.5.2",
+    "0.6.0",
 )
 class RSSPlugin(Star, RSSCommands):
     def __init__(self, context: Context, config=None):
@@ -42,6 +43,7 @@ class RSSPlugin(Star, RSSCommands):
         fetcher = FeedFetcher(config=config, storage=storage)
         dispatcher = FeedDispatcher(context=context, config=config, storage=storage, renderer=self)
         pipeline = FeedPipeline(context=context, config=config)
+        semantic_deduper = SemanticDedupService(context=context, config=config, storage=storage)
 
         self.scheduler = RSSScheduler(
             config=config,
@@ -50,6 +52,7 @@ class RSSPlugin(Star, RSSCommands):
             dispatcher=dispatcher,
             storage=storage,
             pipeline=pipeline,
+            semantic_deduper=semantic_deduper,
         )
 
     async def initialize(self):

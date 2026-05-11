@@ -223,6 +223,62 @@ class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["last_schedule_date"], "2026-03-27")
             self.assertEqual(status["last_item_count"], 5)
 
+    async def test_semantic_dedup_records_are_pruned_by_ttl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = FeedStorage(storage_dir=tmpdir)
+            original_time = time.time
+            try:
+                time.time = lambda: 1_000_000
+                await storage.put_semantic_dedup_record(
+                    "job-1",
+                    {
+                        "feed_id": "feed-1",
+                        "feed_title": "Tom's Hardware",
+                        "guid": "guid-1",
+                        "title": "NVIDIA launches RTX 6090",
+                        "summary": "NVIDIA announced a new GPU.",
+                        "link": "https://example.com/a",
+                        "published_at": "2026-05-11T00:00:00+00:00",
+                    },
+                    seen_keys=["guid-1"],
+                    ttl_seconds=60,
+                )
+
+                records = await storage.list_semantic_dedup_records(
+                    "job-1",
+                    limit=10,
+                    ttl_seconds=60,
+                )
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["title"], "NVIDIA launches RTX 6090")
+
+                time.time = lambda: 1_000_061
+                records = await storage.list_semantic_dedup_records(
+                    "job-1",
+                    limit=10,
+                    ttl_seconds=60,
+                )
+                self.assertEqual(records, [])
+            finally:
+                time.time = original_time
+
+    async def test_clear_seen_also_clears_semantic_dedup_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = FeedStorage(storage_dir=tmpdir)
+            await storage.put_semantic_dedup_record(
+                "job-1",
+                {"guid": "guid-1", "title": "Title", "summary": "Summary"},
+                seen_keys=["guid-1"],
+                ttl_seconds=3600,
+            )
+
+            await storage.clear_seen()
+
+            self.assertEqual(
+                await storage.list_semantic_dedup_records("job-1", limit=10, ttl_seconds=3600),
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

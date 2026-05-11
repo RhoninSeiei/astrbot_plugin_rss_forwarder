@@ -202,6 +202,37 @@
             "description": "任务级去重记录保留时间（秒）",
             "hint": "填 0 表示继承全局 dedup_ttl_seconds；填正数则仅覆盖当前轮询任务。"
           },
+          "semantic_dedup_enabled": {
+            "type": "bool",
+            "default": false,
+            "description": "启用语义重复判定",
+            "hint": "开启后会在当前轮询任务内使用模型判断不同源是否报道同一事件。"
+          },
+          "semantic_dedup_provider_id": {
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "description": "语义判定模型",
+            "hint": "留空时优先使用翻译增强中的 LLM Provider，再尝试当前目标会话模型。"
+          },
+          "semantic_dedup_ttl_seconds": {
+            "type": "int",
+            "default": 86400,
+            "description": "语义候选保留时间（秒）",
+            "hint": "超过该时间的代表新闻会从语义判定候选中移除，减少模型输入。"
+          },
+          "semantic_dedup_max_candidates": {
+            "type": "int",
+            "default": 20,
+            "description": "语义判定候选上限",
+            "hint": "每条新内容最多与最近多少条代表新闻比较。"
+          },
+          "semantic_dedup_min_confidence": {
+            "type": "float",
+            "default": 0.82,
+            "description": "语义重复置信度阈值",
+            "hint": "模型返回置信度达到该值才会跳过推送。"
+          },
           "enabled": {
             "type": "bool",
             "default": false,

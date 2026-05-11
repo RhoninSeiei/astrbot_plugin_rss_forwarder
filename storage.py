@@ -26,6 +26,7 @@ class FeedStorage:
     CONTENT_INDEX_KEY = "content_seen_index"
     DEDUP_VERSION_KEY = "content_seen_version"
     DISPATCH_GUARD_PREFIX = "dispatch_guard:"
+    SEMANTIC_DEDUP_SECTION = "semantic_dedup"
     DAILY_DIGEST_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
     def __init__(
@@ -198,6 +199,7 @@ class FeedStorage:
         version = await self._get_dedup_version()
         self._dedup_version = version + 1
         await self.put(self.DEDUP_VERSION_KEY, self._dedup_version)
+        self._clear_semantic_dedup_state()
         return deleted
 
     async def archive_digest_items(
@@ -310,6 +312,106 @@ class FeedStorage:
                 record[key] = value
             record["updated_at"] = now
             status[digest_key] = record
+            self._write_disk_state(state)
+            return dict(record)
+
+        return dict(self._with_state_lock(callback) or {})
+
+    async def put_semantic_dedup_record(
+        self,
+        job_id: str,
+        item: dict[str, Any],
+        *,
+        seen_keys: list[str],
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        job_key = str(job_id or "").strip()
+        if not job_key:
+            return {}
+
+        ttl = max(int(ttl_seconds), 1)
+
+        def callback(state: dict[str, Any], now: int):
+            job_section = self._semantic_job_section(state, job_key)
+            records = job_section.setdefault("records", {})
+            self._prune_semantic_records(records, now, ttl)
+
+            clean_seen_keys = [str(key).strip() for key in seen_keys if str(key).strip()]
+            record_id = self._semantic_record_id(item, clean_seen_keys)
+            if not record_id:
+                return {}
+
+            existing = records.get(record_id)
+            created_at = int(existing.get("created_at", now)) if isinstance(existing, dict) else now
+            record = {
+                "record_id": record_id,
+                "item_key": str(self.build_dedup_key(item)).strip(),
+                "seen_keys": clean_seen_keys,
+                "feed_id": str(item.get("feed_id", "")).strip(),
+                "source": str(item.get("feed_title", "") or item.get("source", "") or "").strip(),
+                "title": str(item.get("title", "")).strip(),
+                "summary": str(item.get("summary", "") or item.get("content", "") or "").strip(),
+                "link": str(item.get("link", "")).strip(),
+                "published_at": str(item.get("published_at", "") or item.get("published", "") or "").strip(),
+                "created_at": created_at,
+                "updated_at": now,
+                "expires_at": now + ttl,
+                "duplicate_count": int(existing.get("duplicate_count", 0)) if isinstance(existing, dict) else 0,
+            }
+            records[record_id] = record
+            self._write_disk_state(state)
+            return dict(record)
+
+        return dict(self._with_state_lock(callback) or {})
+
+    async def list_semantic_dedup_records(
+        self,
+        job_id: str,
+        *,
+        limit: int,
+        ttl_seconds: int,
+    ) -> list[dict[str, Any]]:
+        job_key = str(job_id or "").strip()
+        if not job_key or limit <= 0:
+            return []
+
+        ttl = max(int(ttl_seconds), 1)
+
+        def callback(state: dict[str, Any], now: int):
+            job_section = self._semantic_job_section(state, job_key)
+            records = job_section.setdefault("records", {})
+            self._prune_semantic_records(records, now, ttl)
+            matched = [dict(record) for record in records.values() if isinstance(record, dict)]
+            matched.sort(
+                key=lambda record: (
+                    int(record.get("updated_at", 0) or 0),
+                    int(record.get("created_at", 0) or 0),
+                ),
+                reverse=True,
+            )
+            self._write_disk_state(state)
+            return matched[:limit]
+
+        return list(self._with_state_lock(callback) or [])
+
+    async def touch_semantic_dedup_record(
+        self,
+        job_id: str,
+        record_id: str,
+    ) -> dict[str, Any]:
+        job_key = str(job_id or "").strip()
+        record_key = str(record_id or "").strip()
+        if not job_key or not record_key:
+            return {}
+
+        def callback(state: dict[str, Any], now: int):
+            job_section = self._semantic_job_section(state, job_key)
+            records = job_section.setdefault("records", {})
+            record = records.get(record_key)
+            if not isinstance(record, dict):
+                return {}
+            record["updated_at"] = now
+            record["duplicate_count"] = int(record.get("duplicate_count", 0) or 0) + 1
             self._write_disk_state(state)
             return dict(record)
 
@@ -467,6 +569,63 @@ class FeedStorage:
         section.setdefault("archive", {})
         section.setdefault("status", {})
         return section
+
+    def _clear_semantic_dedup_state(self) -> None:
+        def callback(state: dict[str, Any], now: int):
+            state.pop(self.SEMANTIC_DEDUP_SECTION, None)
+            self._write_disk_state(state)
+            return None
+
+        self._with_state_lock(callback)
+
+    @classmethod
+    def _semantic_dedup_section(cls, state: dict[str, Any]) -> dict[str, Any]:
+        section = state.setdefault(cls.SEMANTIC_DEDUP_SECTION, {})
+        if not isinstance(section, dict):
+            section = {}
+            state[cls.SEMANTIC_DEDUP_SECTION] = section
+        section.setdefault("jobs", {})
+        return section
+
+    @classmethod
+    def _semantic_job_section(cls, state: dict[str, Any], job_id: str) -> dict[str, Any]:
+        section = cls._semantic_dedup_section(state)
+        jobs = section.setdefault("jobs", {})
+        if not isinstance(jobs, dict):
+            jobs = {}
+            section["jobs"] = jobs
+        job_section = jobs.get(job_id)
+        if not isinstance(job_section, dict):
+            job_section = {}
+            jobs[job_id] = job_section
+        job_section.setdefault("records", {})
+        return job_section
+
+    @staticmethod
+    def _prune_semantic_records(records: dict[str, Any], now: int, ttl_seconds: int) -> None:
+        cutoff = now - max(int(ttl_seconds), 1)
+        expired_keys = []
+        for key, record in records.items():
+            if not isinstance(record, dict):
+                expired_keys.append(key)
+                continue
+            expire_at = int(record.get("expires_at", 0) or 0)
+            created_at = int(record.get("created_at", 0) or 0)
+            if expire_at and expire_at < now:
+                expired_keys.append(key)
+            elif not expire_at and created_at and created_at < cutoff:
+                expired_keys.append(key)
+        for key in expired_keys:
+            records.pop(key, None)
+
+    def _semantic_record_id(self, item: dict[str, Any], seen_keys: list[str]) -> str:
+        seed = next((str(key).strip() for key in seen_keys if str(key).strip()), "")
+        if not seed:
+            seed = str(self.build_dedup_key(item)).strip()
+        if not seed:
+            return ""
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        return f"semantic:{digest}"
 
     def _build_digest_archive_record(self, item: dict[str, Any], now: int) -> dict[str, Any] | None:
         archive_key = self.build_digest_archive_key(item)

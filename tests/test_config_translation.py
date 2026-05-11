@@ -170,6 +170,47 @@ class ConfigTranslationTests(unittest.TestCase):
         with self.assertRaises(ConfigValidationError):
             RSSConfig.from_context(conf)
 
+    def test_job_semantic_dedup_config_parses(self):
+        conf = _minimal_runtime_conf()
+        conf["jobs"][0].update(
+            {
+                "semantic_dedup_enabled": True,
+                "semantic_dedup_provider_id": "provider-news",
+                "semantic_dedup_ttl_seconds": 86400,
+                "semantic_dedup_max_candidates": 8,
+                "semantic_dedup_min_confidence": 0.75,
+            }
+        )
+
+        cfg = RSSConfig.from_context(conf)
+
+        job = cfg.jobs[0]
+        self.assertTrue(job.semantic_dedup_enabled)
+        self.assertEqual(job.semantic_dedup_provider_id, "provider-news")
+        self.assertEqual(job.semantic_dedup_ttl_seconds, 86400)
+        self.assertEqual(job.semantic_dedup_max_candidates, 8)
+        self.assertEqual(job.semantic_dedup_min_confidence, 0.75)
+
+    def test_job_semantic_dedup_config_validates_positive_values(self):
+        conf = _minimal_runtime_conf()
+        conf["jobs"][0].update(
+            {
+                "semantic_dedup_enabled": True,
+                "semantic_dedup_ttl_seconds": 0,
+            }
+        )
+
+        with self.assertRaises(ConfigValidationError):
+            RSSConfig.from_context(conf)
+
+    def test_schema_exposes_job_semantic_dedup_provider_selector(self):
+        schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
+
+        job_items = schema["jobs"]["templates"]["job"]["items"]
+        self.assertIn("semantic_dedup_enabled", job_items)
+        self.assertEqual(job_items["semantic_dedup_provider_id"]["_special"], "select_provider")
+        self.assertEqual(job_items["semantic_dedup_ttl_seconds"]["default"], 86400)
+
     def test_twitter_feed_parses_media_switches(self):
         conf = _minimal_runtime_conf()
         conf["feeds"] = [

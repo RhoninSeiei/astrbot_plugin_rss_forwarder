@@ -2,8 +2,8 @@
 
 ## 版本
 
-- 仓库版本：`0.5.2`
-- 市场版本：`v0.5.2`
+- 仓库版本：`0.6.0`
+- 市场版本：`v0.6.0`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
 - 运行时注册名：`astrbot_plugin_rss_forwarder`
 
@@ -20,6 +20,7 @@
 - 日报图片模式使用插件自身的 `Star.html_render`，并在渲染失败时回退文本日报。
 - 发送前指纹查重，包含文本身份信息与图片 `sha256`。
 - 任务级去重记录保留时间 `jobs[].dedup_ttl_seconds`。
+- 任务级语义重复判定 `jobs[].semantic_dedup_enabled`，支持独立选择模型、候选保留时间、候选数量上限与置信度阈值。
 
 ## 线上活跃任务记录
 
