@@ -130,6 +130,33 @@ class _StarRenderer:
         return "digest-image"
 
 
+class _FakeNetworkStrategy:
+    def __init__(self):
+        self.refresh_count = 0
+
+    async def get_official_endpoints(self):
+        self.refresh_count += 1
+
+
+class _FakeHtmlRenderer:
+    def __init__(self):
+        self.network_strategy = _FakeNetworkStrategy()
+
+
+html_renderer = _FakeHtmlRenderer()
+
+
+class _RefreshableStarRenderer:
+    def __init__(self):
+        self.calls = 0
+
+    async def html_render(self, tmpl, data, return_url=True, options=None):
+        self.calls += 1
+        if html_renderer.network_strategy.refresh_count == 0:
+            raise RuntimeError("HTTP 502")
+        return "digest-image"
+
+
 class DispatcherTests(unittest.IsolatedAsyncioTestCase):
     def _build_config(self):
         return RSSConfig.from_context(
@@ -335,6 +362,24 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(payload, _MessageChain)
         self.assertEqual(payload.chain[0].url, "digest-image")
         self.assertEqual(renderer.calls[0][1], {})
+
+    async def test_html_render_refreshes_t2i_endpoints_after_first_failure(self):
+        html_renderer.network_strategy.refresh_count = 0
+        context = _FakeContext()
+        renderer = _RefreshableStarRenderer()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(
+            context=context,
+            config=self._build_config(),
+            storage=storage,
+            renderer=renderer,
+        )
+
+        result = await dispatcher.html_render("<html><body>probe</body></html>")
+
+        self.assertEqual(result, "digest-image")
+        self.assertEqual(renderer.calls, 2)
+        self.assertEqual(html_renderer.network_strategy.refresh_count, 1)
 
     async def test_image_render_active_send_wraps_rendered_url_as_image_chain(self):
         context = _FakeContext()

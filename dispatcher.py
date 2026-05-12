@@ -725,10 +725,38 @@ class FeedDispatcher:
         if not callable(render_func) and self._renderer is not self.context:
             render_func = getattr(self.context, "html_render", None)
         if callable(render_func):
-            if self._html_render_accepts_data_arg(render_func):
-                return await render_func(html, {})
-            return await render_func(html)
+            try:
+                return await self._call_html_render(render_func, html)
+            except Exception:
+                if await self._refresh_html_render_endpoints(render_func):
+                    return await self._call_html_render(render_func, html)
+                raise
         raise RuntimeError("context.html_render is not available")
+
+    async def _call_html_render(self, render_func, html: str):
+        if self._html_render_accepts_data_arg(render_func):
+            return await render_func(html, {})
+        return await render_func(html)
+
+    @staticmethod
+    async def _refresh_html_render_endpoints(render_func) -> bool:
+        func = getattr(render_func, "__func__", render_func)
+        func_globals = getattr(func, "__globals__", None)
+        if not isinstance(func_globals, dict):
+            return False
+
+        html_renderer = func_globals.get("html_renderer")
+        network_strategy = getattr(html_renderer, "network_strategy", None)
+        refresh_func = getattr(network_strategy, "get_official_endpoints", None)
+        if not callable(refresh_func):
+            return False
+
+        try:
+            await refresh_func()
+        except Exception as exc:  # pragma: no cover - 依赖 AstrBot 运行环境
+            logger.warning("refresh t2i endpoints failed: %s", exc)
+            return False
+        return True
 
     @staticmethod
     def _html_render_accepts_data_arg(render_func) -> bool:
