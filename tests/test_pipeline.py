@@ -302,6 +302,47 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("芯片日报", str(ctx.last_llm_kwargs.get("prompt", "")))
         self.assertIn("2026-03-27 09:00", str(ctx.last_llm_kwargs.get("prompt", "")))
 
+    async def test_build_daily_digest_content_uses_digest_timeout_override(self):
+        class SlowContext(_DummyContext):
+            async def llm_generate(self, **kwargs):
+                await asyncio.sleep(0.05)
+                self.last_llm_kwargs = kwargs
+                return types.SimpleNamespace(completion_text="1. [TechPowerUp] 中文日报")
+
+        ctx = SlowContext()
+        cfg = RSSConfig(
+            feeds=[],
+            targets=[],
+            jobs=[],
+            llm_enabled=True,
+            llm_provider_id="manual-provider",
+            llm_timeout_seconds=0.01,
+        )
+        pipe = FeedPipeline(ctx, cfg)
+
+        result = await pipe.build_daily_digest_content(
+            {
+                "title": "芯片日报",
+                "window_start_text": "2026-03-27 09:00",
+                "window_end_text": "2026-03-28 09:00",
+                "max_items": 5,
+                "llm_timeout_seconds": 1,
+            },
+            [
+                {
+                    "feed_title": "TechPowerUp",
+                    "title": "AMD launches CPU",
+                    "summary": "Summary",
+                    "link": "https://example.com/1",
+                    "published_at": "2026-03-28T00:00:00+00:00",
+                }
+            ],
+            unified_msg_origin="qq:group:1",
+        )
+
+        self.assertEqual(result["engine"], "llm")
+        self.assertIn("中文日报", result["content"])
+
     async def test_build_daily_digest_content_falls_back_to_numbered_titles(self):
         ctx = _DummyContext()
         cfg = RSSConfig(

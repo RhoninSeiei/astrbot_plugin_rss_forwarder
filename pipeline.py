@@ -260,8 +260,9 @@ class FeedPipeline:
         llm_kwargs.update(self._build_llm_proxy_kwargs())
 
         llm_call = self.context.llm_generate(**llm_kwargs)
+        timeout_seconds = self._daily_digest_llm_timeout_seconds(digest)
         try:
-            result = await asyncio.wait_for(llm_call, timeout=self._config.llm_timeout_seconds)
+            result = await asyncio.wait_for(llm_call, timeout=timeout_seconds)
         except asyncio.TimeoutError:
             return "", "timeout"
         except Exception as exc:
@@ -566,6 +567,15 @@ class FeedPipeline:
             return template.format(**values)
         except Exception:
             return DEFAULT_DAILY_DIGEST_PROMPT.format(**values)
+
+    def _daily_digest_llm_timeout_seconds(self, digest: dict[str, Any]) -> float:
+        try:
+            value = float(digest.get("llm_timeout_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+        return float(self._config.llm_timeout_seconds)
 
     def _prepare_digest_items(self, items: list[dict[str, Any]], limit: int) -> list[dict[str, str]]:
         prepared: list[dict[str, str]] = []

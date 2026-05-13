@@ -527,6 +527,7 @@ class RSSScheduler:
                     "title": digest.title,
                     "prompt_template": digest.prompt_template,
                     "max_items": digest.max_items,
+                    "llm_timeout_seconds": digest.llm_timeout_seconds,
                     "window_start_text": self._format_local_timestamp(window_start_ts),
                     "window_end_text": self._format_local_timestamp(window_end_ts),
                 }

@@ -73,6 +73,7 @@ class DailyDigestConfig:
     window_hours: int = 24
     max_items: int = 20
     render_mode: str = "text"
+    llm_timeout_seconds: int = 0
     prompt_template: str = DEFAULT_DAILY_DIGEST_PROMPT
     enabled: bool = False
 
@@ -227,6 +228,7 @@ class RSSConfig:
                 window_hours=int(item.get("window_hours", 24) or 24),
                 max_items=int(item.get("max_items", 20) or 20),
                 render_mode=str(item.get("render_mode", "text")).strip() or "text",
+                llm_timeout_seconds=int(item.get("llm_timeout_seconds", 0) or 0),
                 prompt_template=str(
                     item.get("prompt_template", DEFAULT_DAILY_DIGEST_PROMPT)
                 ).strip()
@@ -592,6 +594,10 @@ class RSSConfig:
                 raise ConfigValidationError(f"daily_digests[{digest.id}].window_hours 必须 > 0")
             if digest.max_items <= 0:
                 raise ConfigValidationError(f"daily_digests[{digest.id}].max_items 必须 > 0")
+            if digest.llm_timeout_seconds < 0:
+                raise ConfigValidationError(
+                    f"daily_digests[{digest.id}].llm_timeout_seconds 必须 >= 0"
+                )
             if digest.render_mode not in {"text", "image"}:
                 raise ConfigValidationError(
                     f"daily_digests[{digest.id}].render_mode 必须是 text 或 image"

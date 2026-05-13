@@ -123,6 +123,7 @@ class ConfigTranslationTests(unittest.TestCase):
                     "send_time": "09:00",
                     "window_hours": 24,
                     "max_items": 20,
+                    "llm_timeout_seconds": 90,
                     "render_mode": "image",
                     "enabled": True,
                 }
@@ -138,6 +139,7 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(digest.title, "digest-1")
         self.assertEqual(digest.render_mode, "image")
         self.assertEqual(digest.send_time, "09:00")
+        self.assertEqual(digest.llm_timeout_seconds, 90)
         self.assertTrue(digest.enabled)
 
     def test_daily_digest_invalid_send_time_raises(self):

@@ -294,6 +294,12 @@
             "default": 20,
             "description": "日报最大条目数"
           },
+          "llm_timeout_seconds": {
+            "type": "int",
+            "default": 0,
+            "description": "日报 LLM 超时（秒）",
+            "hint": "填 0 时继承全局 LLM 超时；日报条目较多时可单独设置更长时间。"
+          },
           "render_mode": {
             "type": "string",
             "default": "text",

@@ -403,6 +403,7 @@ class SchedulerDailyDigestTests(unittest.IsolatedAsyncioTestCase):
             title="芯片日报",
             feed_ids=["feed-1"],
             target_ids=["target-1"],
+            llm_timeout_seconds=90,
             enabled=True,
         )
         scheduler = RSSScheduler(
@@ -432,6 +433,7 @@ class SchedulerDailyDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(scheduler._dispatcher.digests), 1)
         self.assertEqual(scheduler._dispatcher.digests[0]["title"], "芯片日报")
         self.assertEqual(scheduler._dispatcher.digests[0]["item_count"], 1)
+        self.assertEqual(scheduler._pipeline.last_digest["llm_timeout_seconds"], 90)
 
     async def test_run_daily_digest_once_skips_empty_window(self):
         class FakeStorage:
