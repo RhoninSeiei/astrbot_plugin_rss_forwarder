@@ -2,8 +2,8 @@
 
 ## 版本
 
-- 仓库版本：`0.6.0`
-- 市场版本：`v0.6.0`
+- 仓库版本：`0.6.1`
+- 市场版本：`v0.6.1`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
 - 运行时注册名：`astrbot_plugin_rss_forwarder`
 
@@ -21,13 +21,18 @@
 - 发送前指纹查重，包含文本身份信息与图片 `sha256`。
 - 任务级去重记录保留时间 `jobs[].dedup_ttl_seconds`。
 - 任务级语义重复判定 `jobs[].semantic_dedup_enabled`，支持独立选择模型、候选保留时间、候选数量上限与置信度阈值。
+- RSS 源可通过 `feeds[].proxy_url` 单独配置抓取代理。
+- 日报任务可通过 `daily_digests[].llm_timeout_seconds` 单独配置 LLM 等待时间。
 
 ## 线上活跃任务记录
 
 ### 1110001
 
-- feed：`101`
-- 当前源：`https://www.techpowerup.com/rss/news`
+- feeds：`101`、`104`、`105`
+- 当前源：
+  - `https://www.techpowerup.com/rss/news`
+  - `https://videocardz.com/rss-feed`
+  - `https://www.tomshardware.com/feeds.xml`
 - 观察到的保留窗口约为 6 天多
 - 当前任务级去重时效：`604800` 秒
 
