@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import inspect
 import time
 from contextlib import suppress
@@ -664,6 +665,96 @@ class RSSScheduler:
         for key in keys:
             await self._storage.mark_seen(key, ttl_seconds=ttl_seconds)
 
+    def _resolve_job_target_origins(self, job: JobConfig) -> list[str]:
+        target_ids = [str(target_id).strip() for target_id in (getattr(job, "target_ids", []) or [])]
+        if not target_ids:
+            return []
+        enabled_targets = {
+            target.id: target
+            for target in self._targets()
+            if getattr(target, "enabled", False) and getattr(target, "unified_msg_origin", "")
+        }
+        origins = {
+            str(enabled_targets[target_id].unified_msg_origin).strip()
+            for target_id in target_ids
+            if target_id in enabled_targets
+        }
+        return sorted(origin for origin in origins if origin)
+
+    @staticmethod
+    def _target_seen_key(job_id: str, origin: str, item_key: str) -> str:
+        origin_digest = hashlib.sha256(str(origin).encode("utf-8")).hexdigest()
+        return f"job:{job_id}:origin:{origin_digest}:{item_key}"
+
+    def _target_seen_keys(self, job: JobConfig, origin: str, seen_keys: list[str]) -> list[str]:
+        job_id = str(getattr(job, "id", "")).strip()
+        if not job_id:
+            return seen_keys
+        return [self._target_seen_key(job_id, origin, key) for key in seen_keys]
+
+    async def _pending_target_origins(
+        self,
+        job: JobConfig,
+        seen_keys: list[str],
+        ttl_seconds: int,
+    ) -> list[str]:
+        origins = self._resolve_job_target_origins(job)
+        if not origins:
+            return []
+
+        # 兼容升级前的全局内容去重键，避免旧内容在部署后重新推送。
+        if await self._has_seen_any(seen_keys, ttl_seconds=ttl_seconds):
+            return []
+
+        pending: list[str] = []
+        for origin in origins:
+            scoped_keys = self._target_seen_keys(job, origin, seen_keys)
+            if not await self._has_seen_any(scoped_keys, ttl_seconds=ttl_seconds):
+                pending.append(origin)
+        return pending
+
+    async def _mark_seen_for_origins(
+        self,
+        job: JobConfig,
+        origins: list[str],
+        seen_keys: list[str],
+        ttl_seconds: int,
+    ) -> None:
+        if not origins:
+            return
+        for origin in origins:
+            await self._mark_seen_all(
+                self._target_seen_keys(job, origin, seen_keys),
+                ttl_seconds=ttl_seconds,
+            )
+
+    @staticmethod
+    def _result_origins(result: Any, attr_name: str) -> list[str]:
+        values = getattr(result, attr_name, []) or []
+        if isinstance(values, str):
+            values = [values]
+        return sorted({str(value).strip() for value in values if str(value).strip()})
+
+    def _completed_dispatch_origins(
+        self,
+        job: JobConfig,
+        pending_origins: list[str],
+        result: Any,
+    ) -> list[str]:
+        target_origins = self._resolve_job_target_origins(job)
+        if not target_origins:
+            return []
+        completed = set(self._result_origins(result, "success_origins"))
+        completed.update(self._result_origins(result, "skipped_duplicate_origins"))
+        completed.update(self._result_origins(result, "permanent_failure_origins"))
+        completed.update(self._result_origins(result, "skipped_disabled_origins"))
+        if completed:
+            pending_set = set(pending_origins or target_origins)
+            return sorted(completed & pending_set)
+        if getattr(result, "transient_failure_count", 0) > 0:
+            return []
+        return list(pending_origins or target_origins)
+
     def _job_dedup_ttl_seconds(self, job: JobConfig) -> int:
         job_ttl = int(getattr(job, "dedup_ttl_seconds", 0) or 0)
         if job_ttl > 0:
@@ -877,6 +968,12 @@ class RSSScheduler:
                     if not seen_keys:
                         skipped_seen_count += 1
                         continue
+                    pending_target_origins = await self._pending_target_origins(
+                        job,
+                        seen_keys,
+                        dedup_ttl_seconds,
+                    )
+                    has_target_scope = bool(self._resolve_job_target_origins(job))
                     item_id = seen_keys[0]
                     if any(key in seen_in_run for key in seen_keys):
                         skipped_batch_duplicate_count += 1
@@ -887,17 +984,31 @@ class RSSScheduler:
                             str(item.get("title", "")).strip(),
                         )
                         continue
-                    if await self._has_seen_any(seen_keys, ttl_seconds=dedup_ttl_seconds):
+                    if has_target_scope:
+                        if not pending_target_origins:
+                            skipped_seen_count += 1
+                            continue
+                    elif await self._has_seen_any(seen_keys, ttl_seconds=dedup_ttl_seconds):
                         skipped_seen_count += 1
                         continue
                     seen_in_run.update(seen_keys)
                     if self._should_mark_history_only(item, feed_state_map, bootstrap_only=True):
-                        await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                        if has_target_scope:
+                            await self._mark_seen_for_origins(
+                                job,
+                                pending_target_origins,
+                                seen_keys,
+                                ttl_seconds=dedup_ttl_seconds,
+                            )
+                        else:
+                            await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
                         skipped_history_count += 1
                         continue
 
                     event_item = dict(item)
                     event_item.setdefault("job_id", job.id)
+                    if has_target_scope:
+                        event_item["_target_origins"] = pending_target_origins
                     event_item["compact_mode_enabled"] = bool(
                         getattr(job, "compact_mode_enabled", False)
                     )
@@ -906,7 +1017,15 @@ class RSSScheduler:
                         event_item,
                     )
                     if semantic_result.duplicate:
-                        await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                        if has_target_scope:
+                            await self._mark_seen_for_origins(
+                                job,
+                                pending_target_origins,
+                                seen_keys,
+                                ttl_seconds=dedup_ttl_seconds,
+                            )
+                        else:
+                            await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
                         await self._record_semantic_duplicate_match(job, semantic_result)
                         skipped_semantic_duplicate_count += 1
                         logger.info(
@@ -927,10 +1046,23 @@ class RSSScheduler:
                             and dispatch_result.permanent_failure_count == 0
                             and dispatch_result.transient_failure_count == 0
                         ):
-                            await self._mark_seen_all(
-                                seen_keys,
-                                ttl_seconds=dedup_ttl_seconds,
+                            completed_origins = self._completed_dispatch_origins(
+                                job,
+                                pending_target_origins,
+                                dispatch_result,
                             )
+                            if has_target_scope:
+                                await self._mark_seen_for_origins(
+                                    job,
+                                    completed_origins,
+                                    seen_keys,
+                                    ttl_seconds=dedup_ttl_seconds,
+                                )
+                            else:
+                                await self._mark_seen_all(
+                                    seen_keys,
+                                    ttl_seconds=dedup_ttl_seconds,
+                                )
                             skipped_dispatch_duplicate_count += dispatch_result.skipped_duplicate_count
                             continue
                         permanent_or_disabled = (
@@ -938,21 +1070,48 @@ class RSSScheduler:
                             or dispatch_result.skipped_disabled_count > 0
                         )
                         if permanent_or_disabled and dispatch_result.transient_failure_count == 0:
-                            await self._mark_seen_all(
-                                seen_keys,
-                                ttl_seconds=dedup_ttl_seconds,
+                            completed_origins = self._completed_dispatch_origins(
+                                job,
+                                pending_target_origins,
+                                dispatch_result,
                             )
+                            if has_target_scope:
+                                await self._mark_seen_for_origins(
+                                    job,
+                                    completed_origins,
+                                    seen_keys,
+                                    ttl_seconds=dedup_ttl_seconds,
+                                )
+                            else:
+                                await self._mark_seen_all(
+                                    seen_keys,
+                                    ttl_seconds=dedup_ttl_seconds,
+                                )
                             skipped_invalid_target_count += 1
                             continue
                         dispatch_fail_count += 1
                         continue
-                    await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
-                    await self._remember_semantic_candidate(
+                    completed_origins = self._completed_dispatch_origins(
                         job,
-                        event_item,
-                        seen_keys,
-                        ttl_seconds=self._job_semantic_dedup_ttl_seconds(job, dedup_ttl_seconds),
+                        pending_target_origins,
+                        dispatch_result,
                     )
+                    if has_target_scope:
+                        await self._mark_seen_for_origins(
+                            job,
+                            completed_origins,
+                            seen_keys,
+                            ttl_seconds=dedup_ttl_seconds,
+                        )
+                    else:
+                        await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                    if dispatch_result.transient_failure_count <= 0:
+                        await self._remember_semantic_candidate(
+                            job,
+                            event_item,
+                            seen_keys,
+                            ttl_seconds=self._job_semantic_dedup_ttl_seconds(job, dedup_ttl_seconds),
+                        )
                     pushed_count += 1
 
                 feed_meta = self._extract_feed_meta(raw_items)

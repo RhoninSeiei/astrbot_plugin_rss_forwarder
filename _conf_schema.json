@@ -154,6 +154,17 @@
             "description": "AstrBot 统一会话标识",
             "hint": "启用该目标时必须填写，可先保存为草稿，补全后再启用。"
           },
+          "compact_mode": {
+            "type": "string",
+            "default": "inherit",
+            "options": [
+              "inherit",
+              "compact",
+              "normal"
+            ],
+            "description": "目标简洁模式",
+            "hint": "inherit 表示继承轮询任务设置；compact 表示该目标只推送标题；normal 表示该目标始终推送完整内容。"
+          },
           "enabled": {
             "type": "bool",
             "default": false,

@@ -2,8 +2,8 @@
 
 ## 版本
 
-- 仓库版本：`0.6.2`
-- 市场版本：`v0.6.2`
+- 仓库版本：`0.6.3`
+- 市场版本：`v0.6.3`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
 - 运行时注册名：`astrbot_plugin_rss_forwarder`
 
@@ -15,6 +15,8 @@
 - Twitter 源可通过 `feeds[].max_new_items` 控制每轮抓取的新推文数量，默认只取最新 1 条。
 - 即时推送可通过 `display_source`、`display_time`、`display_link` 控制来源、时间、链接展示。
 - 轮询任务可通过 `jobs[].compact_mode_enabled` 开启简洁模式，只推送标题。
+- 推送目标可通过 `targets[].compact_mode` 覆盖轮询任务展示模式，支持同一任务内群聊简洁推送、私聊正常推送。
+- 多目标轮询任务的内容确认按 `job + target + item` 记录，单个目标发送失败时，后续轮询只补发未确认目标。
 - 持久化去重、启动延迟、历史条目抑制、失效 target 抑制。
 - 中文翻译增强，顺序为 `LLM -> Google Translate -> GitHub Models`。
 - 日报任务 `daily_digests[]`，支持文本与图片两种发送形式。

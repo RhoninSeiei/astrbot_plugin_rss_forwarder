@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import inspect
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
 from typing import Any
@@ -22,6 +22,11 @@ class DispatchResult:
     transient_failure_count: int = 0
     skipped_disabled_count: int = 0
     skipped_duplicate_count: int = 0
+    success_origins: list[str] = field(default_factory=list)
+    permanent_failure_origins: list[str] = field(default_factory=list)
+    transient_failure_origins: list[str] = field(default_factory=list)
+    skipped_disabled_origins: list[str] = field(default_factory=list)
+    skipped_duplicate_origins: list[str] = field(default_factory=list)
 
 
 class FeedDispatcher:
@@ -41,6 +46,12 @@ class FeedDispatcher:
             for target in config.targets
             if target.enabled and target.unified_msg_origin
         }
+        self._target_compact_modes = {
+            target.unified_msg_origin: str(getattr(target, "compact_mode", "inherit") or "inherit")
+            .strip()
+            .lower()
+            for target in self._target_map.values()
+        }
         self._job_target_origins = self._build_job_target_map(config)
         self._disabled_origins: set[str] = set()
 
@@ -59,6 +70,24 @@ class FeedDispatcher:
         return mapping
 
     def _resolve_origins(self, item: dict[str, Any]) -> list[str]:
+        target_origins = item.get("_target_origins")
+        if isinstance(target_origins, str):
+            target_origins = [target_origins]
+        if isinstance(target_origins, list):
+            allowed_origins = {
+                origin
+                for origin_list in self._job_target_origins.values()
+                for origin in origin_list
+            }
+            requested = {
+                str(origin).strip()
+                for origin in target_origins
+                if str(origin).strip()
+            }
+            if allowed_origins:
+                requested &= allowed_origins
+            return sorted(requested)
+
         origins: set[str] = set()
 
         job_ids = item.get("job_ids") or []
@@ -154,6 +183,17 @@ class FeedDispatcher:
     def _is_compact_item(item: dict[str, Any] | None = None) -> bool:
         return bool(item and item.get("compact_mode_enabled", False))
 
+    def _item_for_origin(self, item: dict[str, Any], origin: str) -> dict[str, Any]:
+        target_item = dict(item)
+        compact_mode = self._target_compact_modes.get(origin, "inherit")
+        if compact_mode == "compact":
+            target_item["compact_mode_enabled"] = True
+        elif compact_mode == "normal":
+            target_item["compact_mode_enabled"] = False
+        else:
+            target_item["compact_mode_enabled"] = self._is_compact_item(item)
+        return target_item
+
     @staticmethod
     def _normalize_url(url: str) -> str:
         text = str(url or "").strip()
@@ -187,6 +227,7 @@ class FeedDispatcher:
                 hashlib.sha256(summary.encode("utf-8")).hexdigest() if summary else ""
             ),
             "render_mode": str(self._config.render_mode or "text").strip(),
+            "compact_mode": bool(item.get("compact_mode_enabled", False)),
         }
         image_paths = self._item_image_paths(item)
         if image_paths:
@@ -825,26 +866,42 @@ class FeedDispatcher:
             logger.warning("skip dispatch: no available targets for item=%s", item)
             return DispatchResult()
 
-        extra_payloads: list[Any] = []
-        if self._config.render_mode == "image":
-            payload, source_image_already_included = await self._build_image_payload(item)
-            if not source_image_already_included and not self._is_compact_item(item):
-                extra_payloads.extend(self._build_source_media_payloads(item))
-        else:
-            try:
-                chain = self._build_text_message_chain(item)
-            except Exception:
-                return DispatchResult(transient_failure_count=1)
-            payload = self._as_chain_result_if_possible(item, chain)
-
         result = DispatchResult()
         for unified_msg_origin in origins:
             if unified_msg_origin in self._disabled_origins:
                 result.skipped_disabled_count += 1
+                result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
-            fingerprint = await self._build_dispatch_fingerprint(item, unified_msg_origin)
+            target_item = self._item_for_origin(item, unified_msg_origin)
+            extra_payloads: list[Any] = []
+            if self._config.render_mode == "image":
+                try:
+                    payload, source_image_already_included = await self._build_image_payload(target_item)
+                except Exception as exc:
+                    result.transient_failure_count += 1
+                    result.transient_failure_origins.append(unified_msg_origin)
+                    logger.error(
+                        "build image payload failed origin=%s item=%s: %s",
+                        unified_msg_origin,
+                        str(item.get("guid", "") or item.get("title", "")).strip(),
+                        exc,
+                    )
+                    continue
+                if not source_image_already_included and not self._is_compact_item(target_item):
+                    extra_payloads.extend(self._build_source_media_payloads(target_item))
+            else:
+                try:
+                    chain = self._build_text_message_chain(target_item)
+                    payload = self._as_chain_result_if_possible(target_item, chain)
+                except Exception:
+                    result.transient_failure_count += 1
+                    result.transient_failure_origins.append(unified_msg_origin)
+                    continue
+
+            fingerprint = await self._build_dispatch_fingerprint(target_item, unified_msg_origin)
             if not await self._claim_dispatch(fingerprint):
                 result.skipped_duplicate_count += 1
+                result.skipped_duplicate_origins.append(unified_msg_origin)
                 logger.warning(
                     "skip duplicate dispatch origin=%s item=%s fingerprint=%s",
                     unified_msg_origin,
@@ -855,6 +912,7 @@ class FeedDispatcher:
             try:
                 await self.context.send_message(unified_msg_origin, payload)
                 result.success_count += 1
+                result.success_origins.append(unified_msg_origin)
                 await self._confirm_dispatch(fingerprint)
                 for extra_payload in extra_payloads:
                     try:
@@ -870,6 +928,7 @@ class FeedDispatcher:
                 if self._is_permanent_target_error(exc):
                     self._disabled_origins.add(unified_msg_origin)
                     result.permanent_failure_count += 1
+                    result.permanent_failure_origins.append(unified_msg_origin)
                     logger.error(
                         "主动消息发送失败 origin=%s: %s。已将该 target 标记为无效，本次运行内不再重试。",
                         unified_msg_origin,
@@ -877,6 +936,7 @@ class FeedDispatcher:
                     )
                     continue
                 result.transient_failure_count += 1
+                result.transient_failure_origins.append(unified_msg_origin)
                 logger.error(
                     "主动消息发送失败 origin=%s: %s。若当前平台不支持主动消息，请在支持的会话渠道配置 target。",
                     unified_msg_origin,
@@ -918,10 +978,12 @@ class FeedDispatcher:
         for unified_msg_origin in origins:
             if unified_msg_origin in self._disabled_origins:
                 result.skipped_disabled_count += 1
+                result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
             fingerprint = await self._build_daily_digest_fingerprint(digest, unified_msg_origin)
             if not await self._claim_dispatch(fingerprint):
                 result.skipped_duplicate_count += 1
+                result.skipped_duplicate_origins.append(unified_msg_origin)
                 logger.warning(
                     "skip duplicate daily digest origin=%s digest=%s fingerprint=%s",
                     unified_msg_origin,
@@ -932,12 +994,14 @@ class FeedDispatcher:
             try:
                 await self.context.send_message(unified_msg_origin, payload)
                 result.success_count += 1
+                result.success_origins.append(unified_msg_origin)
                 await self._confirm_dispatch(fingerprint)
             except Exception as exc:
                 await self._release_dispatch(fingerprint)
                 if self._is_permanent_target_error(exc):
                     self._disabled_origins.add(unified_msg_origin)
                     result.permanent_failure_count += 1
+                    result.permanent_failure_origins.append(unified_msg_origin)
                     logger.error(
                         "日报发送失败 origin=%s: %s。已将该 target 标记为无效，本次运行内不再重试。",
                         unified_msg_origin,
@@ -945,6 +1009,7 @@ class FeedDispatcher:
                     )
                     continue
                 result.transient_failure_count += 1
+                result.transient_failure_origins.append(unified_msg_origin)
                 logger.error("日报发送失败 origin=%s: %s", unified_msg_origin, exc)
         return result
 

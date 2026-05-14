@@ -203,6 +203,21 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(job.semantic_dedup_max_candidates, 8)
         self.assertEqual(job.semantic_dedup_min_confidence, 0.75)
 
+    def test_target_compact_mode_parses(self):
+        conf = _minimal_runtime_conf()
+        conf["targets"][0]["compact_mode"] = "compact"
+
+        cfg = RSSConfig.from_context(conf)
+
+        self.assertEqual(cfg.targets[0].compact_mode, "compact")
+
+    def test_target_compact_mode_validates_allowed_values(self):
+        conf = _minimal_runtime_conf()
+        conf["targets"][0]["compact_mode"] = "brief"
+
+        with self.assertRaises(ConfigValidationError):
+            RSSConfig.from_context(conf)
+
     def test_job_semantic_dedup_config_validates_positive_values(self):
         conf = _minimal_runtime_conf()
         conf["jobs"][0].update(
@@ -223,6 +238,14 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertIn("semantic_dedup_enabled", job_items)
         self.assertEqual(job_items["semantic_dedup_provider_id"]["_special"], "select_provider")
         self.assertEqual(job_items["semantic_dedup_ttl_seconds"]["default"], 86400)
+
+    def test_schema_exposes_target_compact_mode(self):
+        schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
+
+        target_items = schema["targets"]["templates"]["target"]["items"]
+        self.assertEqual(target_items["compact_mode"]["default"], "inherit")
+        self.assertIn("compact", target_items["compact_mode"]["options"])
+        self.assertIn("normal", target_items["compact_mode"]["options"])
 
     def test_schema_exposes_daily_digest_semantic_merge_provider_selector(self):
         schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))

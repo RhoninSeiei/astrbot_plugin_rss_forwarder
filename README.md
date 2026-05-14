@@ -87,7 +87,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 
 ![推送目标配置面板示意](./docs/assets/rss-forwarder-panel-targets.svg)
 
-最少需要填写 `id`、`platform` 与 `unified_msg_origin`。截图中的 `qq:group:example` 仅表示格式占位，请勿照抄。
+最少需要填写 `id`、`platform` 与 `unified_msg_origin`。`compact_mode` 默认为 `inherit`，表示继承轮询任务的简洁模式；需要按目标覆盖时可设为 `compact` 或 `normal`。截图中的 `qq:group:example` 仅表示格式占位，请勿照抄。
 
 ### 4. 配置轮询任务
 
@@ -99,7 +99,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 
 语义重复判定只在同一个轮询任务内生效。多个源报道同一事件时，模型会比较新条目和该任务近期候选内容，置信度达到阈值后保留首条代表新闻。`semantic_dedup_ttl_seconds` 控制候选保留时间，过期候选会自动移出判定输入。
 
-如果某个轮询任务只需要标题提醒，可以开启 `compact_mode_enabled`。开启后该任务只推送标题，不显示来源、时间、摘要、网页链接和原文媒体。
+如果某个轮询任务只需要标题提醒，可以开启 `compact_mode_enabled`。开启后该任务默认只推送标题，不显示来源、时间、摘要、网页链接和原文媒体。单个目标可通过 `targets[].compact_mode` 覆盖该默认值，例如群聊设为 `compact`，私聊设为 `normal`。
 
 ### 5. 手动检查
 
@@ -138,6 +138,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
   - `id`（唯一）
   - `platform`
   - `unified_msg_origin`（建议优先）
+  - `compact_mode`（`inherit`、`compact`、`normal`）
   - `enabled`
 - `jobs[]`
   - `id`（唯一）
@@ -205,6 +206,8 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 - `jobs[].semantic_dedup_ttl_seconds` 用于控制候选新闻保留时间；过期候选会从模型输入中移除
 - 模型判定超时、缺少 provider 或返回无效 JSON 时，该条内容会继续推送
 - `jobs[].compact_mode_enabled=true` 时，该轮询任务只推送标题；全局 `render_mode=image` 下仍使用标题图卡，渲染失败时回退为标题文本
+- `targets[].compact_mode` 可覆盖轮询任务的简洁模式；同一轮询任务内不同目标可分别使用简洁推送和正常推送
+- 多目标任务的内容确认按 `job + target + item` 记录，单个目标发送失败时，后续轮询只补发未确认目标
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
 - `startup_delay_seconds` 默认为 `45`，用于给平台适配器和主动消息通道预留启动时间
 - `translation` 下的全部字段都可在 AstrBot 插件面板中配置，无需手动修改 JSON 文件
@@ -254,6 +257,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
       "id": "notification_group",
       "platform": "qq",
       "unified_msg_origin": "qq:group:example",
+      "compact_mode": "inherit",
       "enabled": true
     }
   ],

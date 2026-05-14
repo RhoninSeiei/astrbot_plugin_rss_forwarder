@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import sys
 import types
 import unittest
@@ -1055,6 +1056,167 @@ class SchedulerTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.get("config", {}).get("github_models_model"), "openai/gpt-4o-mini")
         self.assertEqual(result.get("google", {}).get("error"), "no_key")
         self.assertEqual(result.get("config", {}).get("google_translate_proxy_mode"), "off")
+
+
+class SchedulerTargetScopedDedupTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _target_seen_key(job_id: str, origin: str, item_key: str) -> str:
+        digest = hashlib.sha256(origin.encode("utf-8")).hexdigest()
+        return f"job:{job_id}:origin:{digest}:{item_key}"
+
+    def _build_config(self):
+        return RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-friend",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:FriendMessage:562506516",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "target-group",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:GroupMessage:764968756",
+                        "enabled": True,
+                    },
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-friend", "target-group"],
+                        "interval_seconds": 300,
+                        "enabled": True,
+                    }
+                ],
+                "dedup_ttl_seconds": 123,
+            }
+        )
+
+    async def test_seen_target_is_not_sent_again_when_another_target_is_pending(self):
+        group_origin = "default:GroupMessage:764968756"
+        friend_origin = "default:FriendMessage:562506516"
+
+        class FakeStorage:
+            def __init__(self, seen_key):
+                self.seen = {seen_key}
+
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            def build_seen_keys(self, item):
+                return [item["guid"]]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                return item_id in self.seen
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                self.seen.add(item_id)
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [{"feed_id": "feed-1", "guid": "item-1", "published_at": ""}]
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.items = []
+
+            async def dispatch(self, item):
+                self.items.append(item)
+                return DispatchResult(success_count=1, success_origins=[friend_origin])
+
+        config = self._build_config()
+        dispatcher = FakeDispatcher()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=dispatcher,
+            storage=FakeStorage(self._target_seen_key("job-1", group_origin, "item-1")),
+            pipeline=None,
+        )
+
+        await scheduler._run_job_once_guarded(config.jobs[0])
+
+        self.assertEqual(dispatcher.items[0]["_target_origins"], [friend_origin])
+
+    async def test_partial_success_marks_only_successful_target_seen(self):
+        group_origin = "default:GroupMessage:764968756"
+        friend_origin = "default:FriendMessage:562506516"
+
+        class FakeStorage:
+            def __init__(self):
+                self.seen = set()
+                self.marked = []
+
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            def build_seen_keys(self, item):
+                return [item["guid"]]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                return item_id in self.seen
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                self.seen.add(item_id)
+                self.marked.append((item_id, ttl_seconds))
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [{"feed_id": "feed-1", "guid": "item-1", "published_at": ""}]
+
+        class FakeDispatcher:
+            async def dispatch(self, item):
+                return DispatchResult(
+                    success_count=1,
+                    transient_failure_count=1,
+                    success_origins=[group_origin],
+                )
+
+        config = self._build_config()
+        storage = FakeStorage()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=FakeDispatcher(),
+            storage=storage,
+            pipeline=None,
+        )
+
+        await scheduler._run_job_once_guarded(config.jobs[0])
+
+        self.assertEqual(
+            storage.marked,
+            [(self._target_seen_key("job-1", group_origin, "item-1"), 123)],
+        )
+        self.assertNotIn(
+            self._target_seen_key("job-1", friend_origin, "item-1"),
+            storage.seen,
+        )
 
 
 if __name__ == "__main__":

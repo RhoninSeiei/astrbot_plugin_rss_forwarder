@@ -43,6 +43,7 @@ class TargetConfig:
     id: str
     platform: str
     unified_msg_origin: str = ""
+    compact_mode: str = "inherit"
     enabled: bool = True
 
 
@@ -195,6 +196,8 @@ class RSSConfig:
                 id=str(item.get("id", "")).strip(),
                 platform=str(item.get("platform", "")).strip(),
                 unified_msg_origin=str(item.get("unified_msg_origin", "")).strip(),
+                compact_mode=str(item.get("compact_mode", "inherit")).strip().lower()
+                or "inherit",
                 enabled=bool(item.get("enabled", True)),
             )
             for item in targets_raw
@@ -485,6 +488,10 @@ class RSSConfig:
                 raise ConfigValidationError(f"feeds[{feed.id}].timeout 必须 > 0")
 
         for target in self.targets:
+            if target.compact_mode not in {"inherit", "compact", "normal"}:
+                raise ConfigValidationError(
+                    f"targets[{target.id}].compact_mode 必须是 inherit/compact/normal"
+                )
             if not target.enabled:
                 continue
             if not target.id:

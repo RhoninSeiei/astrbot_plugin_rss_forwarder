@@ -184,6 +184,41 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    def _build_two_target_config(self):
+        return RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-normal",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:FriendMessage:562506516",
+                        "compact_mode": "normal",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "target-compact",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:GroupMessage:764968756",
+                        "compact_mode": "compact",
+                        "enabled": True,
+                    },
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-normal", "target-compact"],
+                        "interval_seconds": 300,
+                        "compact_mode_enabled": False,
+                        "enabled": True,
+                    }
+                ],
+                "render_mode": "text",
+                "dedup_ttl_seconds": 3600,
+            }
+        )
+
     async def test_duplicate_dispatch_is_blocked_before_send(self):
         context = _FakeContext()
         storage = _FakeStorage()
@@ -579,6 +614,40 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         plain = context.sent[0][1].chain[0].text
         self.assertEqual(plain, "Only Title")
         self.assertEqual(len(context.sent[0][1].chain), 1)
+
+    async def test_target_compact_mode_overrides_job_default_per_origin(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(
+            context=context,
+            config=self._build_two_target_config(),
+            storage=storage,
+        )
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+
+        item = {
+            "job_id": "job-1",
+            "guid": "item-target-compact",
+            "title": "Only One Title",
+            "summary": "Normal target should receive this summary.",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 2)
+        sent_by_origin = {
+            origin: payload.chain[0].text
+            for origin, payload in context.sent
+        }
+        self.assertIn(
+            "Normal target should receive this summary.",
+            sent_by_origin["default:FriendMessage:562506516"],
+        )
+        self.assertEqual(sent_by_origin["default:GroupMessage:764968756"], "Only One Title")
 
     async def test_display_flags_hide_image_card_meta_and_link(self):
         context = _FakeContext()
