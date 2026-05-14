@@ -554,6 +554,32 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("时间：", plain)
         self.assertNotIn("https://x.com/alice/status/2", plain)
 
+    async def test_compact_mode_sends_title_only_text(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+
+        item = {
+            "job_id": "job-1",
+            "compact_mode_enabled": True,
+            "guid": "item-compact",
+            "title": "Only Title",
+            "summary": "Summary should not appear.",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+            "image_urls": ["https://example.com/a.jpg"],
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        plain = context.sent[0][1].chain[0].text
+        self.assertEqual(plain, "Only Title")
+        self.assertEqual(len(context.sent[0][1].chain), 1)
+
     async def test_display_flags_hide_image_card_meta_and_link(self):
         context = _FakeContext()
         storage = _FakeStorage()
@@ -596,6 +622,32 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+        self.assertNotIn("来源：", html)
+        self.assertNotIn("时间：", html)
+        self.assertNotIn("https://example.com/post", html)
+
+    async def test_compact_mode_image_card_contains_title_only(self):
+        dispatcher = FeedDispatcher(
+            context=_FakeContext(),
+            config=self._build_config(),
+            storage=_FakeStorage(),
+        )
+
+        html = dispatcher._build_card_html(
+            {
+                "job_id": "job-1",
+                "compact_mode_enabled": True,
+                "guid": "item-compact",
+                "title": "Only Title",
+                "summary": "Summary should not appear.",
+                "source": "Feed",
+                "published_at": "2026-05-05T00:00:00+00:00",
+                "link": "https://example.com/post",
+            }
+        )
+
+        self.assertIn("Only Title", html)
+        self.assertNotIn("Summary should not appear.", html)
         self.assertNotIn("来源：", html)
         self.assertNotIn("时间：", html)
         self.assertNotIn("https://example.com/post", html)

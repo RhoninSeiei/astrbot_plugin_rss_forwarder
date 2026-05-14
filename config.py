@@ -55,6 +55,7 @@ class JobConfig:
     interval_seconds: int = 0
     batch_size: int = 10
     dedup_ttl_seconds: int = 0
+    compact_mode_enabled: bool = False
     semantic_dedup_enabled: bool = False
     semantic_dedup_provider_id: str = ""
     semantic_dedup_ttl_seconds: int = 24 * 60 * 60
@@ -74,6 +75,10 @@ class DailyDigestConfig:
     max_items: int = 20
     render_mode: str = "text"
     llm_timeout_seconds: int = 0
+    semantic_merge_enabled: bool = False
+    semantic_merge_provider_id: str = ""
+    semantic_merge_max_candidates: int = 20
+    semantic_merge_min_confidence: float = 0.82
     prompt_template: str = DEFAULT_DAILY_DIGEST_PROMPT
     enabled: bool = False
 
@@ -203,6 +208,7 @@ class RSSConfig:
                 interval_seconds=int(item.get("interval_seconds", 0) or 0),
                 batch_size=int(item.get("batch_size", 10)),
                 dedup_ttl_seconds=int(item.get("dedup_ttl_seconds", 0) or 0),
+                compact_mode_enabled=bool(item.get("compact_mode_enabled", False)),
                 semantic_dedup_enabled=bool(item.get("semantic_dedup_enabled", False)),
                 semantic_dedup_provider_id=str(item.get("semantic_dedup_provider_id", "")).strip(),
                 semantic_dedup_ttl_seconds=int(
@@ -229,6 +235,12 @@ class RSSConfig:
                 max_items=int(item.get("max_items", 20) or 20),
                 render_mode=str(item.get("render_mode", "text")).strip() or "text",
                 llm_timeout_seconds=int(item.get("llm_timeout_seconds", 0) or 0),
+                semantic_merge_enabled=bool(item.get("semantic_merge_enabled", False)),
+                semantic_merge_provider_id=str(item.get("semantic_merge_provider_id", "")).strip(),
+                semantic_merge_max_candidates=int(item.get("semantic_merge_max_candidates", 20) or 0),
+                semantic_merge_min_confidence=float(
+                    item.get("semantic_merge_min_confidence", 0.82) or 0
+                ),
                 prompt_template=str(
                     item.get("prompt_template", DEFAULT_DAILY_DIGEST_PROMPT)
                 ).strip()
@@ -420,6 +432,7 @@ class RSSConfig:
                 interval_seconds=300,
                 batch_size=10,
                 dedup_ttl_seconds=0,
+                compact_mode_enabled=False,
                 semantic_dedup_enabled=False,
                 semantic_dedup_provider_id="",
                 semantic_dedup_ttl_seconds=24 * 60 * 60,
@@ -598,6 +611,15 @@ class RSSConfig:
                 raise ConfigValidationError(
                     f"daily_digests[{digest.id}].llm_timeout_seconds 必须 >= 0"
                 )
+            if digest.semantic_merge_enabled:
+                if digest.semantic_merge_max_candidates <= 0:
+                    raise ConfigValidationError(
+                        f"daily_digests[{digest.id}].semantic_merge_max_candidates 必须 > 0"
+                    )
+                if not 0 < digest.semantic_merge_min_confidence <= 1:
+                    raise ConfigValidationError(
+                        f"daily_digests[{digest.id}].semantic_merge_min_confidence 必须在 0 到 1 之间"
+                    )
             if digest.render_mode not in {"text", "image"}:
                 raise ConfigValidationError(
                     f"daily_digests[{digest.id}].render_mode 必须是 text 或 image"

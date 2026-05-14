@@ -140,6 +140,61 @@ class SemanticDedupServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.duplicate)
         self.assertEqual(result.reason, "missing_match_id")
 
+    async def test_digest_merge_groups_same_event_items(self):
+        ctx = _DummyContext(
+            '{"groups": ['
+            '{"item_indices": [1, 2], "title": "NVIDIA RTX 6090 specs", '
+            '"summary": "Multiple sources report the same RTX 6090 specification leak.", '
+            '"confidence": 0.93, "reason": "same specification leak"}'
+            ']}'
+        )
+        cfg = RSSConfig(feeds=[], targets=[], jobs=[], llm_timeout_seconds=5)
+        service = SemanticDedupService(ctx, cfg, storage=None)
+        digest = types.SimpleNamespace(
+            id="digest-1",
+            semantic_merge_enabled=True,
+            semantic_merge_provider_id="provider-digest",
+            semantic_merge_max_candidates=20,
+            semantic_merge_min_confidence=0.8,
+            llm_timeout_seconds=5,
+        )
+
+        result = await service.merge_digest_items(
+            digest,
+            [
+                {
+                    "feed_title": "Tom's Hardware",
+                    "title": "NVIDIA RTX 6090 specs leak",
+                    "summary": "Specs for RTX 6090 leaked.",
+                    "link": "https://example.com/tom",
+                },
+                {
+                    "feed_title": "VideoCardz",
+                    "title": "GeForce RTX 6090 specifications appear",
+                    "summary": "The same RTX 6090 specs appeared online.",
+                    "link": "https://example.com/vc",
+                },
+                {
+                    "feed_title": "TechPowerUp",
+                    "title": "AMD driver update released",
+                    "summary": "AMD released a driver update.",
+                    "link": "https://example.com/tpu",
+                },
+            ],
+            unified_msg_origin="qq:group:1",
+        )
+
+        merged_items = result["items"]
+        self.assertEqual(len(merged_items), 2)
+        self.assertEqual(merged_items[0]["title"], "NVIDIA RTX 6090 specs")
+        self.assertEqual(merged_items[0]["merged_count"], 2)
+        self.assertEqual(merged_items[0]["feed_title"], "Tom's Hardware / VideoCardz")
+        self.assertEqual(len(merged_items[0]["source_items"]), 2)
+        self.assertEqual(merged_items[1]["title"], "AMD driver update released")
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(result["merged_count"], 1)
+        self.assertEqual(ctx.last_llm_kwargs["chat_provider_id"], "provider-digest")
+
 
 if __name__ == "__main__":
     unittest.main()

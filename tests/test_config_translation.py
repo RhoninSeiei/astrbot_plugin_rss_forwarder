@@ -124,6 +124,10 @@ class ConfigTranslationTests(unittest.TestCase):
                     "window_hours": 24,
                     "max_items": 20,
                     "llm_timeout_seconds": 90,
+                    "semantic_merge_enabled": True,
+                    "semantic_merge_provider_id": "provider-digest",
+                    "semantic_merge_max_candidates": 12,
+                    "semantic_merge_min_confidence": 0.76,
                     "render_mode": "image",
                     "enabled": True,
                 }
@@ -140,6 +144,10 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(digest.render_mode, "image")
         self.assertEqual(digest.send_time, "09:00")
         self.assertEqual(digest.llm_timeout_seconds, 90)
+        self.assertTrue(digest.semantic_merge_enabled)
+        self.assertEqual(digest.semantic_merge_provider_id, "provider-digest")
+        self.assertEqual(digest.semantic_merge_max_candidates, 12)
+        self.assertEqual(digest.semantic_merge_min_confidence, 0.76)
         self.assertTrue(digest.enabled)
 
     def test_daily_digest_invalid_send_time_raises(self):
@@ -176,6 +184,7 @@ class ConfigTranslationTests(unittest.TestCase):
         conf = _minimal_runtime_conf()
         conf["jobs"][0].update(
             {
+                "compact_mode_enabled": True,
                 "semantic_dedup_enabled": True,
                 "semantic_dedup_provider_id": "provider-news",
                 "semantic_dedup_ttl_seconds": 86400,
@@ -187,6 +196,7 @@ class ConfigTranslationTests(unittest.TestCase):
         cfg = RSSConfig.from_context(conf)
 
         job = cfg.jobs[0]
+        self.assertTrue(job.compact_mode_enabled)
         self.assertTrue(job.semantic_dedup_enabled)
         self.assertEqual(job.semantic_dedup_provider_id, "provider-news")
         self.assertEqual(job.semantic_dedup_ttl_seconds, 86400)
@@ -209,9 +219,35 @@ class ConfigTranslationTests(unittest.TestCase):
         schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
 
         job_items = schema["jobs"]["templates"]["job"]["items"]
+        self.assertIn("compact_mode_enabled", job_items)
         self.assertIn("semantic_dedup_enabled", job_items)
         self.assertEqual(job_items["semantic_dedup_provider_id"]["_special"], "select_provider")
         self.assertEqual(job_items["semantic_dedup_ttl_seconds"]["default"], 86400)
+
+    def test_schema_exposes_daily_digest_semantic_merge_provider_selector(self):
+        schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
+
+        digest_items = schema["daily_digests"]["templates"]["daily_digest"]["items"]
+        self.assertIn("semantic_merge_enabled", digest_items)
+        self.assertEqual(digest_items["semantic_merge_provider_id"]["_special"], "select_provider")
+        self.assertEqual(digest_items["semantic_merge_max_candidates"]["default"], 20)
+
+    def test_daily_digest_semantic_merge_config_validates_values(self):
+        conf = _minimal_runtime_conf()
+        conf["daily_digests"] = [
+            {
+                "id": "digest-1",
+                "feed_ids": ["feed-1"],
+                "target_ids": ["target-1"],
+                "send_time": "09:00",
+                "semantic_merge_enabled": True,
+                "semantic_merge_max_candidates": 0,
+                "enabled": True,
+            }
+        ]
+
+        with self.assertRaises(ConfigValidationError):
+            RSSConfig.from_context(conf)
 
     def test_twitter_feed_parses_media_switches(self):
         conf = _minimal_runtime_conf()

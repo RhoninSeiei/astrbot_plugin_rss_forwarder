@@ -123,6 +123,107 @@ class SemanticDedupService:
             return
         await toucher(str(getattr(job, "id", "")).strip(), str(matched_record_id or "").strip())
 
+    async def merge_digest_items(
+        self,
+        digest,
+        items: list[dict[str, Any]],
+        *,
+        unified_msg_origin: str = "",
+    ) -> dict[str, Any]:
+        source_items = [dict(item) for item in items]
+        if not bool(getattr(digest, "semantic_merge_enabled", False)):
+            return {
+                "items": source_items,
+                "reason": "disabled",
+                "merged_count": 0,
+                "input_count": len(source_items),
+                "output_count": len(source_items),
+            }
+
+        prepared_items = []
+        for index, item in enumerate(source_items, start=1):
+            prepared = self._prepare_item(item)
+            if not prepared["title"] and not prepared["summary"]:
+                continue
+            prepared_items.append((index, item, prepared))
+
+        max_candidates = self._digest_merge_max_candidates(digest)
+        candidates = prepared_items[:max_candidates]
+        if len(candidates) < 2:
+            return {
+                "items": source_items,
+                "reason": "insufficient_candidates",
+                "merged_count": 0,
+                "input_count": len(source_items),
+                "output_count": len(source_items),
+            }
+
+        provider_id = await self._resolve_digest_merge_provider_id(
+            digest,
+            unified_msg_origin=unified_msg_origin,
+        )
+        if not provider_id:
+            return {
+                "items": source_items,
+                "reason": "provider_missing",
+                "merged_count": 0,
+                "input_count": len(source_items),
+                "output_count": len(source_items),
+            }
+
+        prompt = self._build_digest_merge_prompt(digest, candidates)
+        llm_kwargs: dict[str, Any] = {
+            "chat_provider_id": provider_id,
+            "prompt": prompt,
+        }
+        profile = str(getattr(self._config, "llm_profile", "") or "").strip()
+        if profile:
+            llm_kwargs["profile"] = profile
+        llm_kwargs.update(self._build_llm_proxy_kwargs())
+
+        llm_call = self.context.llm_generate(**llm_kwargs)
+        try:
+            result = await asyncio.wait_for(
+                llm_call,
+                timeout=self._digest_merge_timeout_seconds(digest),
+            )
+        except asyncio.TimeoutError:
+            return {
+                "items": source_items,
+                "reason": "timeout",
+                "merged_count": 0,
+                "input_count": len(source_items),
+                "output_count": len(source_items),
+            }
+        except Exception as exc:
+            logger.warning("daily digest semantic merge llm call failed digest=%s: %s", getattr(digest, "id", ""), exc)
+            return {
+                "items": source_items,
+                "reason": f"exception:{type(exc).__name__}",
+                "merged_count": 0,
+                "input_count": len(source_items),
+                "output_count": len(source_items),
+            }
+
+        groups = self._parse_digest_merge_groups(self._extract_generated_text(result))
+        if groups is None:
+            return {
+                "items": source_items,
+                "reason": "invalid_payload",
+                "merged_count": 0,
+                "input_count": len(source_items),
+                "output_count": len(source_items),
+            }
+
+        merged_items, merged_count = self._apply_digest_merge_groups(digest, source_items, groups)
+        return {
+            "items": merged_items,
+            "reason": "ok",
+            "merged_count": merged_count,
+            "input_count": len(source_items),
+            "output_count": len(merged_items),
+        }
+
     async def _list_records(self, job, *, ttl_seconds: int, limit: int) -> list[dict[str, Any]]:
         lister = getattr(self._storage, "list_semantic_dedup_records", None)
         if not callable(lister):
@@ -150,6 +251,25 @@ class SemanticDedupService:
             provider_id = await self.context.get_current_chat_provider_id(umo=origin)
         except Exception as exc:
             logger.warning("get_current_chat_provider_id for semantic dedup failed: %s", exc)
+            return ""
+        return str(provider_id or "").strip()
+
+    async def _resolve_digest_merge_provider_id(self, digest, *, unified_msg_origin: str = "") -> str:
+        provider_id = str(getattr(digest, "semantic_merge_provider_id", "") or "").strip()
+        if provider_id:
+            return provider_id
+
+        provider_id = str(getattr(self._config, "llm_provider_id", "") or "").strip()
+        if provider_id:
+            return provider_id
+
+        origin = str(unified_msg_origin or "").strip()
+        if not origin:
+            return ""
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(umo=origin)
+        except Exception as exc:
+            logger.warning("get_current_chat_provider_id for daily digest semantic merge failed: %s", exc)
             return ""
         return str(provider_id or "").strip()
 
@@ -190,6 +310,32 @@ class SemanticDedupService:
             f"数据：\n{serialized}"
         )
 
+    def _build_digest_merge_prompt(self, digest, items: list[tuple[int, dict[str, Any], dict[str, str]]]) -> str:
+        payload = {
+            "digest_id": str(getattr(digest, "id", "") or "").strip(),
+            "items": [
+                {
+                    "index": index,
+                    "source": prepared["source"][:80],
+                    "title": prepared["title"][:180],
+                    "summary": prepared["summary"][:300],
+                    "link": prepared["link"][:240],
+                    "published_at": prepared["published_at"][:80],
+                }
+                for index, _item, prepared in items
+            ],
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+        return (
+            "把 items 中属于同一事实事件的 RSS 条目合并分组，并严格只返回 JSON。\n"
+            "同一事实事件包括同一产品发布、同一漏洞公告、同一财报消息、同一爆料或同一官方声明。\n"
+            "仅主题相近、公司相同、产品线相同、行业相同，不能合并。\n"
+            "无法确定时不要分组。只输出包含 2 个或以上条目的分组。\n"
+            "输出格式：{\"groups\":[{\"item_indices\":[1,2],\"title\":\"合并后的标题\","
+            "\"summary\":\"合并后的事实摘要\",\"confidence\":0.0,\"reason\":\"...\"}]}\n\n"
+            f"数据：\n{serialized}"
+        )
+
     @classmethod
     def _parse_result(cls, text: str) -> SemanticDedupResult | None:
         raw = str(text or "").strip()
@@ -222,6 +368,34 @@ class SemanticDedupService:
             )
         return None
 
+    @classmethod
+    def _parse_digest_merge_groups(cls, text: str) -> list[dict[str, Any]] | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+
+        stripped = cls._strip_code_fence(raw)
+        candidates = [stripped]
+        first = stripped.find("{")
+        last = stripped.rfind("}")
+        if first != -1 and last != -1 and first < last:
+            candidates.append(stripped[first : last + 1])
+
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+            except Exception:
+                continue
+            groups = data.get("groups") if isinstance(data, dict) else data
+            if not isinstance(groups, list):
+                continue
+            normalized = []
+            for group in groups:
+                if isinstance(group, dict):
+                    normalized.append(group)
+            return normalized
+        return None
+
     @staticmethod
     def _extract_generated_text(result: Any) -> str:
         for attr in ("completion_text", "text", "content"):
@@ -251,6 +425,116 @@ class SemanticDedupService:
             "published_at": str(item.get("published_at", "") or item.get("published", "") or "").strip(),
         }
 
+    def _apply_digest_merge_groups(
+        self,
+        digest,
+        items: list[dict[str, Any]],
+        groups: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        min_confidence = self._digest_merge_min_confidence(digest)
+        consumed: set[int] = set()
+        group_by_start: dict[int, dict[str, Any]] = {}
+        merged_count = 0
+
+        for group in groups:
+            indices = self._group_item_indices(group, max_index=len(items))
+            if len(indices) < 2 or any(index in consumed for index in indices):
+                continue
+            try:
+                confidence = float(group.get("confidence", 0) or 0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            confidence = max(0.0, min(confidence, 1.0))
+            if confidence < min_confidence:
+                continue
+            start_index = min(indices)
+            source_group_items = [items[index - 1] for index in indices]
+            merged_item = self._build_digest_merged_item(
+                digest,
+                group,
+                source_group_items,
+                group_number=merged_count + 1,
+                confidence=confidence,
+            )
+            group_by_start[start_index] = merged_item
+            consumed.update(indices)
+            merged_count += 1
+
+        merged_items: list[dict[str, Any]] = []
+        for index, item in enumerate(items, start=1):
+            if index in group_by_start:
+                merged_items.append(group_by_start[index])
+                continue
+            if index in consumed:
+                continue
+            merged_items.append(dict(item))
+        return merged_items, merged_count
+
+    def _build_digest_merged_item(
+        self,
+        digest,
+        group: dict[str, Any],
+        items: list[dict[str, Any]],
+        *,
+        group_number: int,
+        confidence: float,
+    ) -> dict[str, Any]:
+        first = dict(items[0])
+        prepared_items = [self._prepare_item(item) for item in items]
+        sources = self._unique_texts([prepared["source"] for prepared in prepared_items])
+        title = self._sanitize_text(str(group.get("title", "") or ""))
+        summary = self._sanitize_text(str(group.get("summary", "") or ""))
+        if not title:
+            title = prepared_items[0]["title"] or str(first.get("title", "") or "").strip()
+        if not summary:
+            summary = prepared_items[0]["summary"] or str(first.get("summary", "") or "").strip()
+
+        source_text = " / ".join(sources)
+        first.update(
+            {
+                "title": title,
+                "summary": summary,
+                "feed_title": source_text or str(first.get("feed_title", "") or first.get("source", "") or "").strip(),
+                "source": source_text or str(first.get("source", "") or first.get("feed_title", "") or "").strip(),
+                "source_items": [dict(item) for item in items],
+                "merged_count": len(items),
+                "semantic_merge_group_id": f"{str(getattr(digest, 'id', '') or '').strip()}:group:{group_number}",
+                "semantic_merge_confidence": confidence,
+                "semantic_merge_reason": str(group.get("reason", "") or "").strip(),
+            }
+        )
+        return first
+
+    @staticmethod
+    def _group_item_indices(group: dict[str, Any], *, max_index: int) -> list[int]:
+        raw_indices = group.get("item_indices", group.get("indices", []))
+        if not isinstance(raw_indices, list):
+            return []
+        indices: list[int] = []
+        seen: set[int] = set()
+        for raw_index in raw_indices:
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            if index < 1 or index > max_index or index in seen:
+                continue
+            indices.append(index)
+            seen.add(index)
+        return indices
+
+    @staticmethod
+    def _unique_texts(values: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
     def _build_llm_proxy_kwargs(self) -> dict[str, Any]:
         mode = str(getattr(self._config, "llm_proxy_mode", "system") or "system").strip().lower()
         proxy_url = str(getattr(self._config, "llm_proxy_url", "") or "").strip()
@@ -262,6 +546,15 @@ class SemanticDedupService:
 
     def _timeout_seconds(self) -> int:
         return max(int(getattr(self._config, "llm_timeout_seconds", 15) or 15), 1)
+
+    def _digest_merge_timeout_seconds(self, digest) -> float:
+        try:
+            value = float(getattr(digest, "llm_timeout_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+        return float(self._timeout_seconds())
 
     @staticmethod
     def _ttl_seconds(job) -> int:
@@ -275,6 +568,18 @@ class SemanticDedupService:
     def _min_confidence(job) -> float:
         try:
             confidence = float(getattr(job, "semantic_dedup_min_confidence", 0.82) or 0.82)
+        except (TypeError, ValueError):
+            confidence = 0.82
+        return max(0.0, min(confidence, 1.0))
+
+    @staticmethod
+    def _digest_merge_max_candidates(digest) -> int:
+        return max(int(getattr(digest, "semantic_merge_max_candidates", 20) or 20), 1)
+
+    @staticmethod
+    def _digest_merge_min_confidence(digest) -> float:
+        try:
+            confidence = float(getattr(digest, "semantic_merge_min_confidence", 0.82) or 0.82)
         except (TypeError, ValueError):
             confidence = 0.82
         return max(0.0, min(confidence, 1.0))

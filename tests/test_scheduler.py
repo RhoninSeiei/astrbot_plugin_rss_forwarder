@@ -274,6 +274,64 @@ class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.seen_calls, [("item-1", 3888000)])
         self.assertEqual(dispatcher.count, 0)
 
+    async def test_job_compact_mode_is_forwarded_to_dispatcher(self):
+        class FakeStorage:
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                return False
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                return None
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [{"feed_id": "feed-1", "guid": "item-1", "published_at": ""}]
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.items = []
+
+            async def dispatch(self, item):
+                self.items.append(item)
+                return DispatchResult(success_count=1)
+
+        dispatcher = FakeDispatcher()
+        scheduler = RSSScheduler(
+            config=types.SimpleNamespace(
+                jobs=[],
+                dedup_ttl_seconds=123,
+                poll_interval_seconds=300,
+            ),
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=dispatcher,
+            storage=FakeStorage(),
+            pipeline=None,
+        )
+        job = types.SimpleNamespace(
+            id="job-compact",
+            feed_ids=["feed-1"],
+            enabled=True,
+            interval_seconds=300,
+            compact_mode_enabled=True,
+        )
+
+        await scheduler._run_job_once_guarded(job)
+
+        self.assertTrue(dispatcher.items[0]["compact_mode_enabled"])
+
 
 class SchedulerTaskCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_cancels_stale_job_tasks(self):
@@ -434,6 +492,113 @@ class SchedulerDailyDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduler._dispatcher.digests[0]["title"], "芯片日报")
         self.assertEqual(scheduler._dispatcher.digests[0]["item_count"], 1)
         self.assertEqual(scheduler._pipeline.last_digest["llm_timeout_seconds"], 90)
+
+    async def test_run_daily_digest_once_merges_semantic_items_before_pipeline(self):
+        class FakeStorage:
+            def __init__(self):
+                self.status_updates = []
+
+            async def list_digest_items(self, feed_ids, **kwargs):
+                return [
+                    {
+                        "feed_id": "feed-1",
+                        "feed_title": "Tom's Hardware",
+                        "title": "RTX 6090 specs leak",
+                        "summary": "Specs leaked.",
+                        "link": "https://example.com/tom",
+                        "published_at": "2026-03-28T00:00:00+00:00",
+                    },
+                    {
+                        "feed_id": "feed-2",
+                        "feed_title": "VideoCardz",
+                        "title": "RTX 6090 specifications appear",
+                        "summary": "The same specs appeared.",
+                        "link": "https://example.com/vc",
+                        "published_at": "2026-03-28T00:10:00+00:00",
+                    },
+                ]
+
+            async def update_daily_digest_status(self, digest_id, **fields):
+                self.status_updates.append((digest_id, fields))
+                return fields
+
+            async def get_daily_digest_status(self, digest_id):
+                return {}
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.digests = []
+
+            async def dispatch_daily_digest(self, digest):
+                self.digests.append(digest)
+                return DispatchResult(success_count=1)
+
+        class FakePipeline:
+            async def build_daily_digest_content(self, digest, items, unified_msg_origin=""):
+                self.last_items = items
+                return {"content": "1. [Tom's Hardware / VideoCardz] RTX 6090 specs", "engine": "llm", "llm_reason": "ok"}
+
+        class FakeSemanticDeduper:
+            async def merge_digest_items(self, digest, items, unified_msg_origin=""):
+                return {
+                    "items": [
+                        {
+                            "feed_title": "Tom's Hardware / VideoCardz",
+                            "title": "RTX 6090 specs",
+                            "summary": "Merged specs coverage.",
+                            "link": "https://example.com/tom",
+                            "source_items": items,
+                            "merged_count": 2,
+                        }
+                    ],
+                    "reason": "ok",
+                    "merged_count": 1,
+                    "input_count": 2,
+                    "output_count": 1,
+                }
+
+        digest = DailyDigestConfig(
+            id="digest-merge",
+            title="芯片日报",
+            feed_ids=["feed-1", "feed-2"],
+            target_ids=["target-1"],
+            semantic_merge_enabled=True,
+            enabled=True,
+        )
+        storage = FakeStorage()
+        scheduler = RSSScheduler(
+            config=types.SimpleNamespace(
+                jobs=[],
+                daily_digests=[digest],
+                poll_interval_seconds=300,
+                startup_delay_seconds=0,
+                timezone="Asia/Shanghai",
+                targets=[
+                    types.SimpleNamespace(
+                        id="target-1",
+                        enabled=True,
+                        unified_msg_origin="qq:group:1",
+                    )
+                ],
+            ),
+            fetcher=types.SimpleNamespace(),
+            parser=types.SimpleNamespace(),
+            dispatcher=FakeDispatcher(),
+            storage=storage,
+            pipeline=FakePipeline(),
+            semantic_deduper=FakeSemanticDeduper(),
+        )
+
+        await scheduler.run_daily_digest_once("digest-merge")
+
+        self.assertEqual(len(scheduler._pipeline.last_items), 1)
+        self.assertEqual(scheduler._pipeline.last_items[0]["title"], "RTX 6090 specs")
+        self.assertEqual(scheduler._dispatcher.digests[0]["item_count"], 1)
+        self.assertEqual(len(scheduler._dispatcher.digests[0]["links"]), 2)
+        final_status = storage.status_updates[-1][1]
+        self.assertEqual(final_status["last_raw_item_count"], 2)
+        self.assertEqual(final_status["last_semantic_merge_reason"], "ok")
+        self.assertEqual(final_status["last_semantic_merged_count"], 1)
 
     async def test_run_daily_digest_once_skips_empty_window(self):
         class FakeStorage:

@@ -2,8 +2,8 @@
 
 ## 版本
 
-- 仓库版本：`0.6.1`
-- 市场版本：`v0.6.1`
+- 仓库版本：`0.6.2`
+- 市场版本：`v0.6.2`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
 - 运行时注册名：`astrbot_plugin_rss_forwarder`
 
@@ -14,9 +14,11 @@
 - Twitter 源可通过 `feeds[].send_images` 与 `feeds[].send_videos` 分别控制图片和视频发送。
 - Twitter 源可通过 `feeds[].max_new_items` 控制每轮抓取的新推文数量，默认只取最新 1 条。
 - 即时推送可通过 `display_source`、`display_time`、`display_link` 控制来源、时间、链接展示。
+- 轮询任务可通过 `jobs[].compact_mode_enabled` 开启简洁模式，只推送标题。
 - 持久化去重、启动延迟、历史条目抑制、失效 target 抑制。
 - 中文翻译增强，顺序为 `LLM -> Google Translate -> GitHub Models`。
 - 日报任务 `daily_digests[]`，支持文本与图片两种发送形式。
+- 日报任务可通过 `daily_digests[].semantic_merge_enabled` 在生成日报前合并多个来源报道的同一事件。
 - 日报图片模式使用插件自身的 `Star.html_render`，并在渲染失败时回退文本日报。
 - 发送前指纹查重，包含文本身份信息与图片 `sha256`。
 - 任务级去重记录保留时间 `jobs[].dedup_ttl_seconds`。

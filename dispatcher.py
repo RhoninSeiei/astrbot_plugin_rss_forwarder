@@ -151,6 +151,10 @@ class FeedDispatcher:
         return True
 
     @staticmethod
+    def _is_compact_item(item: dict[str, Any] | None = None) -> bool:
+        return bool(item and item.get("compact_mode_enabled", False))
+
+    @staticmethod
     def _normalize_url(url: str) -> str:
         text = str(url or "").strip()
         if not text:
@@ -439,6 +443,9 @@ class FeedDispatcher:
 
     def _build_text_message_chain(self, item: dict[str, Any]):
         data = self._build_render_data(item)
+        if self._is_compact_item(item):
+            return self._create_message_chain([data["title"]])
+
         template = self._config.render_card_template
 
         title = self._safe_format(template.title, data)
@@ -485,6 +492,16 @@ class FeedDispatcher:
         data = self._build_render_data(item)
         template = self._config.render_card_template
         title = escape(self._safe_format(template.title, data))
+        if self._is_compact_item(item):
+            return (
+                "<html><head><meta charset='utf-8' /><style>"
+                "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fb;padding:16px;}"
+                ".card{background:#fff;border-radius:12px;padding:16px;box-shadow:0 2px 12px rgba(30,55,90,.12);max-width:680px;}"
+                ".title{font-size:22px;font-weight:700;line-height:1.4;color:#111827;}"
+                "</style></head><body>"
+                f"<div class='card'><div class='title'>{title}</div></div></body></html>"
+            )
+
         source = escape(self._safe_format(template.source, data))
         published_at = escape(self._safe_format(template.published_at, data))
         summary = escape(self._safe_format(template.summary, data))
@@ -811,7 +828,7 @@ class FeedDispatcher:
         extra_payloads: list[Any] = []
         if self._config.render_mode == "image":
             payload, source_image_already_included = await self._build_image_payload(item)
-            if not source_image_already_included:
+            if not source_image_already_included and not self._is_compact_item(item):
                 extra_payloads.extend(self._build_source_media_payloads(item))
         else:
             try:

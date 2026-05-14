@@ -99,6 +99,8 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 
 语义重复判定只在同一个轮询任务内生效。多个源报道同一事件时，模型会比较新条目和该任务近期候选内容，置信度达到阈值后保留首条代表新闻。`semantic_dedup_ttl_seconds` 控制候选保留时间，过期候选会自动移出判定输入。
 
+如果某个轮询任务只需要标题提醒，可以开启 `compact_mode_enabled`。开启后该任务只推送标题，不显示来源、时间、摘要、网页链接和原文媒体。
+
 ### 5. 手动检查
 
 配置保存后，可在会话中使用以下指令检查配置和执行状态。
@@ -145,6 +147,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
   - `cron`（可填，当前版本回退到 interval）
   - `batch_size`
   - `dedup_ttl_seconds`（填 `0` 表示继承全局 TTL）
+  - `compact_mode_enabled`（简洁模式，只推送标题）
   - `semantic_dedup_enabled`
   - `semantic_dedup_provider_id`（可从 AstrBot 模型列表选择）
   - `semantic_dedup_ttl_seconds`（语义候选保留时间，默认 `86400` 秒）
@@ -159,6 +162,11 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
   - `send_time`（`HH:MM`）
   - `window_hours`
   - `max_items`
+  - `llm_timeout_seconds`（填 `0` 表示继承全局 LLM 超时）
+  - `semantic_merge_enabled`
+  - `semantic_merge_provider_id`（可从 AstrBot 模型列表选择）
+  - `semantic_merge_max_candidates`
+  - `semantic_merge_min_confidence`
   - `render_mode`（`text|image`）
   - `prompt_template`
   - `enabled`
@@ -196,11 +204,13 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 - 语义判定只读取当前 `job` 的候选记录，不会跨轮询任务互相影响
 - `jobs[].semantic_dedup_ttl_seconds` 用于控制候选新闻保留时间；过期候选会从模型输入中移除
 - 模型判定超时、缺少 provider 或返回无效 JSON 时，该条内容会继续推送
+- `jobs[].compact_mode_enabled=true` 时，该轮询任务只推送标题；全局 `render_mode=image` 下仍使用标题图卡，渲染失败时回退为标题文本
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
 - `startup_delay_seconds` 默认为 `45`，用于给平台适配器和主动消息通道预留启动时间
 - `translation` 下的全部字段都可在 AstrBot 插件面板中配置，无需手动修改 JSON 文件
 - `daily_digests` 与 `jobs` 相互独立；只配置日报时，不会自动生成即时推送任务
 - 日报默认在窗口内无条目时跳过发送，并在状态中记录 `empty_window`
+- `daily_digests[].semantic_merge_enabled=true` 时，插件会在生成日报前按日报任务独立合并同一事件条目；合并失败时保留原条目
 - `source_type=twitter` 时，`url` 可留空；如需指定 Nitter 镜像站，优先填写 `nitter_url`
 - `nitter_url` 支持填写自建 Nitter 服务地址，例如 `https://nitter.example.com`
 - RSS 源也支持 `proxy_url`，适合源站按出口 IP 或请求网络限制访问的情况
@@ -255,6 +265,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
       "interval_seconds": 300,
       "batch_size": 5,
       "dedup_ttl_seconds": 604800,
+      "compact_mode_enabled": false,
       "semantic_dedup_enabled": true,
       "semantic_dedup_provider_id": "",
       "semantic_dedup_ttl_seconds": 86400,
@@ -272,6 +283,11 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
       "send_time": "09:00",
       "window_hours": 24,
       "max_items": 20,
+      "llm_timeout_seconds": 0,
+      "semantic_merge_enabled": true,
+      "semantic_merge_provider_id": "",
+      "semantic_merge_max_candidates": 20,
+      "semantic_merge_min_confidence": 0.82,
       "render_mode": "text",
       "prompt_template": "请根据以下 RSS 条目生成一份简体中文日报，严格输出纯文本编号列表。\\n要求：\\n1) 只输出编号列表，不要导语、总结、分类标题或 Markdown 代码块；\\n2) 最多输出 {max_items} 条；\\n3) 每条一句话，优先保留来源信息；\\n4) 如果多条内容高度相近，可合并为一条更准确的概述。\\n\\n统计窗口：{window_start} 至 {window_end}\\n条目：\\n{items}",
       "enabled": true
@@ -368,4 +384,5 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 - `window_hours` 设为 `24` 或 `72`
 - `render_mode=text` 适合链接较多的场景
 - `render_mode=image` 适合群内阅读体验优先的场景
+- 多个 RSS 源经常报道同一事件时，可以开启 `semantic_merge_enabled`，并在 `semantic_merge_provider_id` 中选择用于合并判断的模型
 - `prompt_template` 保持默认值即可开箱使用，若希望偏重某类信息，可在 GUI 中按需调整

@@ -501,12 +501,14 @@ class RSSScheduler:
                     window_end_ts=window_end_ts,
                     limit=digest.max_items,
                 )
+                raw_item_count = len(items)
                 item_count = len(items)
                 status_fields.update(
                     {
                         "last_run_at": window_end_ts,
                         "last_window_start_ts": window_start_ts,
                         "last_window_end_ts": window_end_ts,
+                        "last_raw_item_count": raw_item_count,
                         "last_item_count": item_count,
                     }
                 )
@@ -522,6 +524,20 @@ class RSSScheduler:
 
                 target_origins = self._resolve_digest_target_origins(digest.target_ids)
                 first_origin = target_origins[0] if target_origins else ""
+                merge_result = await self._merge_daily_digest_items(
+                    digest,
+                    items,
+                    unified_msg_origin=first_origin,
+                )
+                items = list(merge_result.get("items", items) or items)
+                item_count = len(items)
+                status_fields.update(
+                    {
+                        "last_item_count": item_count,
+                        "last_semantic_merge_reason": str(merge_result.get("reason", "") or ""),
+                        "last_semantic_merged_count": int(merge_result.get("merged_count", 0) or 0),
+                    }
+                )
                 digest_context = {
                     "id": digest.id,
                     "title": digest.title,
@@ -557,17 +573,7 @@ class RSSScheduler:
                     "window_end_text": self._format_local_timestamp(window_end_ts),
                     "item_count": item_count,
                     "content": content,
-                    "links": [
-                        {
-                            "source": str(
-                                item.get("feed_title", "") or item.get("source", "") or "未知来源"
-                            ).strip()
-                            or "未知来源",
-                            "link": str(item.get("link", "") or "").strip(),
-                        }
-                        for item in items
-                        if str(item.get("link", "") or "").strip()
-                    ],
+                    "links": self._daily_digest_links(items),
                 }
                 dispatch_result = await self._dispatcher.dispatch_daily_digest(digest_payload)
                 pushed_count = dispatch_result.success_count
@@ -760,6 +766,78 @@ class RSSScheduler:
         )
         return list(result or [])
 
+    async def _merge_daily_digest_items(
+        self,
+        digest: DailyDigestConfig,
+        items: list[dict[str, Any]],
+        *,
+        unified_msg_origin: str = "",
+    ) -> dict[str, Any]:
+        if self._semantic_deduper is None:
+            return {
+                "items": items,
+                "reason": "not_configured",
+                "merged_count": 0,
+            }
+        if not bool(getattr(digest, "semantic_merge_enabled", False)):
+            return {
+                "items": items,
+                "reason": "disabled",
+                "merged_count": 0,
+            }
+        merger = getattr(self._semantic_deduper, "merge_digest_items", None)
+        if not callable(merger):
+            return {
+                "items": items,
+                "reason": "not_supported",
+                "merged_count": 0,
+            }
+        try:
+            result = await merger(
+                digest,
+                items,
+                unified_msg_origin=unified_msg_origin,
+            )
+        except Exception as exc:
+            logger.warning("daily digest semantic merge failed digest=%s: %s", digest.id, exc)
+            return {
+                "items": items,
+                "reason": f"exception:{type(exc).__name__}",
+                "merged_count": 0,
+            }
+        if not isinstance(result, dict):
+            return {
+                "items": items,
+                "reason": "invalid_result",
+                "merged_count": 0,
+            }
+        return result
+
+    @staticmethod
+    def _daily_digest_links(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in items:
+            source_items = item.get("source_items")
+            candidates = source_items if isinstance(source_items, list) else [item]
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                link = str(candidate.get("link", "") or "").strip()
+                if not link:
+                    continue
+                source = str(
+                    candidate.get("feed_title", "")
+                    or candidate.get("source", "")
+                    or "未知来源"
+                ).strip() or "未知来源"
+                key = (source, link)
+                if key in seen:
+                    continue
+                seen.add(key)
+                links.append({"source": source, "link": link})
+        return links
+
     async def _run_job_once_guarded(self, job: JobConfig) -> None:
         job_lock = self._job_locks.setdefault(job.id, asyncio.Lock())
         if job_lock.locked():
@@ -820,6 +898,9 @@ class RSSScheduler:
 
                     event_item = dict(item)
                     event_item.setdefault("job_id", job.id)
+                    event_item["compact_mode_enabled"] = bool(
+                        getattr(job, "compact_mode_enabled", False)
+                    )
                     semantic_result = await self._check_semantic_duplicate(
                         job,
                         event_item,

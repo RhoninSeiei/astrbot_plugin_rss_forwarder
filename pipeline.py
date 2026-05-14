@@ -587,6 +587,32 @@ class FeedPipeline:
             summary = self._sanitize_text(str(item.get("summary", "") or item.get("content", "") or ""))
             if len(summary) > 200:
                 summary = summary[:199].rstrip() + "…"
+            source_items = item.get("source_items")
+            merged_sources = ""
+            merged_titles = ""
+            merged_links = ""
+            merged_count = int(item.get("merged_count", 0) or 0)
+            if isinstance(source_items, list) and source_items:
+                source_values = []
+                title_values = []
+                link_values = []
+                for source_item in source_items:
+                    if not isinstance(source_item, dict):
+                        continue
+                    source_value = self._sanitize_text(
+                        str(source_item.get("feed_title", "") or source_item.get("source", "") or "")
+                    )
+                    title_value = self._sanitize_text(str(source_item.get("title", "") or ""))
+                    link_value = str(source_item.get("link", "") or "").strip()
+                    if source_value and source_value not in source_values:
+                        source_values.append(source_value)
+                    if title_value and title_value not in title_values:
+                        title_values.append(title_value)
+                    if link_value and link_value not in link_values:
+                        link_values.append(link_value)
+                merged_sources = " / ".join(source_values)
+                merged_titles = " | ".join(title_values)
+                merged_links = " | ".join(link_values)
             prepared.append(
                 {
                     "source": source or "未知来源",
@@ -594,6 +620,10 @@ class FeedPipeline:
                     "summary": summary,
                     "link": str(item.get("link", "") or "").strip(),
                     "published_at": str(item.get("published_at", "") or "").strip(),
+                    "merged_count": str(merged_count) if merged_count else "",
+                    "merged_sources": merged_sources,
+                    "merged_titles": merged_titles,
+                    "merged_links": merged_links,
                 }
             )
         return prepared
