@@ -615,6 +615,93 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plain, "Only Title")
         self.assertEqual(len(context.sent[0][1].chain), 1)
 
+    async def test_compact_mode_can_send_source_images_in_text_mode(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        item = {
+            "job_id": "job-1",
+            "compact_mode_enabled": True,
+            "compact_mode_send_images": True,
+            "guid": "item-compact-image",
+            "title": "Only Title",
+            "summary": "Summary should not appear.",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+            "image_urls": ["https://example.com/a.jpg"],
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        payload = context.sent[0][1]
+        self.assertEqual(payload.chain[0].text, "Only Title")
+        self.assertEqual(payload.chain[1].url, "https://example.com/a.jpg")
+        self.assertEqual(len(payload.chain), 2)
+
+    async def test_compact_mode_can_send_source_images_with_image_card(self):
+        context = _FakeContext()
+
+        async def html_render(_html):
+            return "rendered-card-url"
+
+        context.html_render = html_render
+        storage = _FakeStorage()
+        config = RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-1",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:GroupMessage:1",
+                        "enabled": True,
+                    }
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-1"],
+                        "interval_seconds": 300,
+                        "compact_mode_enabled": True,
+                        "compact_mode_send_images": True,
+                        "enabled": True,
+                    }
+                ],
+                "render_mode": "image",
+            }
+        )
+        dispatcher = FeedDispatcher(context=context, config=config, storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        item = {
+            "job_id": "job-1",
+            "compact_mode_enabled": True,
+            "compact_mode_send_images": True,
+            "guid": "item-compact-card-image",
+            "title": "Only Title",
+            "summary": "Summary should not appear.",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+            "image_urls": ["https://example.com/a.jpg"],
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(len(context.sent), 2)
+        self.assertEqual(context.sent[0][1].chain[0].url, "rendered-card-url")
+        self.assertEqual(context.sent[1][1].chain[0].url, "https://example.com/a.jpg")
+
     async def test_target_compact_mode_overrides_job_default_per_origin(self):
         context = _FakeContext()
         storage = _FakeStorage()

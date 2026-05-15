@@ -225,6 +225,12 @@
             "description": "启用简洁模式",
             "hint": "开启后当前轮询任务只推送标题，不显示来源、时间、摘要、网页链接和原文媒体。"
           },
+          "compact_mode_send_images": {
+            "type": "bool",
+            "default": false,
+            "description": "简洁模式附带图片",
+            "hint": "仅在简洁模式生效时使用。开启后仍只显示标题，但会附带条目中的原文图片；默认关闭以保持只发标题。"
+          },
           "semantic_dedup_enabled": {
             "type": "bool",
             "default": false,

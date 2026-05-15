@@ -1012,6 +1012,9 @@ class RSSScheduler:
                     event_item["compact_mode_enabled"] = bool(
                         getattr(job, "compact_mode_enabled", False)
                     )
+                    event_item["compact_mode_send_images"] = bool(
+                        getattr(job, "compact_mode_send_images", False)
+                    )
                     semantic_result = await self._check_semantic_duplicate(
                         job,
                         event_item,

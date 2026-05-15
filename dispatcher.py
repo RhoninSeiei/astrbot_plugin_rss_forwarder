@@ -183,6 +183,10 @@ class FeedDispatcher:
     def _is_compact_item(item: dict[str, Any] | None = None) -> bool:
         return bool(item and item.get("compact_mode_enabled", False))
 
+    @staticmethod
+    def _should_send_compact_images(item: dict[str, Any] | None = None) -> bool:
+        return bool(item and item.get("compact_mode_send_images", False))
+
     def _item_for_origin(self, item: dict[str, Any], origin: str) -> dict[str, Any]:
         target_item = dict(item)
         compact_mode = self._target_compact_modes.get(origin, "inherit")
@@ -228,6 +232,7 @@ class FeedDispatcher:
             ),
             "render_mode": str(self._config.render_mode or "text").strip(),
             "compact_mode": bool(item.get("compact_mode_enabled", False)),
+            "compact_mode_send_images": bool(item.get("compact_mode_send_images", False)),
         }
         image_paths = self._item_image_paths(item)
         if image_paths:
@@ -485,7 +490,13 @@ class FeedDispatcher:
     def _build_text_message_chain(self, item: dict[str, Any]):
         data = self._build_render_data(item)
         if self._is_compact_item(item):
-            return self._create_message_chain([data["title"]])
+            if not self._should_send_compact_images(item):
+                return self._create_message_chain([data["title"]])
+            return self._create_message_chain(
+                [data["title"]],
+                image_urls=self._item_image_urls(item),
+                image_paths=self._item_image_paths(item),
+            )
 
         template = self._config.render_card_template
 
@@ -704,23 +715,8 @@ class FeedDispatcher:
             raise
 
     def _build_source_media_payloads(self, item: dict[str, Any]) -> list[Any]:
-        payloads: list[Any] = []
-        image_paths = self._item_image_paths(item)
+        payloads = self._build_source_image_payloads(item)
         video_paths = self._item_video_paths(item)
-        local_image_added = False
-        for image_path in image_paths:
-            try:
-                image_chain = self._build_local_image_only_chain(image_path)
-                payloads.append(self._as_chain_result_if_possible(item, image_chain))
-                local_image_added = True
-            except Exception as exc:
-                logger.warning("build local source image payload failed: %s", exc)
-        for image_url in ([] if local_image_added else self._item_image_urls(item)):
-            try:
-                image_chain = self._build_image_only_chain(image_url)
-                payloads.append(self._as_chain_result_if_possible(item, image_chain))
-            except Exception as exc:
-                logger.warning("build source image payload failed: %s", exc)
         local_video_added = False
         for video_path in video_paths:
             try:
@@ -735,6 +731,25 @@ class FeedDispatcher:
                 payloads.append(self._as_chain_result_if_possible(item, video_chain))
             except Exception as exc:
                 logger.warning("build source video payload failed: %s", exc)
+        return payloads
+
+    def _build_source_image_payloads(self, item: dict[str, Any]) -> list[Any]:
+        payloads: list[Any] = []
+        image_paths = self._item_image_paths(item)
+        local_image_added = False
+        for image_path in image_paths:
+            try:
+                image_chain = self._build_local_image_only_chain(image_path)
+                payloads.append(self._as_chain_result_if_possible(item, image_chain))
+                local_image_added = True
+            except Exception as exc:
+                logger.warning("build local source image payload failed: %s", exc)
+        for image_url in ([] if local_image_added else self._item_image_urls(item)):
+            try:
+                image_chain = self._build_image_only_chain(image_url)
+                payloads.append(self._as_chain_result_if_possible(item, image_chain))
+            except Exception as exc:
+                logger.warning("build source image payload failed: %s", exc)
         return payloads
 
     @classmethod
@@ -887,8 +902,12 @@ class FeedDispatcher:
                         exc,
                     )
                     continue
-                if not source_image_already_included and not self._is_compact_item(target_item):
-                    extra_payloads.extend(self._build_source_media_payloads(target_item))
+                if not source_image_already_included:
+                    if self._is_compact_item(target_item):
+                        if self._should_send_compact_images(target_item):
+                            extra_payloads.extend(self._build_source_image_payloads(target_item))
+                    else:
+                        extra_payloads.extend(self._build_source_media_payloads(target_item))
             else:
                 try:
                     chain = self._build_text_message_chain(target_item)

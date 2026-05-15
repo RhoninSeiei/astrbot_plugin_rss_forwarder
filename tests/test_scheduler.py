@@ -327,11 +327,13 @@ class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
             interval_seconds=300,
             compact_mode_enabled=True,
+            compact_mode_send_images=True,
         )
 
         await scheduler._run_job_once_guarded(job)
 
         self.assertTrue(dispatcher.items[0]["compact_mode_enabled"])
+        self.assertTrue(dispatcher.items[0]["compact_mode_send_images"])
 
 
 class SchedulerTaskCleanupTests(unittest.IsolatedAsyncioTestCase):

@@ -57,6 +57,7 @@ class JobConfig:
     batch_size: int = 10
     dedup_ttl_seconds: int = 0
     compact_mode_enabled: bool = False
+    compact_mode_send_images: bool = False
     semantic_dedup_enabled: bool = False
     semantic_dedup_provider_id: str = ""
     semantic_dedup_ttl_seconds: int = 24 * 60 * 60
@@ -212,6 +213,7 @@ class RSSConfig:
                 batch_size=int(item.get("batch_size", 10)),
                 dedup_ttl_seconds=int(item.get("dedup_ttl_seconds", 0) or 0),
                 compact_mode_enabled=bool(item.get("compact_mode_enabled", False)),
+                compact_mode_send_images=bool(item.get("compact_mode_send_images", False)),
                 semantic_dedup_enabled=bool(item.get("semantic_dedup_enabled", False)),
                 semantic_dedup_provider_id=str(item.get("semantic_dedup_provider_id", "")).strip(),
                 semantic_dedup_ttl_seconds=int(
@@ -436,6 +438,7 @@ class RSSConfig:
                 batch_size=10,
                 dedup_ttl_seconds=0,
                 compact_mode_enabled=False,
+                compact_mode_send_images=False,
                 semantic_dedup_enabled=False,
                 semantic_dedup_provider_id="",
                 semantic_dedup_ttl_seconds=24 * 60 * 60,

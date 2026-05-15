@@ -185,6 +185,7 @@ class ConfigTranslationTests(unittest.TestCase):
         conf["jobs"][0].update(
             {
                 "compact_mode_enabled": True,
+                "compact_mode_send_images": True,
                 "semantic_dedup_enabled": True,
                 "semantic_dedup_provider_id": "provider-news",
                 "semantic_dedup_ttl_seconds": 86400,
@@ -197,6 +198,7 @@ class ConfigTranslationTests(unittest.TestCase):
 
         job = cfg.jobs[0]
         self.assertTrue(job.compact_mode_enabled)
+        self.assertTrue(job.compact_mode_send_images)
         self.assertTrue(job.semantic_dedup_enabled)
         self.assertEqual(job.semantic_dedup_provider_id, "provider-news")
         self.assertEqual(job.semantic_dedup_ttl_seconds, 86400)
@@ -235,6 +237,7 @@ class ConfigTranslationTests(unittest.TestCase):
 
         job_items = schema["jobs"]["templates"]["job"]["items"]
         self.assertIn("compact_mode_enabled", job_items)
+        self.assertIn("compact_mode_send_images", job_items)
         self.assertIn("semantic_dedup_enabled", job_items)
         self.assertEqual(job_items["semantic_dedup_provider_id"]["_special"], "select_provider")
         self.assertEqual(job_items["semantic_dedup_ttl_seconds"]["default"], 86400)
