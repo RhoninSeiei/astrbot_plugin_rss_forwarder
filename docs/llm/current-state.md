@@ -2,8 +2,8 @@
 
 ## 版本
 
-- 仓库版本：`0.6.4`
-- 市场版本：`v0.6.4`
+- 仓库版本：`0.6.5`
+- 市场版本：`v0.6.5`
 - 插件元数据名称：`astrbot_plugin_rss_forwarder`
 - 运行时注册名：`astrbot_plugin_rss_forwarder`
 

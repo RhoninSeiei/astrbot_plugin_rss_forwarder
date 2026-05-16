@@ -644,6 +644,35 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.chain[1].url, "https://example.com/a.jpg")
         self.assertEqual(len(payload.chain), 2)
 
+    async def test_compact_mode_can_send_single_source_image_in_text_mode(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        item = {
+            "job_id": "job-1",
+            "compact_mode_enabled": True,
+            "compact_mode_send_images": True,
+            "guid": "item-compact-single-image",
+            "title": "Only Title",
+            "summary": "Summary should not appear.",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+            "image_url": "https://example.com/single.jpg",
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        payload = context.sent[0][1]
+        self.assertEqual(payload.chain[0].text, "Only Title")
+        self.assertEqual(payload.chain[1].url, "https://example.com/single.jpg")
+        self.assertEqual(len(payload.chain), 2)
+
     async def test_compact_mode_can_send_source_images_with_image_card(self):
         context = _FakeContext()
 

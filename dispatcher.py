@@ -754,11 +754,14 @@ class FeedDispatcher:
 
     @classmethod
     def _item_image_urls(cls, item: dict[str, Any]) -> list[str]:
+        image_urls: list[str] = []
         urls = item.get("image_urls", [])
         if isinstance(urls, list):
-            return cls._dedupe_urls([str(url).strip() for url in urls if str(url).strip()])
+            image_urls.extend(str(url).strip() for url in urls if str(url).strip())
         image_url = str(item.get("image_url", "") or "").strip()
-        return [image_url] if image_url else []
+        if image_url:
+            image_urls.append(image_url)
+        return cls._dedupe_urls(image_urls)
 
     @classmethod
     def _item_image_paths(cls, item: dict[str, Any]) -> list[str]:
