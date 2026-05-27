@@ -33,7 +33,7 @@
 - 支持管理指令：`/rss list`、`/rss status`、`/rss run [job_id]`、`/rss pause [job_id]`、`/rss resume [job_id]`、`/rss reset`（清空去重记录）。
 - 支持日报汇总：`daily_digests[]`、`/rss digest run [digest_id]`。
 - 支持三级翻译链路：LLM、Google Translate、GitHub Models。
-- 支持 text / image 两种渲染模式（image 使用 `html_render`）。
+- 支持 text / image 两种渲染模式；日报图片由本地 Pillow 生成，普通 RSS 图卡继续使用 `html_render`。
 
 ## 快速配置图示
 
@@ -335,15 +335,16 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 
 ### 2) 依赖对比（相对 AstrBot 默认环境）
 
-本插件核心功能仅依赖：
+本插件基础文本推送能力仅依赖：
 - AstrBot 运行时（由 AstrBot 主程序提供）
 - Python 标准库（`asyncio`、`urllib`、`xml`、`json` 等）
 
-**结论：本插件没有必须额外 `pip install` 的第三方 Python 依赖。**
+日报图片模式需要 `Pillow`，已通过 `requirements.txt` 声明。
 
 ### 3) 可选能力说明
 
-- `render_mode = image` 时，依赖 AstrBot 侧提供的 `html_render` 能力。
+- 普通 RSS 推送 `render_mode = image` 时，依赖 AstrBot 侧提供的 `html_render` 能力。
+- 日报任务 `render_mode = image` 时，使用插件内置 Pillow 渲染器和本地预制素材生成图片。
 - `llm_enabled = true` 时，依赖 AstrBot 已配置可用的大模型提供商。
 - `google_translate_enabled = true` 时，依赖 Google Cloud Translation API Key。
 - `github_models_enabled = true` 时，默认从 `data/github.token` 读取 GitHub token，也可使用 `ASTRBOT_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN`。

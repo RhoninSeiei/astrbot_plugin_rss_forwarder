@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from tempfile import TemporaryDirectory
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -36,6 +37,7 @@ config_module = _load_module("config")
 dispatcher_module = _load_module("dispatcher")
 RSSConfig = config_module.RSSConfig
 FeedDispatcher = dispatcher_module.FeedDispatcher
+DailyDigestImageRenderer = dispatcher_module.DailyDigestImageRenderer
 
 
 class _FakeContext:
@@ -183,6 +185,37 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                 "dedup_ttl_seconds": 3600,
             }
         )
+
+    def test_daily_digest_image_renderer_outputs_png_and_scales_height(self):
+        renderer = DailyDigestImageRenderer()
+        short_digest = {
+            "id": "short",
+            "title": "RSS 日报",
+            "window_start_text": "2026-05-27 23:00",
+            "window_end_text": "2026-05-28 23:00",
+            "item_count": 1,
+            "content": "1. 一条新闻",
+        }
+        long_digest = {
+            "id": "long",
+            "title": "RSS 日报",
+            "window_start_text": "2026-05-27 23:00",
+            "window_end_text": "2026-05-28 23:00",
+            "item_count": 12,
+            "content": "\n".join(f"{i}. 这是一条较长的硬件新闻摘要，用于验证日报图片高度会随正文内容增长。" for i in range(1, 13)),
+        }
+
+        with TemporaryDirectory() as tmpdir:
+            short_path = renderer.render(short_digest, tmpdir)
+            long_path = renderer.render(long_digest, tmpdir)
+
+            from PIL import Image
+
+            with Image.open(short_path) as short_img, Image.open(long_path) as long_img:
+                self.assertEqual(short_img.format, "PNG")
+                self.assertEqual(short_img.width, renderer.WIDTH)
+                self.assertEqual(long_img.width, renderer.WIDTH)
+                self.assertGreater(long_img.height, short_img.height)
 
     def _build_two_target_config(self):
         return RSSConfig.from_context(
@@ -347,6 +380,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
         dispatcher._resolve_messagechain_cls = lambda: _MessageChain
         dispatcher._resolve_image_cls = lambda: _Image
+        dispatcher._render_daily_digest_image_file = lambda digest: "/tmp/digest-2.png"
 
         digest = {
             "id": "digest-2",
@@ -364,9 +398,9 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.success_count, 1)
         payload = context.sent[0][1]
         self.assertIsInstance(payload, _MessageChain)
-        self.assertEqual(payload.chain[0].url, "digest-image")
+        self.assertEqual(payload.chain[0].path, "/tmp/digest-2.png")
 
-    async def test_daily_digest_image_render_uses_star_html_render_signature(self):
+    async def test_daily_digest_image_render_ignores_star_html_render(self):
         context = _FakeContext()
         renderer = _StarRenderer()
         storage = _FakeStorage()
@@ -378,6 +412,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         )
         dispatcher._resolve_messagechain_cls = lambda: _MessageChain
         dispatcher._resolve_image_cls = lambda: _Image
+        dispatcher._render_daily_digest_image_file = lambda digest: "/tmp/digest-star-render.png"
 
         digest = {
             "id": "digest-star-render",
@@ -395,8 +430,8 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.success_count, 1)
         payload = context.sent[0][1]
         self.assertIsInstance(payload, _MessageChain)
-        self.assertEqual(payload.chain[0].url, "digest-image")
-        self.assertEqual(renderer.calls[0][1], {})
+        self.assertEqual(payload.chain[0].path, "/tmp/digest-star-render.png")
+        self.assertEqual(renderer.calls, [])
 
     async def test_html_render_refreshes_t2i_endpoints_after_first_failure(self):
         html_renderer.network_strategy.refresh_count = 0
@@ -497,6 +532,39 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(payload, _MessageChain)
         self.assertIn("图卡日报", payload.chain[0].text)
         self.assertIn("1. [Feed] Title", payload.chain[0].text)
+
+    async def test_daily_digest_image_mode_uses_local_file_renderer_without_html_render(self):
+        context = _FakeContext()
+        renderer = _StarRenderer(fail=True)
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(
+            context=context,
+            config=self._build_config(),
+            storage=storage,
+            renderer=renderer,
+        )
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_image_cls = lambda: _Image
+        dispatcher._render_daily_digest_image_file = lambda digest: "/tmp/rss-digest.png"
+
+        digest = {
+            "id": "digest-local-image",
+            "title": "本地图片日报",
+            "target_ids": ["target-1"],
+            "render_mode": "image",
+            "window_start_text": "2026-05-27 23:00",
+            "window_end_text": "2026-05-28 23:00",
+            "item_count": 2,
+            "content": "1. 第一条新闻\n2. 第二条新闻",
+        }
+
+        result = await dispatcher.dispatch_daily_digest(digest)
+
+        self.assertEqual(result.success_count, 1)
+        payload = context.sent[0][1]
+        self.assertIsInstance(payload, _MessageChain)
+        self.assertEqual(payload.chain[0].path, "/tmp/rss-digest.png")
+        self.assertEqual(renderer.calls, [])
 
     async def test_twitter_text_dispatch_includes_multiple_images_and_videos(self):
         context = _FakeContext()

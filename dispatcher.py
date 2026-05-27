@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 from astrbot.api import logger
 
 from .config import RSSConfig
+from .daily_digest_image import DailyDigestImageRenderer
 
 
 @dataclass(slots=True)
@@ -54,6 +56,7 @@ class FeedDispatcher:
         }
         self._job_target_origins = self._build_job_target_map(config)
         self._disabled_origins: set[str] = set()
+        self._daily_digest_image_renderer = DailyDigestImageRenderer()
 
     def _build_job_target_map(self, config: RSSConfig) -> dict[str, list[str]]:
         mapping: dict[str, list[str]] = {}
@@ -645,8 +648,22 @@ class FeedDispatcher:
         )
 
     async def _build_daily_digest_image_payload(self, digest: dict[str, Any]):
-        html = self._build_daily_digest_card_html(digest)
-        return await self.html_render(html)
+        image_path = self._render_daily_digest_image_file(digest)
+        chain = self._build_local_image_only_chain(image_path)
+        return self._as_chain_result_if_possible(digest, chain)
+
+    def _render_daily_digest_image_file(self, digest: dict[str, Any]) -> str:
+        output_dir = self._daily_digest_image_output_dir()
+        return self._daily_digest_image_renderer.render(digest, output_dir)
+
+    def _daily_digest_image_output_dir(self) -> Path:
+        plugin_cache_dir = getattr(self._storage, "plugin_cache_dir", None)
+        if callable(plugin_cache_dir):
+            try:
+                return Path(plugin_cache_dir()) / "daily_digest_images"
+            except Exception:
+                pass
+        return Path("data") / "plugin_data" / "astrbot_plugin_rss_forwarder" / "daily_digest_images"
 
     def _build_image_only_chain(self, image_url: str):
         MessageChain = self._resolve_messagechain_cls()
@@ -977,10 +994,7 @@ class FeedDispatcher:
         try:
             if render_mode == "image":
                 try:
-                    payload = self._as_image_result_if_possible(
-                        digest,
-                        await self._build_daily_digest_image_payload(digest),
-                    )
+                    payload = await self._build_daily_digest_image_payload(digest)
                 except Exception as exc:
                     logger.warning(
                         "daily digest image render failed, fallback to text mode id=%s: %s",

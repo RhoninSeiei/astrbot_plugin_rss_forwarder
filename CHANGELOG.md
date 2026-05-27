@@ -3,6 +3,7 @@
 ## v0.6.5
 
 - 修复普通 RSS 条目仅包含 `image_url` 时，简洁模式附带图片未随标题发送的问题。
+- 日报 `render_mode=image` 改为使用本地 Pillow 生成图片，使用预制 RSS 标识、插件 logo、签名区和本地字体资源，减少对 AstrBot 官方 T2I 服务的依赖。
 
 ## v0.6.4
 
