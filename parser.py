@@ -37,7 +37,9 @@ class FeedParser:
                 continue
             try:
                 parsed = self._parse_xml(feed_id, body)
+                parsed = self._limit_items(parsed, raw.get("max_new_items"))
                 for item in parsed:
+                    self._copy_raw_media_flags(raw, item)
                     if job is not None:
                         item.setdefault("job_id", getattr(job, "id", ""))
                     entries.append(item)
@@ -235,6 +237,22 @@ class FeedParser:
             if text:
                 result.append(text)
         return result
+
+    @staticmethod
+    def _limit_items(items: list[dict[str, Any]], max_new_items) -> list[dict[str, Any]]:
+        try:
+            limit = int(max_new_items or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0:
+            return items
+        return items[:limit]
+
+    @staticmethod
+    def _copy_raw_media_flags(raw: dict[str, Any], item: dict[str, Any]) -> None:
+        for key in ("send_images", "send_videos"):
+            if key in raw:
+                item[key] = bool(raw.get(key))
 
     @staticmethod
     def _strip_ns(tag: str) -> str:

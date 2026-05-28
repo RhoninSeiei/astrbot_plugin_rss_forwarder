@@ -60,6 +60,34 @@ class FeedParserTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["image_url"], "https://example.com/from-desc.jpg")
 
+    def test_parse_rss_respects_raw_max_items_and_media_flags(self):
+        xml = """
+        <rss version="2.0">
+          <channel>
+            <title>TechPowerUp</title>
+            <item><title>News A</title><link>https://example.com/a</link><guid>a-1</guid></item>
+            <item><title>News B</title><link>https://example.com/b</link><guid>b-1</guid></item>
+            <item><title>News C</title><link>https://example.com/c</link><guid>c-1</guid></item>
+          </channel>
+        </rss>
+        """
+
+        entries = FeedParser().parse(
+            [
+                {
+                    "feed_id": "f1",
+                    "body": xml,
+                    "max_new_items": 2,
+                    "send_images": False,
+                    "send_videos": False,
+                }
+            ]
+        )
+
+        self.assertEqual([item["title"] for item in entries], ["News A", "News B"])
+        self.assertIs(entries[0]["send_images"], False)
+        self.assertIs(entries[0]["send_videos"], False)
+
     def test_parse_atom_enclosure_image_url(self):
         xml = """
         <feed xmlns="http://www.w3.org/2005/Atom">

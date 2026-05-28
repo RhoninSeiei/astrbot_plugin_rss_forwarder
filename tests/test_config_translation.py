@@ -103,6 +103,13 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(cfg.google_translate_proxy_mode, "custom")
         self.assertEqual(cfg.google_translate_proxy_url, "http://127.0.0.1:7890")
 
+    def test_rss_feed_defaults_to_unlimited_source_item_limit(self):
+        cfg = RSSConfig.from_context(_minimal_runtime_conf())
+
+        self.assertEqual(cfg.feeds[0].source_type, "rss")
+        self.assertEqual(cfg.feeds[0].max_new_items, 0)
+        self.assertTrue(cfg.feeds[0].send_images)
+
     def test_daily_digest_parses_and_preserves_no_implicit_job(self):
         conf = {
             "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
@@ -362,6 +369,8 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(templates["rss_feed"]["items"]["source_type"]["default"], "rss")
         self.assertTrue(templates["rss_feed"]["items"]["source_type"]["invisible"])
         self.assertIn("proxy_url", templates["rss_feed"]["items"])
+        self.assertIn("send_images", templates["rss_feed"]["items"])
+        self.assertIn("max_new_items", templates["rss_feed"]["items"])
         self.assertEqual(
             templates["twitter_feed"]["items"]["source_type"]["default"],
             "twitter",

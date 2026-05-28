@@ -100,6 +100,87 @@ class RSSSchedulerTests(unittest.TestCase):
 
 
 class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_job_batch_size_limits_successful_dispatches_per_run(self):
+        class FakeStorage:
+            def __init__(self):
+                self.marked = []
+                self.updated = False
+
+            def build_dedup_key(self, item):
+                return item["guid"]
+
+            def build_seen_keys(self, item):
+                return [item["guid"]]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                return False
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                self.marked.append((item_id, ttl_seconds))
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                self.updated = True
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [
+                    {
+                        "feed_id": "feed-1",
+                        "guid": f"guid-{index}",
+                        "title": f"Title {index}",
+                        "published_at": "",
+                    }
+                    for index in range(1, 6)
+                ]
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.items = []
+
+            async def dispatch(self, item):
+                self.items.append(item)
+                return DispatchResult(success_count=1)
+
+        config = types.SimpleNamespace(
+            jobs=[],
+            dedup_ttl_seconds=123,
+            poll_interval_seconds=300,
+            targets=[],
+        )
+        job = types.SimpleNamespace(
+            id="job-1",
+            feed_ids=["feed-1"],
+            target_ids=[],
+            enabled=True,
+            interval_seconds=300,
+            batch_size=2,
+            dedup_ttl_seconds=0,
+            semantic_dedup_enabled=False,
+        )
+        storage = FakeStorage()
+        dispatcher = FakeDispatcher()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=dispatcher,
+            storage=storage,
+            pipeline=None,
+        )
+
+        await scheduler._run_job_once_guarded(job)
+
+        self.assertEqual([item["guid"] for item in dispatcher.items], ["guid-1", "guid-2"])
+        self.assertEqual(storage.marked, [("guid-1", 123), ("guid-2", 123)])
+        self.assertTrue(storage.updated)
+
     async def test_permanent_target_failures_are_treated_as_seen(self):
         class FakeStorage:
             def __init__(self):

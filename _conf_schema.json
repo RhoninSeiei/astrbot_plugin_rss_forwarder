@@ -45,6 +45,24 @@
             "description": "RSS 抓取代理地址",
             "hint": "示例：http://127.0.0.1:7890；留空使用运行环境默认网络。"
           },
+          "send_images": {
+            "type": "bool",
+            "default": true,
+            "description": "RSS 推送附带图片",
+            "hint": "关闭后仍保留标题、摘要与链接。"
+          },
+          "send_videos": {
+            "type": "bool",
+            "default": true,
+            "description": "RSS 推送附带视频",
+            "hint": "仅在条目解析出视频媒体时生效。"
+          },
+          "max_new_items": {
+            "type": "int",
+            "default": 0,
+            "description": "RSS 每轮最多解析新条目数",
+            "hint": "填 0 表示不按源限制；任务仍受 batch_size 限制。"
+          },
           "enabled": {
             "type": "bool",
             "default": false,

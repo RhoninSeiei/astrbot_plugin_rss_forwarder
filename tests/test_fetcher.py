@@ -61,6 +61,33 @@ class _FakeResponse:
 
 
 class FeedFetcherTests(unittest.TestCase):
+    def test_rss_fetch_metadata_includes_media_flags_and_max_items(self):
+        async def fake_fetch_single(feed):
+            return fetcher_module.FetchedFeed(
+                feed_id=feed.id,
+                body="<rss><channel></channel></rss>",
+                etag="etag-a",
+                last_modified="Tue, 12 May 2026 00:00:00 GMT",
+                status=200,
+            )
+
+        feed = types.SimpleNamespace(
+            id="rss-1",
+            source_type="rss",
+            enabled=True,
+            max_new_items=2,
+            send_images=False,
+            send_videos=False,
+        )
+        fetcher = FeedFetcher(types.SimpleNamespace(feeds=[feed]), _FakeStorage())
+        fetcher._fetch_single_feed = fake_fetch_single
+
+        result = asyncio.run(fetcher.fetch_feed_ids(["rss-1"]))
+
+        self.assertEqual(result[0]["max_new_items"], 2)
+        self.assertIs(result[0]["send_images"], False)
+        self.assertIs(result[0]["send_videos"], False)
+
     def test_rss_fetch_uses_configured_http_proxy_and_browser_headers(self):
         captured = {}
 

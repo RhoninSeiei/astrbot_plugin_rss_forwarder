@@ -184,7 +184,7 @@ class RSSConfig:
                 send_images=bool(item.get("send_images", True)),
                 send_videos=bool(item.get("send_videos", True)),
                 send_link=bool(item.get("send_link", True)),
-                max_new_items=int(item.get("max_new_items", 1) or 0),
+                max_new_items=cls._feed_max_new_items(item),
                 auth_mode=str(item.get("auth_mode", "none")).strip() or "none",
                 key=str(item.get("key", "")).strip(),
                 enabled=bool(item.get("enabled", True)),
@@ -390,6 +390,15 @@ class RSSConfig:
             )
             changed = True
         return changed
+
+    @staticmethod
+    def _feed_source_type(item: dict) -> str:
+        return str(item.get("source_type", "rss") or "rss").strip().lower() or "rss"
+
+    @classmethod
+    def _feed_max_new_items(cls, item: dict) -> int:
+        default = 1 if cls._feed_source_type(item) == "twitter" else 0
+        return int(item.get("max_new_items", default) or 0)
 
     @staticmethod
     def _normalize_collection(value) -> list[dict]:

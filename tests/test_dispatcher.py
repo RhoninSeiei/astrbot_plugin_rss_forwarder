@@ -41,14 +41,17 @@ DailyDigestImageRenderer = dispatcher_module.DailyDigestImageRenderer
 
 
 class _FakeContext:
-    def __init__(self, fail_first_send: bool = False):
+    def __init__(self, fail_first_send: bool = False, fail_on_calls: set[int] | None = None):
         self.fail_first_send = fail_first_send
+        self.fail_on_calls = set(fail_on_calls or set())
+        if fail_first_send:
+            self.fail_on_calls.add(1)
         self.send_calls = 0
         self.sent: list[tuple[str, object]] = []
 
     async def send_message(self, unified_msg_origin, payload):
         self.send_calls += 1
-        if self.fail_first_send and self.send_calls == 1:
+        if self.send_calls in self.fail_on_calls:
             raise RuntimeError("temporary send failure")
         self.sent.append((unified_msg_origin, payload))
 
@@ -256,7 +259,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         context = _FakeContext()
         storage = _FakeStorage()
         dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
-        dispatcher._build_text_message_chain = lambda item: "payload"
+        dispatcher._build_text_message_chain = lambda item, **kwargs: "payload"
 
         async def fake_hash(_image_url: str) -> str:
             return "image-sha256"
@@ -285,7 +288,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         context = _FakeContext()
         storage = _FakeStorage()
         dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
-        dispatcher._build_text_message_chain = lambda item: "payload"
+        dispatcher._build_text_message_chain = lambda item, **kwargs: "payload"
 
         async def fake_hash(_image_url: str) -> str:
             return "image-sha256"
@@ -326,7 +329,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         context = _FakeContext(fail_first_send=True)
         storage = _FakeStorage()
         dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
-        dispatcher._build_text_message_chain = lambda item: "payload"
+        dispatcher._build_text_message_chain = lambda item, **kwargs: "payload"
 
         item = {
             "job_id": "job-1",
@@ -594,12 +597,17 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         result = await dispatcher.dispatch(item)
 
         self.assertEqual(result.success_count, 1)
-        payload = context.sent[0][1]
-        self.assertIsInstance(payload, _MessageChain)
-        self.assertEqual(sum(isinstance(part, _Image) for part in payload.chain), 1)
-        self.assertEqual(sum(isinstance(part, _Video) for part in payload.chain), 1)
-        image = next(part for part in payload.chain if isinstance(part, _Image))
-        video = next(part for part in payload.chain if isinstance(part, _Video))
+        self.assertEqual(len(context.sent), 3)
+        text_payload = context.sent[0][1]
+        image_payload = context.sent[1][1]
+        video_payload = context.sent[2][1]
+        self.assertIsInstance(text_payload, _MessageChain)
+        self.assertEqual(sum(isinstance(part, _Image) for part in text_payload.chain), 0)
+        self.assertEqual(sum(isinstance(part, _Video) for part in text_payload.chain), 0)
+        image = image_payload.chain[0]
+        video = video_payload.chain[0]
+        self.assertIsInstance(image, _Image)
+        self.assertIsInstance(video, _Video)
         self.assertEqual(image.path, "/tmp/a.jpg")
         self.assertEqual(video.path, "/tmp/a.mp4")
 
@@ -707,10 +715,12 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         result = await dispatcher.dispatch(item)
 
         self.assertEqual(result.success_count, 1)
-        payload = context.sent[0][1]
-        self.assertEqual(payload.chain[0].text, "Only Title")
-        self.assertEqual(payload.chain[1].url, "https://example.com/a.jpg")
-        self.assertEqual(len(payload.chain), 2)
+        self.assertEqual(len(context.sent), 2)
+        text_payload = context.sent[0][1]
+        image_payload = context.sent[1][1]
+        self.assertEqual(text_payload.chain[0].text, "Only Title")
+        self.assertEqual(len(text_payload.chain), 1)
+        self.assertEqual(image_payload.chain[0].url, "https://example.com/a.jpg")
 
     async def test_compact_mode_can_send_single_source_image_in_text_mode(self):
         context = _FakeContext()
@@ -736,10 +746,126 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         result = await dispatcher.dispatch(item)
 
         self.assertEqual(result.success_count, 1)
-        payload = context.sent[0][1]
-        self.assertEqual(payload.chain[0].text, "Only Title")
-        self.assertEqual(payload.chain[1].url, "https://example.com/single.jpg")
-        self.assertEqual(len(payload.chain), 2)
+        self.assertEqual(len(context.sent), 2)
+        text_payload = context.sent[0][1]
+        image_payload = context.sent[1][1]
+        self.assertEqual(text_payload.chain[0].text, "Only Title")
+        self.assertEqual(len(text_payload.chain), 1)
+        self.assertEqual(image_payload.chain[0].url, "https://example.com/single.jpg")
+
+    async def test_text_mode_sends_source_images_after_text_message(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        item = {
+            "job_id": "job-1",
+            "feed_id": "feed-1",
+            "guid": "item-text-extra-image",
+            "title": "Title",
+            "summary": "Summary",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+            "image_url": "https://example.com/source.jpg",
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(storage.confirms, storage.claims)
+        self.assertEqual(len(context.sent), 2)
+        self.assertEqual(len(context.sent[0][1].chain), 1)
+        self.assertEqual(context.sent[0][1].chain[0].text.splitlines()[0], "Title")
+        self.assertEqual(context.sent[1][1].chain[0].url, "https://example.com/source.jpg")
+
+    async def test_extra_source_image_failure_keeps_text_dispatch_successful(self):
+        context = _FakeContext(fail_on_calls={2})
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        item = {
+            "job_id": "job-1",
+            "feed_id": "feed-1",
+            "guid": "item-extra-image-fails",
+            "title": "Title",
+            "summary": "Summary",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+            "image_url": "https://example.com/source.jpg",
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(context.send_calls, 2)
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(result.transient_failure_count, 0)
+        self.assertEqual(storage.confirms, storage.claims)
+        self.assertEqual(storage.releases, [])
+
+    async def test_feed_send_images_false_suppresses_rss_source_images(self):
+        context = _FakeContext()
+        storage = _FakeStorage()
+        config = RSSConfig.from_context(
+            {
+                "feeds": [
+                    {
+                        "id": "feed-no-images",
+                        "url": "https://example.com/rss",
+                        "send_images": False,
+                        "enabled": True,
+                    }
+                ],
+                "targets": [
+                    {
+                        "id": "target-1",
+                        "platform": "qq",
+                        "unified_msg_origin": "default:GroupMessage:1",
+                        "enabled": True,
+                    }
+                ],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "feed_ids": ["feed-no-images"],
+                        "target_ids": ["target-1"],
+                        "interval_seconds": 300,
+                        "enabled": True,
+                    }
+                ],
+                "render_mode": "text",
+            }
+        )
+        dispatcher = FeedDispatcher(context=context, config=config, storage=storage)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        dispatcher._resolve_image_cls = lambda: _Image
+
+        item = {
+            "job_id": "job-1",
+            "feed_id": "feed-no-images",
+            "guid": "item-feed-no-images",
+            "title": "Title",
+            "summary": "Summary",
+            "source": "Feed",
+            "published_at": "2026-05-05T00:00:00+00:00",
+            "link": "https://example.com/post",
+            "image_url": "https://example.com/source.jpg",
+        }
+
+        result = await dispatcher.dispatch(item)
+
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(len(context.sent), 1)
+        self.assertEqual(len(context.sent[0][1].chain), 1)
+        self.assertEqual(context.sent[0][1].chain[0].text.splitlines()[0], "Title")
 
     async def test_compact_mode_can_send_source_images_with_image_card(self):
         context = _FakeContext()

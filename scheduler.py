@@ -951,6 +951,7 @@ class RSSScheduler:
             dispatch_fail_count = 0
             error_summary = ""
             seen_in_run: set[str] = set()
+            batch_size = max(int(getattr(job, "batch_size", 10) or 10), 1)
 
             try:
                 raw_items = await self._call_fetch(job)
@@ -964,6 +965,13 @@ class RSSScheduler:
                 parsed_count = len(items)
                 await self._archive_items(items)
                 for item in items:
+                    if pushed_count >= batch_size:
+                        logger.info(
+                            "job=%s reached batch_size=%s, stop current run",
+                            job.id,
+                            batch_size,
+                        )
+                        break
                     seen_keys = self._build_seen_keys(item)
                     if not seen_keys:
                         skipped_seen_count += 1

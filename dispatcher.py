@@ -57,6 +57,14 @@ class FeedDispatcher:
         self._job_target_origins = self._build_job_target_map(config)
         self._disabled_origins: set[str] = set()
         self._daily_digest_image_renderer = DailyDigestImageRenderer()
+        self._feed_send_images = {
+            str(getattr(feed, "id", "") or "").strip(): bool(getattr(feed, "send_images", True))
+            for feed in getattr(config, "feeds", [])
+        }
+        self._feed_send_videos = {
+            str(getattr(feed, "id", "") or "").strip(): bool(getattr(feed, "send_videos", True))
+            for feed in getattr(config, "feeds", [])
+        }
 
     def _build_job_target_map(self, config: RSSConfig) -> dict[str, list[str]]:
         mapping: dict[str, list[str]] = {}
@@ -247,14 +255,14 @@ class FeedDispatcher:
             if local_hashes:
                 payload["image_file_sha256"] = local_hashes
         has_local_image_hash = bool(payload.get("image_file_sha256"))
-        image_url = "" if has_local_image_hash else str(item.get("image_url", "") or "").strip()
+        image_urls = [] if has_local_image_hash else self._item_image_urls(item)
+        image_url = image_urls[0] if image_urls else ""
         if image_url:
             image_digest = await self._hash_image_bytes(image_url)
             if image_digest:
                 payload["image_sha256"] = image_digest
             else:
                 payload["image_url"] = self._normalize_url(image_url)
-        image_urls = [] if has_local_image_hash else self._item_image_urls(item)
         if image_urls:
             payload["image_urls"] = [self._normalize_url(url) for url in image_urls]
         video_paths = self._item_video_paths(item)
@@ -490,10 +498,10 @@ class FeedDispatcher:
                 return chain
             raise
 
-    def _build_text_message_chain(self, item: dict[str, Any]):
+    def _build_text_message_chain(self, item: dict[str, Any], *, include_media: bool = True):
         data = self._build_render_data(item)
         if self._is_compact_item(item):
-            if not self._should_send_compact_images(item):
+            if not include_media or not self._should_send_compact_images(item):
                 return self._create_message_chain([data["title"]])
             return self._create_message_chain(
                 [data["title"]],
@@ -510,10 +518,10 @@ class FeedDispatcher:
         link_text = self._safe_format(template.link_text, data)
         link = data["link"]
         image_url = str(item.get("image_url", "") or "").strip()
-        image_urls = self._item_image_urls(item)
-        video_urls = self._item_video_urls(item)
-        image_paths = self._item_image_paths(item)
-        video_paths = self._item_video_paths(item)
+        image_urls = self._item_image_urls(item) if include_media else []
+        video_urls = self._item_video_urls(item) if include_media else []
+        image_paths = self._item_image_paths(item) if include_media else []
+        video_paths = self._item_video_paths(item) if include_media else []
 
         text_lines = [
             line
@@ -533,7 +541,7 @@ class FeedDispatcher:
             return self._create_message_chain(
                 text_lines,
                 link_line or None,
-                image_url or None,
+                image_url if include_media and self._should_send_item_images(item) else None,
                 image_urls=image_urls,
                 video_urls=video_urls,
                 image_paths=image_paths,
@@ -769,8 +777,9 @@ class FeedDispatcher:
                 logger.warning("build source image payload failed: %s", exc)
         return payloads
 
-    @classmethod
-    def _item_image_urls(cls, item: dict[str, Any]) -> list[str]:
+    def _item_image_urls(self, item: dict[str, Any]) -> list[str]:
+        if not self._should_send_item_images(item):
+            return []
         image_urls: list[str] = []
         urls = item.get("image_urls", [])
         if isinstance(urls, list):
@@ -778,28 +787,46 @@ class FeedDispatcher:
         image_url = str(item.get("image_url", "") or "").strip()
         if image_url:
             image_urls.append(image_url)
-        return cls._dedupe_urls(image_urls)
+        return self._dedupe_urls(image_urls)
 
-    @classmethod
-    def _item_image_paths(cls, item: dict[str, Any]) -> list[str]:
+    def _item_image_paths(self, item: dict[str, Any]) -> list[str]:
+        if not self._should_send_item_images(item):
+            return []
         paths = item.get("image_paths", [])
         if not isinstance(paths, list):
             return []
-        return cls._dedupe_urls([str(path).strip() for path in paths if str(path).strip()])
+        return self._dedupe_urls([str(path).strip() for path in paths if str(path).strip()])
 
-    @classmethod
-    def _item_video_urls(cls, item: dict[str, Any]) -> list[str]:
+    def _item_video_urls(self, item: dict[str, Any]) -> list[str]:
+        if not self._should_send_item_videos(item):
+            return []
         urls = item.get("video_urls", [])
         if not isinstance(urls, list):
             return []
-        return cls._dedupe_urls([str(url).strip() for url in urls if str(url).strip()])
+        return self._dedupe_urls([str(url).strip() for url in urls if str(url).strip()])
 
-    @classmethod
-    def _item_video_paths(cls, item: dict[str, Any]) -> list[str]:
+    def _item_video_paths(self, item: dict[str, Any]) -> list[str]:
+        if not self._should_send_item_videos(item):
+            return []
         paths = item.get("video_paths", [])
         if not isinstance(paths, list):
             return []
-        return cls._dedupe_urls([str(path).strip() for path in paths if str(path).strip()])
+        return self._dedupe_urls([str(path).strip() for path in paths if str(path).strip()])
+
+    def _should_send_item_images(self, item: dict[str, Any]) -> bool:
+        return self._item_media_enabled(item, "send_images", self._feed_send_images)
+
+    def _should_send_item_videos(self, item: dict[str, Any]) -> bool:
+        return self._item_media_enabled(item, "send_videos", self._feed_send_videos)
+
+    @staticmethod
+    def _item_media_enabled(item: dict[str, Any], key: str, feed_flags: dict[str, bool]) -> bool:
+        if key in item:
+            return bool(item.get(key))
+        feed_id = str(item.get("feed_id", "") or "").strip()
+        if feed_id and feed_id in feed_flags:
+            return bool(feed_flags[feed_id])
+        return True
 
     @staticmethod
     def _dedupe_urls(urls: list[str]) -> list[str]:
@@ -930,8 +957,13 @@ class FeedDispatcher:
                         extra_payloads.extend(self._build_source_media_payloads(target_item))
             else:
                 try:
-                    chain = self._build_text_message_chain(target_item)
+                    chain = self._build_text_message_chain(target_item, include_media=False)
                     payload = self._as_chain_result_if_possible(target_item, chain)
+                    if self._is_compact_item(target_item):
+                        if self._should_send_compact_images(target_item):
+                            extra_payloads.extend(self._build_source_image_payloads(target_item))
+                    else:
+                        extra_payloads.extend(self._build_source_media_payloads(target_item))
                 except Exception:
                     result.transient_failure_count += 1
                     result.transient_failure_origins.append(unified_msg_origin)

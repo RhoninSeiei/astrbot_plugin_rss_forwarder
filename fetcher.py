@@ -56,6 +56,9 @@ class FeedFetcher:
                     "etag": fetched.etag,
                     "last_modified": fetched.last_modified,
                     "status": fetched.status,
+                    "max_new_items": int(getattr(feed, "max_new_items", 0) or 0),
+                    "send_images": bool(getattr(feed, "send_images", True)),
+                    "send_videos": bool(getattr(feed, "send_videos", True)),
                 }
             )
         return items
