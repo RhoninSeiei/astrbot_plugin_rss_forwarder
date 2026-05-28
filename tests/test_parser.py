@@ -80,6 +80,7 @@ class FeedParserTests(unittest.TestCase):
                     "max_new_items": 2,
                     "send_images": False,
                     "send_videos": False,
+                    "proxy_url": "http://127.0.0.1:7890",
                 }
             ]
         )
@@ -87,6 +88,7 @@ class FeedParserTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in entries], ["News A", "News B"])
         self.assertIs(entries[0]["send_images"], False)
         self.assertIs(entries[0]["send_videos"], False)
+        self.assertEqual(entries[0]["proxy_url"], "http://127.0.0.1:7890")
 
     def test_parse_atom_enclosure_image_url(self):
         xml = """

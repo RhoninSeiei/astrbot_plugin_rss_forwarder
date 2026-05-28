@@ -78,6 +78,7 @@ class FeedFetcherTests(unittest.TestCase):
             max_new_items=2,
             send_images=False,
             send_videos=False,
+            proxy_url="http://127.0.0.1:7890",
         )
         fetcher = FeedFetcher(types.SimpleNamespace(feeds=[feed]), _FakeStorage())
         fetcher._fetch_single_feed = fake_fetch_single
@@ -87,6 +88,7 @@ class FeedFetcherTests(unittest.TestCase):
         self.assertEqual(result[0]["max_new_items"], 2)
         self.assertIs(result[0]["send_images"], False)
         self.assertIs(result[0]["send_videos"], False)
+        self.assertEqual(result[0]["proxy_url"], "http://127.0.0.1:7890")
 
     def test_rss_fetch_uses_configured_http_proxy_and_browser_headers(self):
         captured = {}

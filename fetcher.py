@@ -59,6 +59,7 @@ class FeedFetcher:
                     "max_new_items": int(getattr(feed, "max_new_items", 0) or 0),
                     "send_images": bool(getattr(feed, "send_images", True)),
                     "send_videos": bool(getattr(feed, "send_videos", True)),
+                    "proxy_url": str(getattr(feed, "proxy_url", "") or "").strip(),
                 }
             )
         return items

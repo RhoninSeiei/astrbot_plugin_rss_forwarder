@@ -209,8 +209,8 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 - `jobs[].semantic_dedup_ttl_seconds` 用于控制候选新闻保留时间；过期候选会从模型输入中移除
 - 模型判定超时、缺少 provider 或返回无效 JSON 时，该条内容会继续推送
 - `jobs[].compact_mode_enabled=true` 时，该轮询任务只推送标题；全局 `render_mode=image` 下仍使用标题图卡，渲染失败时回退为标题文本
-- `jobs[].compact_mode_send_images=true` 时，简洁模式会附带条目图片；文本模式会先发送标题再附加原文图片，图片模式为“标题图卡 + 原文图片”
-- 普通 RSS 文本推送会先发送正文并确认去重，再附加原文图片或视频；附加媒体发送失败时不会导致同一条新闻反复重试
+- `jobs[].compact_mode_send_images=true` 时，简洁模式会附带条目图片；文本模式为“标题 + 图片”同一条消息，图片模式为“标题图卡 + 原文图片”
+- 普通 RSS 文本推送会把正文和原文图片放在同一条消息链内发送；远程图片会优先缓存为本地 JPEG 后再交给平台适配器
 - `targets[].compact_mode` 可覆盖轮询任务的简洁模式；同一轮询任务内不同目标可分别使用简洁推送和正常推送
 - 多目标任务的内容确认按 `job + target + item` 记录，单个目标发送失败时，后续轮询只补发未确认目标
 - 若条目发布时间早于该 feed 的 `last_success_time`，插件会仅补记去重而不重复推送
@@ -222,7 +222,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 - `source_type=twitter` 时，`url` 可留空；如需指定 Nitter 镜像站，优先填写 `nitter_url`
 - `nitter_url` 支持填写自建 Nitter 服务地址，例如 `https://nitter.example.com`
 - RSS 源也支持 `proxy_url`，适合源站按出口 IP 或请求网络限制访问的情况
-- RSS 源可通过 `send_images=false` 和 `send_videos=false` 关闭原文媒体附加发送
+- RSS 源可通过 `send_images=false` 和 `send_videos=false` 关闭原文媒体发送
 - RSS 源的 `max_new_items` 默认值为 `0`，表示每轮解析源返回的全部条目；填入正整数时，只解析该源返回列表中靠前的对应数量条目
 - `display_source`、`display_time`、`display_link` 同时作用于文本推送与图片图卡
 - Twitter 源可通过 `send_link=false` 单独隐藏原推文链接；来源仍显示为推主用户名

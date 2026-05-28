@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from astrbot.api import logger
 
@@ -37,6 +37,8 @@ class FeedDispatcher:
     _PENDING_DISPATCH_TTL_SECONDS = 120
     _IMAGE_HASH_TIMEOUT_SECONDS = 8
     _IMAGE_HASH_MAX_BYTES = 8 * 1024 * 1024
+    _INLINE_MEDIA_TIMEOUT_SECONDS = 15
+    _INLINE_MEDIA_MAX_BYTES = 12 * 1024 * 1024
 
     def __init__(self, context, config: RSSConfig, storage=None, renderer=None) -> None:
         self.context = context
@@ -304,6 +306,149 @@ class FeedDispatcher:
             return await asyncio.to_thread(self._hash_local_file_sync, path)
         except (OSError, ValueError):
             return ""
+
+    async def _prepare_inline_media_for_send(self, item: dict[str, Any]) -> dict[str, Any]:
+        if self._item_image_paths(item) or not self._should_send_item_images(item):
+            return item
+        image_urls = self._item_image_urls(item)
+        if not image_urls:
+            return item
+
+        cached_paths: list[str] = []
+        for image_url in image_urls:
+            cached_path = await self._cache_remote_image_for_send(image_url, item)
+            if cached_path:
+                cached_paths.append(cached_path)
+
+        if not cached_paths:
+            return item
+
+        prepared = dict(item)
+        prepared["image_paths"] = cached_paths
+        return prepared
+
+    async def _cache_remote_image_for_send(self, image_url: str, item: dict[str, Any]) -> str:
+        cache_dir = self._source_media_cache_dir()
+        if cache_dir is None:
+            return ""
+        try:
+            return await asyncio.to_thread(
+                self._cache_remote_image_for_send_sync,
+                image_url,
+                item,
+                cache_dir,
+            )
+        except Exception as exc:
+            logger.warning("cache source image failed url=%s: %s", self._normalize_url(image_url), exc)
+            return ""
+
+    def _source_media_cache_dir(self) -> Path | None:
+        plugin_cache_dir = getattr(self._storage, "plugin_cache_dir", None)
+        if not callable(plugin_cache_dir):
+            return None
+        try:
+            return Path(plugin_cache_dir()) / "source_media"
+        except Exception:
+            return None
+
+    def _cache_remote_image_for_send_sync(
+        self,
+        image_url: str,
+        item: dict[str, Any],
+        cache_dir: Path,
+    ) -> str:
+        normalized = self._normalize_url(image_url)
+        if not normalized:
+            return ""
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        jpeg_path = cache_dir / f"{cache_key}.jpg"
+        if jpeg_path.exists() and jpeg_path.stat().st_size > 0:
+            return str(jpeg_path)
+
+        body, content_type = self._download_image_bytes(normalized, item)
+        if not body:
+            return ""
+
+        if self._save_image_as_jpeg(body, jpeg_path):
+            return str(jpeg_path)
+
+        raw_path = cache_dir / f"{cache_key}{self._guess_image_extension(content_type, normalized)}"
+        tmp_path = raw_path.with_suffix(f"{raw_path.suffix}.tmp")
+        tmp_path.write_bytes(body)
+        tmp_path.replace(raw_path)
+        return str(raw_path)
+
+    def _download_image_bytes(self, image_url: str, item: dict[str, Any]) -> tuple[bytes, str]:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+        link = str(item.get("link", "") or "").strip()
+        if link:
+            headers["Referer"] = link
+        request = Request(image_url, headers=headers)
+        proxy_url = str(item.get("proxy_url", "") or "").strip()
+        opener = (
+            build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            if proxy_url
+            else build_opener()
+        )
+        with opener.open(request, timeout=self._INLINE_MEDIA_TIMEOUT_SECONDS) as response:  # noqa: S310
+            body = response.read(self._INLINE_MEDIA_MAX_BYTES + 1)
+            if len(body) > self._INLINE_MEDIA_MAX_BYTES:
+                raise ValueError("source image too large")
+            content_type = str(response.headers.get("Content-Type", "") or "").strip().lower()
+            return body, content_type
+
+    @staticmethod
+    def _save_image_as_jpeg(body: bytes, output_path: Path) -> bool:
+        try:
+            from io import BytesIO
+
+            from PIL import Image, ImageOps
+        except Exception:
+            return False
+
+        try:
+            with Image.open(BytesIO(body)) as image:
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((2000, 2000))
+                if image.mode in {"RGBA", "LA"} or (
+                    image.mode == "P" and "transparency" in image.info
+                ):
+                    alpha_source = image.convert("RGBA")
+                    background = Image.new("RGB", alpha_source.size, (255, 255, 255))
+                    background.paste(alpha_source, mask=alpha_source.getchannel("A"))
+                    image = background
+                else:
+                    image = image.convert("RGB")
+                tmp_path = output_path.with_suffix(".jpg.tmp")
+                image.save(tmp_path, format="JPEG", quality=88, optimize=True)
+                tmp_path.replace(output_path)
+                return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _guess_image_extension(content_type: str, image_url: str) -> str:
+        if "png" in content_type:
+            return ".png"
+        if "webp" in content_type:
+            return ".webp"
+        if "gif" in content_type:
+            return ".gif"
+        if "jpeg" in content_type or "jpg" in content_type:
+            return ".jpg"
+        path_suffix = Path(urlsplit(image_url).path).suffix.lower()
+        if path_suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+            return path_suffix
+        return ".img"
 
     def _hash_local_file_sync(self, path: str) -> str:
         digest = hashlib.sha256()
@@ -935,6 +1080,7 @@ class FeedDispatcher:
                 result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
             target_item = self._item_for_origin(item, unified_msg_origin)
+            target_item = await self._prepare_inline_media_for_send(target_item)
             extra_payloads: list[Any] = []
             if self._config.render_mode == "image":
                 try:
@@ -957,13 +1103,8 @@ class FeedDispatcher:
                         extra_payloads.extend(self._build_source_media_payloads(target_item))
             else:
                 try:
-                    chain = self._build_text_message_chain(target_item, include_media=False)
+                    chain = self._build_text_message_chain(target_item, include_media=True)
                     payload = self._as_chain_result_if_possible(target_item, chain)
-                    if self._is_compact_item(target_item):
-                        if self._should_send_compact_images(target_item):
-                            extra_payloads.extend(self._build_source_image_payloads(target_item))
-                    else:
-                        extra_payloads.extend(self._build_source_media_payloads(target_item))
                 except Exception:
                     result.transient_failure_count += 1
                     result.transient_failure_origins.append(unified_msg_origin)

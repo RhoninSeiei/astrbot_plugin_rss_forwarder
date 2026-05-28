@@ -253,6 +253,8 @@ class FeedParser:
         for key in ("send_images", "send_videos"):
             if key in raw:
                 item[key] = bool(raw.get(key))
+        if "proxy_url" in raw:
+            item["proxy_url"] = str(raw.get("proxy_url", "") or "").strip()
 
     @staticmethod
     def _strip_ns(tag: str) -> str:
