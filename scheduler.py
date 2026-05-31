@@ -4,7 +4,7 @@ import inspect
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -367,25 +367,32 @@ class RSSScheduler:
             await asyncio.sleep(30)
 
     async def _job_loop(self, job: JobConfig) -> None:
-        interval = self._resolve_interval(job)
         initial_delay = self._startup_delay_seconds()
         if initial_delay > 0:
             logger.info("job=%s waiting startup delay=%ss before first poll", job.id, initial_delay)
             await asyncio.sleep(initial_delay)
         while True:
-            await self._run_job_once_guarded(job)
-            await asyncio.sleep(interval)
+            if str(getattr(job, "cron", "") or "").strip():
+                delay = self._cron_next_delay_seconds(job)
+                logger.info("job=%s waiting cron delay=%ss before next poll", job.id, delay)
+                await asyncio.sleep(delay)
+                await self._run_job_once_guarded(job)
+            else:
+                await self._run_job_once_guarded(job)
+                await asyncio.sleep(self._resolve_interval(job))
 
     def _resolve_interval(self, job: JobConfig) -> int:
-        if job.interval_seconds > 0:
-            return job.interval_seconds
-
-        logger.warning(
-            "job=%s configured with cron=%s but cron scheduling is not implemented yet, fallback interval=%s",
-            job.id,
-            job.cron,
-            self._poll_interval_seconds(),
-        )
+        if getattr(job, "interval_seconds", 0) > 0:
+            return int(job.interval_seconds)
+        if str(getattr(job, "cron", "") or "").strip():
+            if self._parse_cron_expression(str(getattr(job, "cron", "") or "")) is not None:
+                return self._poll_interval_seconds()
+            logger.warning(
+                "job=%s configured with invalid cron=%s, fallback interval=%s",
+                job.id,
+                job.cron,
+                self._poll_interval_seconds(),
+            )
         return self._poll_interval_seconds()
 
     def _jobs(self) -> list[JobConfig]:
@@ -402,6 +409,90 @@ class RSSScheduler:
 
     def _poll_interval_seconds(self) -> int:
         return max(int(getattr(self._config, "poll_interval_seconds", 300) or 300), 1)
+
+
+    def _cron_next_delay_seconds(self, job: JobConfig, *, now: datetime | None = None) -> int:
+        cron = str(getattr(job, "cron", "") or "").strip()
+        parsed = self._parse_cron_expression(cron)
+        if parsed is None:
+            return self._resolve_interval(job)
+
+        base = now or self._local_now()
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=self._local_timezone())
+        candidate = (base + timedelta(minutes=1)).replace(second=0, microsecond=0)
+        for _ in range(366 * 24 * 60):
+            if self._cron_datetime_matches(candidate, parsed):
+                return max(int((candidate - base).total_seconds()), 1)
+            candidate += timedelta(minutes=1)
+        return self._poll_interval_seconds()
+
+    @classmethod
+    def _parse_cron_expression(cls, cron: str) -> tuple[set[int], set[int], set[int], set[int], set[int]] | None:
+        parts = str(cron or "").split()
+        if len(parts) != 5:
+            return None
+        ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+        parsed = []
+        for field, (minimum, maximum) in zip(parts, ranges, strict=True):
+            values = cls._parse_cron_field(field, minimum=minimum, maximum=maximum)
+            if not values:
+                return None
+            if maximum == 7:
+                values = {0 if value == 7 else value for value in values}
+            parsed.append(values)
+        return tuple(parsed)  # type: ignore[return-value]
+
+    @staticmethod
+    def _parse_cron_field(field: str, *, minimum: int, maximum: int) -> set[int]:
+        values: set[int] = set()
+        for part in str(field or "").split(","):
+            part = part.strip()
+            if not part:
+                return set()
+            step = 1
+            if "/" in part:
+                base, step_text = part.split("/", 1)
+                try:
+                    step = int(step_text)
+                except ValueError:
+                    return set()
+                if step <= 0:
+                    return set()
+            else:
+                base = part
+            if base == "*":
+                start, end = minimum, maximum
+            elif "-" in base:
+                start_text, end_text = base.split("-", 1)
+                try:
+                    start, end = int(start_text), int(end_text)
+                except ValueError:
+                    return set()
+            else:
+                try:
+                    start = end = int(base)
+                except ValueError:
+                    return set()
+            if start < minimum or end > maximum or start > end:
+                return set()
+            values.update(range(start, end + 1, step))
+        return values
+
+    @staticmethod
+    def _cron_datetime_matches(
+        value: datetime,
+        parsed: tuple[set[int], set[int], set[int], set[int], set[int]],
+    ) -> bool:
+        minutes, hours, days, months, weekdays = parsed
+        cron_weekday = (value.weekday() + 1) % 7
+        return (
+            value.minute in minutes
+            and value.hour in hours
+            and value.day in days
+            and value.month in months
+            and cron_weekday in weekdays
+        )
 
     def _local_timezone(self):
         timezone_name = str(getattr(self._config, "timezone", "Asia/Shanghai") or "Asia/Shanghai")
@@ -964,166 +1055,182 @@ class RSSScheduler:
                 items = self._call_parse(raw_items, job)
                 parsed_count = len(items)
                 await self._archive_items(items)
-                for item in items:
-                    if pushed_count >= batch_size:
-                        logger.info(
-                            "job=%s reached batch_size=%s, stop current run",
-                            job.id,
-                            batch_size,
-                        )
-                        break
-                    seen_keys = self._build_seen_keys(item)
-                    if not seen_keys:
-                        skipped_seen_count += 1
-                        continue
-                    pending_target_origins = await self._pending_target_origins(
+                if bool(getattr(job, "aggregate_enabled", False)):
+                    aggregate_counters = await self._run_aggregate_job_items(
                         job,
-                        seen_keys,
+                        items,
+                        feed_state_map,
                         dedup_ttl_seconds,
                     )
-                    has_target_scope = bool(self._resolve_job_target_origins(job))
-                    item_id = seen_keys[0]
-                    if any(key in seen_in_run for key in seen_keys):
-                        skipped_batch_duplicate_count += 1
-                        logger.warning(
-                            "skip job=%s duplicate item in current batch: id=%s title=%s",
-                            job.id,
-                            item_id,
-                            str(item.get("title", "")).strip(),
-                        )
-                        continue
-                    if has_target_scope:
-                        if not pending_target_origins:
+                    pushed_count = aggregate_counters["pushed_count"]
+                    skipped_seen_count = aggregate_counters["skipped_seen_count"]
+                    skipped_batch_duplicate_count = aggregate_counters["skipped_batch_duplicate_count"]
+                    skipped_dispatch_duplicate_count = aggregate_counters["skipped_dispatch_duplicate_count"]
+                    skipped_semantic_duplicate_count = aggregate_counters["skipped_semantic_duplicate_count"]
+                    skipped_history_count = aggregate_counters["skipped_history_count"]
+                    skipped_invalid_target_count = aggregate_counters["skipped_invalid_target_count"]
+                    dispatch_fail_count = aggregate_counters["dispatch_fail_count"]
+                else:
+                    for item in items:
+                        if pushed_count >= batch_size:
+                            logger.info(
+                                "job=%s reached batch_size=%s, stop current run",
+                                job.id,
+                                batch_size,
+                            )
+                            break
+                        seen_keys = self._build_seen_keys(item)
+                        if not seen_keys:
                             skipped_seen_count += 1
                             continue
-                    elif await self._has_seen_any(seen_keys, ttl_seconds=dedup_ttl_seconds):
-                        skipped_seen_count += 1
-                        continue
-                    seen_in_run.update(seen_keys)
-                    if self._should_mark_history_only(item, feed_state_map, bootstrap_only=True):
-                        if has_target_scope:
-                            await self._mark_seen_for_origins(
-                                job,
-                                pending_target_origins,
-                                seen_keys,
-                                ttl_seconds=dedup_ttl_seconds,
-                            )
-                        else:
-                            await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
-                        skipped_history_count += 1
-                        continue
-
-                    event_item = dict(item)
-                    event_item.setdefault("job_id", job.id)
-                    if has_target_scope:
-                        event_item["_target_origins"] = pending_target_origins
-                    event_item["compact_mode_enabled"] = bool(
-                        getattr(job, "compact_mode_enabled", False)
-                    )
-                    event_item["compact_mode_send_images"] = bool(
-                        getattr(job, "compact_mode_send_images", False)
-                    )
-                    semantic_result = await self._check_semantic_duplicate(
-                        job,
-                        event_item,
-                    )
-                    if semantic_result.duplicate:
-                        if has_target_scope:
-                            await self._mark_seen_for_origins(
-                                job,
-                                pending_target_origins,
-                                seen_keys,
-                                ttl_seconds=dedup_ttl_seconds,
-                            )
-                        else:
-                            await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
-                        await self._record_semantic_duplicate_match(job, semantic_result)
-                        skipped_semantic_duplicate_count += 1
-                        logger.info(
-                            "skip job=%s semantic duplicate item=%s matched=%s confidence=%.2f reason=%s",
-                            job.id,
-                            item_id,
-                            semantic_result.matched_record_id,
-                            semantic_result.confidence,
-                            semantic_result.reason,
-                        )
-                        continue
-                    if self._pipeline is not None:
-                        event_item = await self._pipeline.process(event_item)
-                    dispatch_result = await self._dispatcher.dispatch(event_item)
-                    if dispatch_result.success_count <= 0:
-                        if (
-                            dispatch_result.skipped_duplicate_count > 0
-                            and dispatch_result.permanent_failure_count == 0
-                            and dispatch_result.transient_failure_count == 0
-                        ):
-                            completed_origins = self._completed_dispatch_origins(
-                                job,
-                                pending_target_origins,
-                                dispatch_result,
-                            )
-                            if has_target_scope:
-                                await self._mark_seen_for_origins(
-                                    job,
-                                    completed_origins,
-                                    seen_keys,
-                                    ttl_seconds=dedup_ttl_seconds,
-                                )
-                            else:
-                                await self._mark_seen_all(
-                                    seen_keys,
-                                    ttl_seconds=dedup_ttl_seconds,
-                                )
-                            skipped_dispatch_duplicate_count += dispatch_result.skipped_duplicate_count
-                            continue
-                        permanent_or_disabled = (
-                            dispatch_result.permanent_failure_count > 0
-                            or dispatch_result.skipped_disabled_count > 0
-                        )
-                        if permanent_or_disabled and dispatch_result.transient_failure_count == 0:
-                            completed_origins = self._completed_dispatch_origins(
-                                job,
-                                pending_target_origins,
-                                dispatch_result,
-                            )
-                            if has_target_scope:
-                                await self._mark_seen_for_origins(
-                                    job,
-                                    completed_origins,
-                                    seen_keys,
-                                    ttl_seconds=dedup_ttl_seconds,
-                                )
-                            else:
-                                await self._mark_seen_all(
-                                    seen_keys,
-                                    ttl_seconds=dedup_ttl_seconds,
-                                )
-                            skipped_invalid_target_count += 1
-                            continue
-                        dispatch_fail_count += 1
-                        continue
-                    completed_origins = self._completed_dispatch_origins(
-                        job,
-                        pending_target_origins,
-                        dispatch_result,
-                    )
-                    if has_target_scope:
-                        await self._mark_seen_for_origins(
+                        pending_target_origins = await self._pending_target_origins(
                             job,
-                            completed_origins,
                             seen_keys,
-                            ttl_seconds=dedup_ttl_seconds,
+                            dedup_ttl_seconds,
                         )
-                    else:
-                        await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
-                    if dispatch_result.transient_failure_count <= 0:
-                        await self._remember_semantic_candidate(
+                        has_target_scope = bool(self._resolve_job_target_origins(job))
+                        item_id = seen_keys[0]
+                        if any(key in seen_in_run for key in seen_keys):
+                            skipped_batch_duplicate_count += 1
+                            logger.warning(
+                                "skip job=%s duplicate item in current batch: id=%s title=%s",
+                                job.id,
+                                item_id,
+                                str(item.get("title", "")).strip(),
+                            )
+                            continue
+                        if has_target_scope:
+                            if not pending_target_origins:
+                                skipped_seen_count += 1
+                                continue
+                        elif await self._has_seen_any(seen_keys, ttl_seconds=dedup_ttl_seconds):
+                            skipped_seen_count += 1
+                            continue
+                        seen_in_run.update(seen_keys)
+                        if self._should_mark_history_only(item, feed_state_map, bootstrap_only=True):
+                            if has_target_scope:
+                                await self._mark_seen_for_origins(
+                                    job,
+                                    pending_target_origins,
+                                    seen_keys,
+                                    ttl_seconds=dedup_ttl_seconds,
+                                )
+                            else:
+                                await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                            skipped_history_count += 1
+                            continue
+
+                        event_item = dict(item)
+                        event_item.setdefault("job_id", job.id)
+                        if has_target_scope:
+                            event_item["_target_origins"] = pending_target_origins
+                        event_item["compact_mode_enabled"] = bool(
+                            getattr(job, "compact_mode_enabled", False)
+                        )
+                        event_item["compact_mode_send_images"] = bool(
+                            getattr(job, "compact_mode_send_images", False)
+                        )
+                        semantic_result = await self._check_semantic_duplicate(
                             job,
                             event_item,
-                            seen_keys,
-                            ttl_seconds=self._job_semantic_dedup_ttl_seconds(job, dedup_ttl_seconds),
                         )
-                    pushed_count += 1
+                        if semantic_result.duplicate:
+                            if has_target_scope:
+                                await self._mark_seen_for_origins(
+                                    job,
+                                    pending_target_origins,
+                                    seen_keys,
+                                    ttl_seconds=dedup_ttl_seconds,
+                                )
+                            else:
+                                await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                            await self._record_semantic_duplicate_match(job, semantic_result)
+                            skipped_semantic_duplicate_count += 1
+                            logger.info(
+                                "skip job=%s semantic duplicate item=%s matched=%s confidence=%.2f reason=%s",
+                                job.id,
+                                item_id,
+                                semantic_result.matched_record_id,
+                                semantic_result.confidence,
+                                semantic_result.reason,
+                            )
+                            continue
+                        if self._pipeline is not None:
+                            event_item = await self._pipeline.process(event_item)
+                        dispatch_result = await self._dispatcher.dispatch(event_item)
+                        if dispatch_result.success_count <= 0:
+                            if (
+                                dispatch_result.skipped_duplicate_count > 0
+                                and dispatch_result.permanent_failure_count == 0
+                                and dispatch_result.transient_failure_count == 0
+                            ):
+                                completed_origins = self._completed_dispatch_origins(
+                                    job,
+                                    pending_target_origins,
+                                    dispatch_result,
+                                )
+                                if has_target_scope:
+                                    await self._mark_seen_for_origins(
+                                        job,
+                                        completed_origins,
+                                        seen_keys,
+                                        ttl_seconds=dedup_ttl_seconds,
+                                    )
+                                else:
+                                    await self._mark_seen_all(
+                                        seen_keys,
+                                        ttl_seconds=dedup_ttl_seconds,
+                                    )
+                                skipped_dispatch_duplicate_count += dispatch_result.skipped_duplicate_count
+                                continue
+                            permanent_or_disabled = (
+                                dispatch_result.permanent_failure_count > 0
+                                or dispatch_result.skipped_disabled_count > 0
+                            )
+                            if permanent_or_disabled and dispatch_result.transient_failure_count == 0:
+                                completed_origins = self._completed_dispatch_origins(
+                                    job,
+                                    pending_target_origins,
+                                    dispatch_result,
+                                )
+                                if has_target_scope:
+                                    await self._mark_seen_for_origins(
+                                        job,
+                                        completed_origins,
+                                        seen_keys,
+                                        ttl_seconds=dedup_ttl_seconds,
+                                    )
+                                else:
+                                    await self._mark_seen_all(
+                                        seen_keys,
+                                        ttl_seconds=dedup_ttl_seconds,
+                                    )
+                                skipped_invalid_target_count += 1
+                                continue
+                            dispatch_fail_count += 1
+                            continue
+                        completed_origins = self._completed_dispatch_origins(
+                            job,
+                            pending_target_origins,
+                            dispatch_result,
+                        )
+                        if has_target_scope:
+                            await self._mark_seen_for_origins(
+                                job,
+                                completed_origins,
+                                seen_keys,
+                                ttl_seconds=dedup_ttl_seconds,
+                            )
+                        else:
+                            await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                        if dispatch_result.transient_failure_count <= 0:
+                            await self._remember_semantic_candidate(
+                                job,
+                                event_item,
+                                seen_keys,
+                                ttl_seconds=self._job_semantic_dedup_ttl_seconds(job, dedup_ttl_seconds),
+                            )
+                        pushed_count += 1
 
                 feed_meta = self._extract_feed_meta(raw_items)
                 now_ts = int(time.time())
@@ -1165,6 +1272,320 @@ class RSSScheduler:
                 duration_ms,
                 error_summary or "",
             )
+
+
+    async def _run_aggregate_job_items(
+        self,
+        job: JobConfig,
+        items: list[dict[str, Any]],
+        feed_state_map: dict[str, dict[str, int | str]],
+        dedup_ttl_seconds: int,
+    ) -> dict[str, int]:
+        counters = {
+            "pushed_count": 0,
+            "skipped_seen_count": 0,
+            "skipped_batch_duplicate_count": 0,
+            "skipped_dispatch_duplicate_count": 0,
+            "skipped_semantic_duplicate_count": 0,
+            "skipped_history_count": 0,
+            "skipped_invalid_target_count": 0,
+            "dispatch_fail_count": 0,
+        }
+        seen_in_run: set[str] = set()
+        batch_size = max(int(getattr(job, "batch_size", 10) or 10), 1)
+        aggregate_limit = max(int(getattr(job, "aggregate_max_items", batch_size) or batch_size), 1)
+        item_limit = min(batch_size, aggregate_limit)
+        has_target_scope = bool(self._resolve_job_target_origins(job))
+        buckets: dict[tuple[str, ...], list[tuple[dict[str, Any], list[str]]]] = {}
+
+        for item in items:
+            if sum(len(entries) for entries in buckets.values()) >= item_limit:
+                logger.info(
+                    "job=%s reached aggregate item limit=%s, stop current run",
+                    job.id,
+                    item_limit,
+                )
+                break
+            seen_keys = self._build_seen_keys(item)
+            if not seen_keys:
+                counters["skipped_seen_count"] += 1
+                continue
+            pending_target_origins = await self._pending_target_origins(
+                job,
+                seen_keys,
+                dedup_ttl_seconds,
+            )
+            item_id = seen_keys[0]
+            if any(key in seen_in_run for key in seen_keys):
+                counters["skipped_batch_duplicate_count"] += 1
+                logger.warning(
+                    "skip job=%s duplicate item in current aggregate batch: id=%s title=%s",
+                    job.id,
+                    item_id,
+                    str(item.get("title", "")).strip(),
+                )
+                continue
+            if has_target_scope:
+                if not pending_target_origins:
+                    counters["skipped_seen_count"] += 1
+                    continue
+            elif await self._has_seen_any(seen_keys, ttl_seconds=dedup_ttl_seconds):
+                counters["skipped_seen_count"] += 1
+                continue
+            seen_in_run.update(seen_keys)
+            if self._should_mark_history_only(item, feed_state_map, bootstrap_only=True):
+                if has_target_scope:
+                    await self._mark_seen_for_origins(
+                        job,
+                        pending_target_origins,
+                        seen_keys,
+                        ttl_seconds=dedup_ttl_seconds,
+                    )
+                else:
+                    await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                counters["skipped_history_count"] += 1
+                continue
+
+            event_item = dict(item)
+            event_item.setdefault("job_id", job.id)
+            if has_target_scope:
+                event_item["_target_origins"] = pending_target_origins
+            event_item["compact_mode_enabled"] = bool(getattr(job, "compact_mode_enabled", False))
+            event_item["compact_mode_send_images"] = bool(getattr(job, "compact_mode_send_images", False))
+
+            semantic_result = await self._check_semantic_duplicate(job, event_item)
+            if semantic_result.duplicate:
+                if has_target_scope:
+                    await self._mark_seen_for_origins(
+                        job,
+                        pending_target_origins,
+                        seen_keys,
+                        ttl_seconds=dedup_ttl_seconds,
+                    )
+                else:
+                    await self._mark_seen_all(seen_keys, ttl_seconds=dedup_ttl_seconds)
+                await self._record_semantic_duplicate_match(job, semantic_result)
+                counters["skipped_semantic_duplicate_count"] += 1
+                logger.info(
+                    "skip job=%s semantic duplicate aggregate item=%s matched=%s confidence=%.2f reason=%s",
+                    job.id,
+                    item_id,
+                    semantic_result.matched_record_id,
+                    semantic_result.confidence,
+                    semantic_result.reason,
+                )
+                continue
+
+            buckets.setdefault(tuple(pending_target_origins), []).append((event_item, seen_keys))
+
+        for origins_tuple, entries in buckets.items():
+            pending_origins = list(origins_tuple)
+            aggregate_items = [entry[0] for entry in entries]
+            dispatch_result = await self._dispatch_aggregate_bucket(job, aggregate_items, pending_origins)
+            if dispatch_result.success_count <= 0:
+                if (
+                    dispatch_result.skipped_duplicate_count > 0
+                    and dispatch_result.permanent_failure_count == 0
+                    and dispatch_result.transient_failure_count == 0
+                ):
+                    completed_origins = self._completed_dispatch_origins(
+                        job,
+                        pending_origins,
+                        dispatch_result,
+                    )
+                    await self._mark_aggregate_entries_seen(
+                        job,
+                        entries,
+                        completed_origins,
+                        has_target_scope=has_target_scope,
+                        ttl_seconds=dedup_ttl_seconds,
+                    )
+                    counters["skipped_dispatch_duplicate_count"] += dispatch_result.skipped_duplicate_count
+                    continue
+                permanent_or_disabled = (
+                    dispatch_result.permanent_failure_count > 0
+                    or dispatch_result.skipped_disabled_count > 0
+                )
+                if permanent_or_disabled and dispatch_result.transient_failure_count == 0:
+                    completed_origins = self._completed_dispatch_origins(
+                        job,
+                        pending_origins,
+                        dispatch_result,
+                    )
+                    await self._mark_aggregate_entries_seen(
+                        job,
+                        entries,
+                        completed_origins,
+                        has_target_scope=has_target_scope,
+                        ttl_seconds=dedup_ttl_seconds,
+                    )
+                    counters["skipped_invalid_target_count"] += 1
+                    continue
+                counters["dispatch_fail_count"] += 1
+                continue
+
+            completed_origins = self._completed_dispatch_origins(
+                job,
+                pending_origins,
+                dispatch_result,
+            )
+            await self._mark_aggregate_entries_seen(
+                job,
+                entries,
+                completed_origins,
+                has_target_scope=has_target_scope,
+                ttl_seconds=dedup_ttl_seconds,
+            )
+            if dispatch_result.transient_failure_count <= 0:
+                for event_item, seen_keys in entries:
+                    await self._remember_semantic_candidate(
+                        job,
+                        event_item,
+                        seen_keys,
+                        ttl_seconds=self._job_semantic_dedup_ttl_seconds(job, dedup_ttl_seconds),
+                    )
+            counters["pushed_count"] += len(entries)
+        return counters
+
+    async def _dispatch_aggregate_bucket(
+        self,
+        job: JobConfig,
+        items: list[dict[str, Any]],
+        pending_origins: list[str],
+    ) -> Any:
+        first_origin = pending_origins[0] if pending_origins else ""
+        job_context = self._build_aggregate_context(job)
+        if self._pipeline is not None and callable(getattr(self._pipeline, "build_aggregate_content", None)):
+            content_result = await self._pipeline.build_aggregate_content(
+                job_context,
+                items,
+                unified_msg_origin=first_origin,
+            )
+        else:
+            content_result = self._build_aggregate_fallback_content(items)
+        aggregate_payload = self._build_aggregate_payload(
+            job,
+            items,
+            content_result,
+            pending_origins=pending_origins,
+        )
+        dispatcher_func = getattr(self._dispatcher, "dispatch_aggregate_digest", None)
+        if callable(dispatcher_func):
+            return await dispatcher_func(aggregate_payload)
+        return await self._dispatcher.dispatch_daily_digest(aggregate_payload)
+
+    async def _mark_aggregate_entries_seen(
+        self,
+        job: JobConfig,
+        entries: list[tuple[dict[str, Any], list[str]]],
+        completed_origins: list[str],
+        *,
+        has_target_scope: bool,
+        ttl_seconds: int,
+    ) -> None:
+        for _item, seen_keys in entries:
+            if has_target_scope:
+                await self._mark_seen_for_origins(
+                    job,
+                    completed_origins,
+                    seen_keys,
+                    ttl_seconds=ttl_seconds,
+                )
+            else:
+                await self._mark_seen_all(seen_keys, ttl_seconds=ttl_seconds)
+
+    def _build_aggregate_context(self, job: JobConfig) -> dict[str, Any]:
+        return {
+            "id": str(getattr(job, "id", "") or "").strip(),
+            "aggregate_provider_id": str(getattr(job, "aggregate_provider_id", "") or "").strip(),
+            "aggregate_max_items": int(getattr(job, "aggregate_max_items", 12) or 12),
+            "aggregate_llm_timeout_seconds": int(getattr(job, "aggregate_llm_timeout_seconds", 0) or 0),
+            "aggregate_prompt_template": str(getattr(job, "aggregate_prompt_template", "") or "").strip(),
+        }
+
+    def _build_aggregate_payload(
+        self,
+        job: JobConfig,
+        items: list[dict[str, Any]],
+        content_result: dict[str, Any],
+        *,
+        pending_origins: list[str],
+    ) -> dict[str, Any]:
+        now_ts = int(time.time())
+        title = str(content_result.get("title", "") or "").strip() or f"RSS 聚合：{len(items)} 条更新"
+        sections = list(content_result.get("sections", []) or [])
+        return {
+            "id": f"{job.id}:{now_ts}",
+            "job_id": job.id,
+            "target_ids": list(getattr(job, "target_ids", []) or []),
+            "_target_origins": list(pending_origins),
+            "title": title,
+            "content": str(content_result.get("content", "") or "").strip(),
+            "sections": sections,
+            "items": items,
+            "render_mode": str(getattr(job, "aggregate_render_mode", "text") or "text").strip().lower(),
+            "include_images": bool(getattr(job, "aggregate_include_images", True)),
+            "item_count": len(items),
+            "links": self._aggregate_links(items),
+            "source_text": self._aggregate_source_text(items),
+            "engine": str(content_result.get("engine", "fallback") or "fallback"),
+            "llm_reason": str(content_result.get("llm_reason", "") or ""),
+        }
+
+    @staticmethod
+    def _build_aggregate_fallback_content(items: list[dict[str, Any]]) -> dict[str, Any]:
+        sections = []
+        for item in items:
+            title = str(item.get("title", "") or "(无标题)").strip()
+            summary = str(item.get("summary", "") or item.get("content", "") or title).strip()
+            sections.append(
+                {
+                    "title": title,
+                    "summary": summary,
+                    "source": str(item.get("feed_title", "") or item.get("source", "") or "未知来源").strip(),
+                    "link": str(item.get("link", "") or "").strip(),
+                    "proxy_url": str(item.get("proxy_url", "") or "").strip(),
+                    "image_url": str(item.get("image_url", "") or "").strip(),
+                    "image_path": str(item.get("image_path", "") or "").strip(),
+                }
+            )
+        content = "\n".join(
+            f"{index}. {section['title']}"
+            for index, section in enumerate(sections, start=1)
+        )
+        first_title = sections[0]["title"] if sections else "RSS 聚合"
+        title = first_title if len(sections) == 1 else f"RSS 聚合：{first_title} 等 {len(sections)} 条更新"
+        return {
+            "title": title,
+            "content": content,
+            "sections": sections,
+            "engine": "fallback",
+        }
+
+    @staticmethod
+    def _aggregate_links(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in items:
+            link = str(item.get("link", "") or "").strip()
+            if not link:
+                continue
+            source = str(item.get("feed_title", "") or item.get("source", "") or "未知来源").strip()
+            key = (source, link)
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append({"source": source, "link": link})
+        return links
+
+    @staticmethod
+    def _aggregate_source_text(items: list[dict[str, Any]]) -> str:
+        sources: list[str] = []
+        for item in items:
+            source = str(item.get("feed_title", "") or item.get("source", "") or "").strip()
+            if source and source not in sources:
+                sources.append(source)
+        return " / ".join(sources)
 
     async def _call_fetch(self, job: JobConfig) -> list[dict]:
         fetch_func = self._fetcher.fetch

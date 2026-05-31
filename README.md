@@ -26,7 +26,7 @@
   - `query`：在 URL 上自动附加 `key`；
   - `header`：通过 `Authorization: Bearer <key>` 发送。
 - 支持任务级路由：一个 Job 绑定多个 feed + 多个 target。
-- 支持定时执行：`interval_seconds`（已实现）与 `cron`（预留字段，当前回退到 interval）。
+- 支持定时执行：`interval_seconds` 与 5 段 `cron` 表达式。
 - 支持启动首轮延迟：默认在插件启动后等待 `45` 秒再执行第一次轮询，避免平台适配器尚未就绪时抢跑。
 - 支持去重（KV + TTL）与 feed 状态（ETag/Last-Modified/last_success_time）。
 - 支持任务级语义重复判定：同一轮询任务中多个源报道同一事件时，可通过模型判定后只推送首条代表新闻。
@@ -58,7 +58,7 @@ sequenceDiagram
     participant Feed as RSS/Twitter 源
     participant Dedup as 去重与语义判定
     participant Target as 推送目标
-    Job->>Feed: 按 interval_seconds 拉取内容
+    Job->>Feed: 按 interval_seconds 或 cron 拉取内容
     Feed-->>Job: 返回新条目
     Job->>Dedup: 检查链接、GUID 和语义候选
     Dedup-->>Job: 返回新内容或重复内容
@@ -97,7 +97,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 
 ![轮询任务配置面板示意](./docs/assets/rss-forwarder-panel-job.svg)
 
-最少需要填写 `id`、`feed_ids[]`、`target_ids[]` 与 `interval_seconds`。如果多个源经常报道同一事件，可以开启 `semantic_dedup_enabled`，并在 `semantic_dedup_provider_id` 中从 AstrBot 模型列表选择一个模型。
+最少需要填写 `id`、`feed_ids[]`、`target_ids[]`，并在 `interval_seconds` 或 `cron` 中选择一种触发方式。如果多个源经常报道同一事件，可以开启 `semantic_dedup_enabled`，并在 `semantic_dedup_provider_id` 中从 AstrBot 模型列表选择一个模型。
 
 语义重复判定只在同一个轮询任务内生效。多个源报道同一事件时，模型会比较新条目和该任务近期候选内容，置信度达到阈值后保留首条代表新闻。`semantic_dedup_ttl_seconds` 控制候选保留时间，过期候选会自动移出判定输入。
 
@@ -146,8 +146,8 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
   - `id`（唯一）
   - `feed_ids[]`
   - `target_ids[]`
-  - `interval_seconds`（推荐）
-  - `cron`（可填，当前版本回退到 interval）
+  - `interval_seconds`（固定间隔轮询）
+  - `cron`（5 段表达式：分 时 日 月 周）
   - `batch_size`
   - `dedup_ttl_seconds`（填 `0` 表示继承全局 TTL）
   - `compact_mode_enabled`（简洁模式，只推送标题）
@@ -157,6 +157,12 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
   - `semantic_dedup_ttl_seconds`（语义候选保留时间，默认 `86400` 秒）
   - `semantic_dedup_max_candidates`（每条新内容最多比较的候选数量，默认 `20`）
   - `semantic_dedup_min_confidence`（判为重复所需置信度，默认 `0.82`）
+  - `aggregate_enabled`（把本轮新条目汇总成一条聚合推送）
+  - `aggregate_provider_id`（聚合总结模型，留空时继承全局 LLM 或目标会话模型）
+  - `aggregate_render_mode`（`text` 或 `image`）
+  - `aggregate_include_images`（聚合图卡中尽量渲染条目配图）
+  - `aggregate_max_items`（每次聚合送入模型的条目上限，同时受 `batch_size` 限制）
+  - `aggregate_llm_timeout_seconds`（聚合 LLM 超时，填 `0` 继承全局设置）
   - `enabled`
 - `daily_digests[]`
   - `id`（唯一）
@@ -210,6 +216,14 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 - 模型判定超时、缺少 provider 或返回无效 JSON 时，该条内容会继续推送
 - `jobs[].compact_mode_enabled=true` 时，该轮询任务只推送标题；全局 `render_mode=image` 下仍使用标题图卡，渲染失败时回退为标题文本
 - `jobs[].compact_mode_send_images=true` 时，简洁模式会附带条目图片；文本模式为“标题 + 图片”同一条消息，图片模式为“标题图卡 + 原文图片”
+- `jobs[].aggregate_enabled=true` 时，轮询任务会把本批次通过精确去重、目标级确认、历史过滤和语义重复判定的新条目汇总成一条消息；目标级缓存仍按单条内容记录，单个目标发送失败后只补发未确认目标
+- `jobs[].aggregate_render_mode=image` 时，聚合消息使用本地 Pillow 生成图卡；`aggregate_include_images=true` 时会尝试把 RSS 条目图片缓存为本地文件后渲染进对应段落
+
+### Cron 聚合推送
+
+`jobs[].cron` 使用 5 段表达式：`分 时 日 月 周`，例如 `0 9,18 * * *` 表示每天 09:00 和 18:00 触发。同一个任务同时配置 `cron` 与 `interval_seconds` 时，调度循环按 `cron` 触发，`interval_seconds` 仅作为兼容字段保留。
+
+开启 `aggregate_enabled` 后，任务会先按原有规则过滤历史内容、精确去重、目标级缓存和语义重复候选，再把剩余条目交给聚合模型生成动态标题与分段摘要。如果模型超时、缺少 provider 或返回无效 JSON，会回退为本地编号列表，避免任务中断。
 - 普通 RSS 文本推送会把正文和原文图片放在同一条消息链内发送；远程图片会优先缓存为本地 JPEG 后再交给平台适配器
 - `targets[].compact_mode` 可覆盖轮询任务的简洁模式；同一轮询任务内不同目标可分别使用简洁推送和正常推送
 - 多目标任务的内容确认按 `job + target + item` 记录，单个目标发送失败时，后续轮询只补发未确认目标
@@ -287,6 +301,12 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
       "semantic_dedup_ttl_seconds": 86400,
       "semantic_dedup_max_candidates": 20,
       "semantic_dedup_min_confidence": 0.82,
+      "aggregate_enabled": false,
+      "aggregate_provider_id": "",
+      "aggregate_render_mode": "text",
+      "aggregate_include_images": true,
+      "aggregate_max_items": 12,
+      "aggregate_llm_timeout_seconds": 0,
       "enabled": true
     }
   ],
@@ -390,7 +410,6 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 
 ## 已知限制
 
-- 当前未实现真正的 cron 调度器（配置 `cron` 时会回退到最小 interval 轮询）。
 - 主动消息依赖平台能力，若平台不支持会记录错误日志。
 
 ## 日报任务建议

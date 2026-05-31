@@ -11,7 +11,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from astrbot.api import logger
 
-from .config import DEFAULT_DAILY_DIGEST_PROMPT, RSSConfig
+from .config import DEFAULT_AGGREGATE_PROMPT, DEFAULT_DAILY_DIGEST_PROMPT, RSSConfig
 
 
 class FeedPipeline:
@@ -206,6 +206,80 @@ class FeedPipeline:
             "engine": "fallback",
             "llm_reason": llm_reason,
         }
+
+
+    async def build_aggregate_content(
+        self,
+        job: dict[str, Any],
+        items: list[dict[str, Any]],
+        *,
+        unified_msg_origin: str = "",
+    ) -> dict[str, Any]:
+        prepared_items = self._prepare_aggregate_items(
+            items,
+            limit=int(job.get("aggregate_max_items", len(items)) or len(items) or 1),
+        )
+        if not prepared_items:
+            return {
+                "title": "RSS 聚合",
+                "content": "",
+                "sections": [],
+                "engine": "empty",
+                "llm_reason": "empty_items",
+            }
+
+        llm_reason = "llm_disabled"
+        if self._config.llm_enabled:
+            parsed, llm_reason = await self._try_llm_aggregate_content(
+                job,
+                prepared_items,
+                unified_msg_origin=unified_msg_origin,
+            )
+            if parsed:
+                parsed["engine"] = "llm"
+                parsed["llm_reason"] = llm_reason
+                return parsed
+
+        fallback = self._build_aggregate_fallback_payload(prepared_items)
+        fallback["llm_reason"] = llm_reason
+        return fallback
+
+    async def _try_llm_aggregate_content(
+        self,
+        job: dict[str, Any],
+        items: list[dict[str, Any]],
+        *,
+        unified_msg_origin: str = "",
+    ) -> tuple[dict[str, Any] | None, str]:
+        provider_id = await self._resolve_aggregate_provider_id(job, unified_msg_origin=unified_msg_origin)
+        if not provider_id:
+            return None, "provider_missing"
+
+        prompt = self._build_aggregate_prompt(job, items)
+        llm_kwargs: dict[str, Any] = {
+            "chat_provider_id": provider_id,
+            "prompt": prompt,
+        }
+        profile = str(self._config.llm_profile or "").strip()
+        if profile:
+            llm_kwargs["profile"] = profile
+        llm_kwargs.update(self._build_llm_proxy_kwargs())
+
+        llm_call = self.context.llm_generate(**llm_kwargs)
+        try:
+            result = await asyncio.wait_for(
+                llm_call,
+                timeout=self._aggregate_llm_timeout_seconds(job),
+            )
+        except asyncio.TimeoutError:
+            return None, "timeout"
+        except Exception as exc:
+            return None, f"exception:{type(exc).__name__}"
+
+        parsed = self._parse_aggregate_result(self._extract_generated_text(result), items)
+        if not parsed:
+            return None, "invalid_payload"
+        return parsed, "ok"
 
     async def _translate_fields(
         self,
@@ -545,6 +619,297 @@ class FeedPipeline:
         if mode == "off":
             return {"trust_env": False}
         return {}
+
+
+    def _build_aggregate_prompt(self, job: dict[str, Any], items: list[dict[str, Any]]) -> str:
+        template = (
+            str(job.get("aggregate_prompt_template", DEFAULT_AGGREGATE_PROMPT)).strip()
+            or DEFAULT_AGGREGATE_PROMPT
+        )
+        payload = json.dumps(items, ensure_ascii=False, indent=2)
+        values = {
+            "job_id": str(job.get("id", "") or "").strip(),
+            "max_items": int(job.get("aggregate_max_items", len(items)) or len(items)),
+            "items": payload,
+        }
+        try:
+            return template.format(**values)
+        except Exception:
+            return DEFAULT_AGGREGATE_PROMPT.format(**values)
+
+    def _prepare_aggregate_items(self, items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for index, item in enumerate(items[: max(limit, 1)], start=1):
+            title = self._sanitize_text(str(item.get("title", "") or ""))
+            source = self._sanitize_text(
+                str(item.get("feed_title", "") or item.get("source", "") or "")
+            )
+            summary = self._sanitize_text(str(item.get("summary", "") or item.get("content", "") or ""))
+            if len(summary) > 260:
+                summary = summary[:259].rstrip() + "…"
+            image_url = self._first_item_image_url(item)
+            image_path = self._first_item_image_path(item)
+            prepared.append(
+                {
+                    "index": index,
+                    "source": source or "未知来源",
+                    "title": title or "(无标题)",
+                    "summary": summary,
+                    "link": str(item.get("link", "") or "").strip(),
+                    "published_at": str(item.get("published_at", "") or "").strip(),
+                    "proxy_url": str(item.get("proxy_url", "") or "").strip(),
+                    "image_url": image_url,
+                    "image_path": image_path,
+                }
+            )
+        return prepared
+
+    def _parse_aggregate_result(
+        self,
+        text: str,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        stripped = self._strip_code_fence(raw)
+        candidates = [stripped]
+        first = stripped.find("{")
+        last = stripped.rfind("}")
+        if first != -1 and last != -1 and first < last:
+            candidates.append(stripped[first : last + 1])
+
+        data = None
+        for candidate in candidates:
+            try:
+                loaded = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(loaded, dict):
+                data = loaded
+                break
+        if not isinstance(data, dict):
+            return None
+
+        title = self._sanitize_text(str(data.get("title", "") or ""))
+        sections_raw = data.get("sections")
+        if not isinstance(sections_raw, list):
+            return None
+        sections: list[dict[str, Any]] = []
+        for section_raw in sections_raw:
+            if not isinstance(section_raw, dict):
+                continue
+            section_title = self._sanitize_text(str(section_raw.get("title", "") or ""))
+            summary = self._sanitize_text(str(section_raw.get("summary", "") or ""))
+            indices = self._aggregate_item_indices(section_raw.get("item_indices"), max_index=len(items))
+            image_index = self._aggregate_image_index(section_raw.get("image_index"), indices)
+            image_url = self._image_url_for_index(items, image_index)
+            image_path = self._image_path_for_index(items, image_index)
+            source = self._aggregate_sources_for_indices(items, indices)
+            link = self._aggregate_link_for_indices(items, indices)
+            proxy_url = self._aggregate_proxy_for_index(items, image_index)
+            if not section_title and not summary:
+                continue
+            sections.append(
+                {
+                    "title": section_title or summary,
+                    "summary": summary or section_title,
+                    "item_indices": indices,
+                    "source": source,
+                    "link": link,
+                    "proxy_url": proxy_url,
+                    "image_url": image_url,
+                    "image_path": image_path,
+                }
+            )
+        if not sections:
+            return None
+        if not title:
+            title = self._build_aggregate_title_from_sections(sections)
+        return {
+            "title": title,
+            "content": self._build_aggregate_content_text(sections),
+            "sections": sections,
+        }
+
+    def _build_aggregate_fallback_payload(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        sections = []
+        for item in items:
+            index = int(item.get("index", len(sections) + 1) or len(sections) + 1)
+            sections.append(
+                {
+                    "title": str(item.get("title", "") or "(无标题)"),
+                    "summary": str(item.get("summary", "") or item.get("title", "") or ""),
+                    "item_indices": [index],
+                    "source": str(item.get("source", "") or "未知来源"),
+                    "link": str(item.get("link", "") or ""),
+                    "proxy_url": str(item.get("proxy_url", "") or ""),
+                    "image_url": str(item.get("image_url", "") or ""),
+                    "image_path": str(item.get("image_path", "") or ""),
+                }
+            )
+        return {
+            "title": self._build_aggregate_title_from_sections(sections),
+            "content": self._build_aggregate_content_text(sections),
+            "sections": sections,
+            "engine": "fallback",
+        }
+
+    @staticmethod
+    def _build_aggregate_title_from_sections(sections: list[dict[str, Any]]) -> str:
+        if not sections:
+            return "RSS 聚合"
+        first_title = str(sections[0].get("title", "") or "").strip() or "RSS 更新"
+        if len(sections) == 1:
+            return first_title
+        return f"RSS 聚合：{first_title} 等 {len(sections)} 条更新"
+
+    @staticmethod
+    def _build_aggregate_content_text(sections: list[dict[str, Any]]) -> str:
+        lines = []
+        for index, section in enumerate(sections, start=1):
+            title = str(section.get("title", "") or "").strip()
+            summary = str(section.get("summary", "") or "").strip()
+            if title and summary and title != summary:
+                lines.append(f"{index}. {title}：{summary}")
+            else:
+                lines.append(f"{index}. {title or summary}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _aggregate_item_indices(value: Any, *, max_index: int) -> list[int]:
+        raw_values = value if isinstance(value, list) else [value]
+        indices: list[int] = []
+        for raw in raw_values:
+            try:
+                index = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= index <= max_index and index not in indices:
+                indices.append(index)
+        return indices or [1]
+
+    @staticmethod
+    def _aggregate_image_index(value: Any, fallback_indices: list[int]) -> int:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            index = 0
+        if index > 0:
+            return index
+        return fallback_indices[0] if fallback_indices else 0
+
+    @staticmethod
+    def _image_url_for_index(items: list[dict[str, Any]], index: int) -> str:
+        if index <= 0 or index > len(items):
+            return ""
+        return str(items[index - 1].get("image_url", "") or "").strip()
+
+    @staticmethod
+    def _image_path_for_index(items: list[dict[str, Any]], index: int) -> str:
+        if index <= 0 or index > len(items):
+            return ""
+        return str(items[index - 1].get("image_path", "") or "").strip()
+
+    @staticmethod
+    def _aggregate_proxy_for_index(items: list[dict[str, Any]], index: int) -> str:
+        if index <= 0 or index > len(items):
+            return ""
+        return str(items[index - 1].get("proxy_url", "") or "").strip()
+
+    @staticmethod
+    def _aggregate_sources_for_indices(items: list[dict[str, Any]], indices: list[int]) -> str:
+        sources: list[str] = []
+        for index in indices:
+            if index <= 0 or index > len(items):
+                continue
+            source = str(items[index - 1].get("source", "") or "").strip()
+            if source and source not in sources:
+                sources.append(source)
+        return " / ".join(sources)
+
+    @staticmethod
+    def _aggregate_link_for_indices(items: list[dict[str, Any]], indices: list[int]) -> str:
+        for index in indices:
+            if index <= 0 or index > len(items):
+                continue
+            link = str(items[index - 1].get("link", "") or "").strip()
+            if link:
+                return link
+        return ""
+
+    @staticmethod
+    def _first_item_image_url(item: dict[str, Any]) -> str:
+        for key in ("image_url", "cover_url"):
+            value = str(item.get(key, "") or "").strip()
+            if value:
+                return value
+        image_urls = item.get("image_urls")
+        if isinstance(image_urls, list):
+            for value in image_urls:
+                text = str(value or "").strip()
+                if text:
+                    return text
+        source_items = item.get("source_items")
+        if isinstance(source_items, list):
+            for source_item in source_items:
+                if isinstance(source_item, dict):
+                    value = FeedPipeline._first_item_image_url(source_item)
+                    if value:
+                        return value
+        return ""
+
+    @staticmethod
+    def _first_item_image_path(item: dict[str, Any]) -> str:
+        for key in ("image_path", "cover_path"):
+            value = str(item.get(key, "") or "").strip()
+            if value:
+                return value
+        image_paths = item.get("image_paths")
+        if isinstance(image_paths, list):
+            for value in image_paths:
+                text = str(value or "").strip()
+                if text:
+                    return text
+        source_items = item.get("source_items")
+        if isinstance(source_items, list):
+            for source_item in source_items:
+                if isinstance(source_item, dict):
+                    value = FeedPipeline._first_item_image_path(source_item)
+                    if value:
+                        return value
+        return ""
+
+    async def _resolve_aggregate_provider_id(
+        self,
+        job: dict[str, Any],
+        *,
+        unified_msg_origin: str = "",
+    ) -> str:
+        provider_id = str(job.get("aggregate_provider_id", "") or "").strip()
+        if provider_id:
+            return provider_id
+        provider_id = str(self._config.llm_provider_id or "").strip()
+        if provider_id:
+            return provider_id
+        origin = str(unified_msg_origin or "").strip()
+        if not origin:
+            return ""
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(umo=origin)
+        except Exception as exc:
+            logger.warning("get_current_chat_provider_id for aggregate failed: %s", exc)
+            return ""
+        return str(provider_id or "").strip()
+
+    def _aggregate_llm_timeout_seconds(self, job: dict[str, Any]) -> float:
+        try:
+            value = float(job.get("aggregate_llm_timeout_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+        return float(self._config.llm_timeout_seconds)
 
     def _build_daily_digest_prompt(
         self,

@@ -14,6 +14,7 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from astrbot.api import logger
 
 from .config import RSSConfig
+from .aggregate_card_image import AggregateCardImageRenderer
 from .daily_digest_image import DailyDigestImageRenderer
 
 
@@ -59,6 +60,7 @@ class FeedDispatcher:
         self._job_target_origins = self._build_job_target_map(config)
         self._disabled_origins: set[str] = set()
         self._daily_digest_image_renderer = DailyDigestImageRenderer()
+        self._aggregate_image_renderer = AggregateCardImageRenderer()
         self._feed_send_images = {
             str(getattr(feed, "id", "") or "").strip(): bool(getattr(feed, "send_images", True))
             for feed in getattr(config, "feeds", [])
@@ -1154,6 +1156,155 @@ class FeedDispatcher:
                     unified_msg_origin,
                     exc,
                 )
+        return result
+
+
+    async def _build_aggregate_digest_fingerprint(self, digest: dict[str, Any], origin: str) -> str:
+        content = self._normalize_text(digest.get("content", ""))
+        section_text = json.dumps(digest.get("sections", []) or [], ensure_ascii=False, sort_keys=True)
+        payload = {
+            "origin": self._normalize_text(origin),
+            "aggregate_id": self._normalize_text(digest.get("id", "")),
+            "job_id": self._normalize_text(digest.get("job_id", "")),
+            "title": self._normalize_text(digest.get("title", "")),
+            "item_count": int(digest.get("item_count", 0) or 0),
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest() if content else "",
+            "sections_sha256": hashlib.sha256(section_text.encode("utf-8")).hexdigest() if section_text else "",
+            "render_mode": str(digest.get("render_mode", "text") or "text").strip(),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _resolve_aggregate_origins(self, digest: dict[str, Any]) -> list[str]:
+        target_origins = digest.get("_target_origins")
+        if isinstance(target_origins, str):
+            target_origins = [target_origins]
+        if isinstance(target_origins, list):
+            origins = [str(origin).strip() for origin in target_origins if str(origin).strip()]
+            if origins:
+                return origins
+        target_ids = list(digest.get("target_ids", []) or [])
+        return self._resolve_target_origins(target_ids)
+
+    def _build_aggregate_digest_text_chain(self, digest: dict[str, Any]):
+        title = str(digest.get("title", "") or "").strip() or "RSS 聚合"
+        content = str(digest.get("content", "") or "").strip()
+        links = list(digest.get("links", []) or [])
+        lines = [title]
+        if content:
+            lines.extend(["", content])
+        if links:
+            lines.append("")
+            for link in links[:5]:
+                if not isinstance(link, dict):
+                    continue
+                source = str(link.get("source", "") or "来源").strip()
+                url = str(link.get("link", "") or "").strip()
+                if url:
+                    lines.append(f"{source}: {url}")
+        return self._build_plain_chain("\n".join(lines).strip())
+
+    async def _build_aggregate_digest_image_payload(self, digest: dict[str, Any]):
+        prepared = await self._prepare_aggregate_digest_images(digest)
+        image_path = self._render_aggregate_digest_image_file(prepared)
+        chain = self._build_local_image_only_chain(image_path)
+        return self._as_chain_result_if_possible(prepared, chain)
+
+    async def _prepare_aggregate_digest_images(self, digest: dict[str, Any]) -> dict[str, Any]:
+        if not bool(digest.get("include_images", True)):
+            return digest
+        prepared = dict(digest)
+        sections = []
+        for section in list(digest.get("sections", []) or []):
+            if not isinstance(section, dict):
+                continue
+            current = dict(section)
+            if not str(current.get("image_path", "") or "").strip():
+                image_url = str(current.get("image_url", "") or "").strip()
+                if image_url:
+                    image_path = await self._cache_remote_image_for_send(image_url, current)
+                    if image_path:
+                        current["image_path"] = image_path
+            sections.append(current)
+        prepared["sections"] = sections
+        return prepared
+
+    def _render_aggregate_digest_image_file(self, digest: dict[str, Any]) -> str:
+        output_dir = self._aggregate_image_output_dir()
+        return self._aggregate_image_renderer.render(digest, output_dir)
+
+    def _aggregate_image_output_dir(self) -> Path:
+        try:
+            from astrbot.core.utils.astrbot_path import plugin_cache_dir
+
+            return Path(plugin_cache_dir()) / "aggregate_images"
+        except Exception:
+            pass
+        return Path("data") / "plugin_data" / "astrbot_plugin_rss_forwarder" / "aggregate_images"
+
+    async def dispatch_aggregate_digest(self, digest: dict[str, Any]) -> DispatchResult:
+        origins = self._resolve_aggregate_origins(digest)
+        if not origins:
+            logger.warning("skip aggregate digest dispatch: no available targets for digest=%s", digest)
+            return DispatchResult()
+
+        render_mode = str(digest.get("render_mode", "text") or "text").strip().lower()
+        try:
+            if render_mode == "image":
+                try:
+                    payload = await self._build_aggregate_digest_image_payload(digest)
+                except Exception as exc:
+                    logger.warning(
+                        "aggregate image render failed, fallback to text mode id=%s: %s",
+                        digest.get("id", ""),
+                        exc,
+                    )
+                    chain = self._build_aggregate_digest_text_chain(digest)
+                    payload = self._as_chain_result_if_possible(digest, chain)
+            else:
+                chain = self._build_aggregate_digest_text_chain(digest)
+                payload = self._as_chain_result_if_possible(digest, chain)
+        except Exception as exc:
+            logger.error("build aggregate payload failed id=%s: %s", digest.get("id", ""), exc)
+            return DispatchResult(transient_failure_count=1)
+
+        result = DispatchResult()
+        for unified_msg_origin in origins:
+            if unified_msg_origin in self._disabled_origins:
+                result.skipped_disabled_count += 1
+                result.skipped_disabled_origins.append(unified_msg_origin)
+                continue
+            fingerprint = await self._build_aggregate_digest_fingerprint(digest, unified_msg_origin)
+            if not await self._claim_dispatch(fingerprint):
+                result.skipped_duplicate_count += 1
+                result.skipped_duplicate_origins.append(unified_msg_origin)
+                logger.warning(
+                    "skip duplicate aggregate digest origin=%s digest=%s fingerprint=%s",
+                    unified_msg_origin,
+                    str(digest.get("id", "")).strip(),
+                    fingerprint[:12],
+                )
+                continue
+            try:
+                await self.context.send_message(unified_msg_origin, payload)
+                result.success_count += 1
+                result.success_origins.append(unified_msg_origin)
+                await self._confirm_dispatch(fingerprint)
+            except Exception as exc:
+                await self._release_dispatch(fingerprint)
+                if self._is_permanent_target_error(exc):
+                    self._disabled_origins.add(unified_msg_origin)
+                    result.permanent_failure_count += 1
+                    result.permanent_failure_origins.append(unified_msg_origin)
+                    logger.error(
+                        "聚合推送发送失败 origin=%s: %s。已将该 target 标记为无效，本次运行内不再重试。",
+                        unified_msg_origin,
+                        exc or "unknown error",
+                    )
+                    continue
+                result.transient_failure_count += 1
+                result.transient_failure_origins.append(unified_msg_origin)
+                logger.error("聚合推送发送失败 origin=%s: %s", unified_msg_origin, exc)
         return result
 
     async def dispatch_daily_digest(self, digest: dict[str, Any]) -> DispatchResult:

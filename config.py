@@ -20,6 +20,21 @@ DEFAULT_DAILY_DIGEST_PROMPT = (
 )
 
 
+DEFAULT_AGGREGATE_PROMPT = (
+    "请根据以下 RSS 条目生成一条适合主动推送的简体中文聚合新闻消息，严格只返回 JSON。\n"
+    "输出格式：{{\"title\":\"动态标题\",\"sections\":[{{\"title\":\"段落标题\","
+    "\"summary\":\"段落摘要\",\"item_indices\":[1],\"image_index\":1}}]}}\n"
+    "要求：\n"
+    "1) title 根据本次条目的实际主题生成，像新闻页面标题；\n"
+    "2) sections 最多 {max_items} 段，每段概括一个主题或事件；\n"
+    "3) 多个来源报道同一事件时合并成一段，并在 item_indices 中列出来源条目序号；\n"
+    "4) image_index 选择最适合该段配图的条目序号，没有配图可省略或填 0；\n"
+    "5) 不要输出 Markdown 代码块。\n\n"
+    "任务 ID：{job_id}\n"
+    "条目：\n{items}"
+)
+
+
 @dataclass(slots=True)
 class FeedConfig:
     id: str
@@ -63,6 +78,13 @@ class JobConfig:
     semantic_dedup_ttl_seconds: int = 24 * 60 * 60
     semantic_dedup_max_candidates: int = 20
     semantic_dedup_min_confidence: float = 0.82
+    aggregate_enabled: bool = False
+    aggregate_provider_id: str = ""
+    aggregate_render_mode: str = "text"
+    aggregate_include_images: bool = True
+    aggregate_max_items: int = 12
+    aggregate_llm_timeout_seconds: int = 0
+    aggregate_prompt_template: str = DEFAULT_AGGREGATE_PROMPT
     enabled: bool = True
 
 
@@ -223,6 +245,17 @@ class RSSConfig:
                 semantic_dedup_min_confidence=float(
                     item.get("semantic_dedup_min_confidence", 0.82) or 0
                 ),
+                aggregate_enabled=bool(item.get("aggregate_enabled", False)),
+                aggregate_provider_id=str(item.get("aggregate_provider_id", "")).strip(),
+                aggregate_render_mode=str(item.get("aggregate_render_mode", "text")).strip().lower()
+                or "text",
+                aggregate_include_images=bool(item.get("aggregate_include_images", True)),
+                aggregate_max_items=int(item.get("aggregate_max_items", 12) or 0),
+                aggregate_llm_timeout_seconds=int(item.get("aggregate_llm_timeout_seconds", 0) or 0),
+                aggregate_prompt_template=str(
+                    item.get("aggregate_prompt_template", DEFAULT_AGGREGATE_PROMPT)
+                ).strip()
+                or DEFAULT_AGGREGATE_PROMPT,
                 enabled=bool(item.get("enabled", True)),
             )
             for item in jobs_raw
@@ -453,6 +486,13 @@ class RSSConfig:
                 semantic_dedup_ttl_seconds=24 * 60 * 60,
                 semantic_dedup_max_candidates=20,
                 semantic_dedup_min_confidence=0.82,
+                aggregate_enabled=False,
+                aggregate_provider_id="",
+                aggregate_render_mode="text",
+                aggregate_include_images=True,
+                aggregate_max_items=12,
+                aggregate_llm_timeout_seconds=0,
+                aggregate_prompt_template=DEFAULT_AGGREGATE_PROMPT,
                 enabled=True,
             )
         ]
@@ -597,6 +637,24 @@ class RSSConfig:
                 if not 0 < job.semantic_dedup_min_confidence <= 1:
                     raise ConfigValidationError(
                         f"jobs[{job.id}].semantic_dedup_min_confidence 必须在 0 到 1 之间"
+                    )
+
+            if job.aggregate_enabled:
+                if job.aggregate_render_mode not in {"text", "image"}:
+                    raise ConfigValidationError(
+                        f"jobs[{job.id}].aggregate_render_mode 必须是 text 或 image"
+                    )
+                if job.aggregate_max_items <= 0:
+                    raise ConfigValidationError(
+                        f"jobs[{job.id}].aggregate_max_items 必须 > 0"
+                    )
+                if job.aggregate_llm_timeout_seconds < 0:
+                    raise ConfigValidationError(
+                        f"jobs[{job.id}].aggregate_llm_timeout_seconds 必须 >= 0"
+                    )
+                if not job.aggregate_prompt_template:
+                    raise ConfigValidationError(
+                        f"jobs[{job.id}].aggregate_prompt_template 不能为空"
                     )
 
             missing_feeds = [fid for fid in job.feed_ids if fid not in feed_ids]

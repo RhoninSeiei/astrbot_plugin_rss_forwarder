@@ -219,7 +219,7 @@
           "cron": {
             "type": "string",
             "default": "",
-            "description": "cron 表达式（当前版本可留空）"
+            "description": "cron 表达式，支持 5 段格式：分 时 日 月 周"
           },
           "interval_seconds": {
             "type": "int",
@@ -279,6 +279,53 @@
             "default": 0.82,
             "description": "语义重复置信度阈值",
             "hint": "模型返回置信度达到该值才会跳过推送。"
+          },
+          "aggregate_enabled": {
+            "type": "bool",
+            "default": false,
+            "description": "启用 cron 聚合推送",
+            "hint": "开启后当前任务在触发时会把本批次新条目汇总成一条聚合消息。"
+          },
+          "aggregate_provider_id": {
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "description": "聚合总结模型",
+            "hint": "留空时使用翻译增强中的 LLM Provider，再尝试当前目标会话模型。"
+          },
+          "aggregate_render_mode": {
+            "type": "string",
+            "default": "text",
+            "description": "聚合推送形式",
+            "options": [
+              "text",
+              "image"
+            ],
+            "hint": "text 发送文本聚合；image 使用本地 Pillow 渲染聚合卡片。"
+          },
+          "aggregate_include_images": {
+            "type": "bool",
+            "default": true,
+            "description": "聚合卡片包含配图",
+            "hint": "开启后会尝试把 RSS 条目的图片渲染到聚合卡片段落中。"
+          },
+          "aggregate_max_items": {
+            "type": "int",
+            "default": 12,
+            "description": "聚合条目上限",
+            "hint": "每次聚合最多送入模型的条目数，同时受 batch_size 限制。"
+          },
+          "aggregate_llm_timeout_seconds": {
+            "type": "int",
+            "default": 0,
+            "description": "聚合模型超时时间（秒）",
+            "hint": "填 0 表示继承全局 llm_timeout_seconds。"
+          },
+          "aggregate_prompt_template": {
+            "type": "text",
+            "default": "",
+            "description": "聚合提示词模板",
+            "hint": "留空时使用内置模板；可用变量：{job_id}、{max_items}、{items}。"
           },
           "enabled": {
             "type": "bool",
