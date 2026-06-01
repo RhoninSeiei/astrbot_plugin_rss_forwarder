@@ -122,6 +122,7 @@ class CronAggregateConfigTests(unittest.TestCase):
         self.assertIn("aggregate_enabled", job_items)
         self.assertEqual(job_items["aggregate_provider_id"]["_special"], "select_provider")
         self.assertEqual(job_items["aggregate_render_mode"]["default"], "text")
+        self.assertIn("冒号前短标题", job_items["aggregate_prompt_template"]["hint"])
 
 
 class CronScheduleTests(unittest.TestCase):
@@ -208,6 +209,8 @@ class AggregatePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["sections"][0]["proxy_url"], "http://127.0.0.1:7890")
         self.assertEqual(ctx.last_llm_kwargs["chat_provider_id"], "provider-aggregate")
         self.assertIn("NVIDIA driver released", ctx.last_llm_kwargs["prompt"])
+        self.assertIn("只写用于卡片页眉的短主题标题", ctx.last_llm_kwargs["prompt"])
+        self.assertIn("不要包含冒号", ctx.last_llm_kwargs["prompt"])
 
     async def test_build_aggregate_content_falls_back_to_sections(self):
         ctx = types.SimpleNamespace()
