@@ -325,7 +325,7 @@
             "type": "text",
             "default": "",
             "description": "聚合提示词模板",
-            "hint": "留空时使用内置模板；内置模板会要求聚合标题只写冒号前短标题；可用变量：{job_id}、{max_items}、{items}。"
+            "hint": "留空时使用内置模板；内置模板会要求聚合标题只写简体中文冒号前短标题，段落标题和摘要使用简体中文；可用变量：{job_id}、{max_items}、{items}。"
           },
           "enabled": {
             "type": "bool",

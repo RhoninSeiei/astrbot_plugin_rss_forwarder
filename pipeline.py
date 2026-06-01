@@ -240,7 +240,10 @@ class FeedPipeline:
                 parsed["llm_reason"] = llm_reason
                 return parsed
 
-        fallback = self._build_aggregate_fallback_payload(prepared_items)
+        fallback_items = prepared_items
+        if self._translation_enabled():
+            fallback_items = await self._translate_aggregate_fallback_items(items, prepared_items)
+        fallback = self._build_aggregate_fallback_payload(fallback_items)
         fallback["llm_reason"] = llm_reason
         return fallback
 
@@ -637,6 +640,57 @@ class FeedPipeline:
         except Exception:
             return DEFAULT_AGGREGATE_PROMPT.format(**values)
 
+    async def _translate_aggregate_fallback_items(
+        self,
+        items: list[dict[str, Any]],
+        prepared_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        translated_items: list[dict[str, Any]] = []
+        for raw_item, prepared in zip(items, prepared_items):
+            source = self._extract_source_fields(raw_item)
+            if not source["title"] and not source["summary"]:
+                translated_items.append(dict(prepared))
+                continue
+
+            translated: dict[str, str] = {}
+            selected_engine = "fallback"
+            llm_reason = "skipped_for_aggregate_fallback"
+            google_reason = "google_disabled"
+            github_reason = "github_models_disabled"
+
+            if self._config.google_translate_enabled:
+                translated, google_reason = await self._try_google_translate_fields(source)
+                if translated:
+                    selected_engine = "google"
+
+            if not translated and self._config.github_models_enabled:
+                translated, github_reason = await self._try_github_models_translate_fields(source)
+                if translated:
+                    selected_engine = "github_models"
+
+            if not translated:
+                translated = self._build_fallback_fields(source)
+
+            enriched = dict(prepared)
+            if translated.get("title"):
+                enriched["title"] = translated["title"]
+            if translated.get("summary"):
+                enriched["summary"] = translated["summary"]
+            translated_items.append(enriched)
+
+            logger.info(
+                "aggregate fallback translation item=%s engine=%s llm=%s google=%s github=%s",
+                self._item_ref(raw_item),
+                selected_engine,
+                llm_reason,
+                google_reason,
+                github_reason,
+            )
+
+        if len(translated_items) < len(prepared_items):
+            translated_items.extend(dict(item) for item in prepared_items[len(translated_items) :])
+        return translated_items
+
     def _prepare_aggregate_items(self, items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
         for index, item in enumerate(items[: max(limit, 1)], start=1):
@@ -762,7 +816,7 @@ class FeedPipeline:
         first_title = str(sections[0].get("title", "") or "").strip() or "RSS 更新"
         if len(sections) == 1:
             return first_title
-        return f"RSS 聚合：{first_title} 等 {len(sections)} 条更新"
+        return "RSS 聚合"
 
     @staticmethod
     def _build_aggregate_content_text(sections: list[dict[str, Any]]) -> str:

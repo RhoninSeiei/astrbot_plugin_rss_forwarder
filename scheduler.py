@@ -1463,6 +1463,14 @@ class RSSScheduler:
             )
         else:
             content_result = self._build_aggregate_fallback_content(items)
+        logger.info(
+            "job=%s aggregate content built: items=%s engine=%s llm=%s title=%s",
+            job.id,
+            len(items),
+            str(content_result.get("engine", "fallback") or "fallback"),
+            str(content_result.get("llm_reason", "") or ""),
+            str(content_result.get("title", "") or "")[:80],
+        )
         aggregate_payload = self._build_aggregate_payload(
             job,
             items,
@@ -1554,7 +1562,7 @@ class RSSScheduler:
             for index, section in enumerate(sections, start=1)
         )
         first_title = sections[0]["title"] if sections else "RSS 聚合"
-        title = first_title if len(sections) == 1 else f"RSS 聚合：{first_title} 等 {len(sections)} 条更新"
+        title = first_title if len(sections) == 1 else "RSS 聚合"
         return {
             "title": title,
             "content": content,

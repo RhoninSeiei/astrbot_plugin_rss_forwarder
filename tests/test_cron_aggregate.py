@@ -211,6 +211,7 @@ class AggregatePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NVIDIA driver released", ctx.last_llm_kwargs["prompt"])
         self.assertIn("只写用于卡片页眉的短主题标题", ctx.last_llm_kwargs["prompt"])
         self.assertIn("不要包含冒号", ctx.last_llm_kwargs["prompt"])
+        self.assertIn("sections[].title 和 sections[].summary 必须使用简体中文", ctx.last_llm_kwargs["prompt"])
 
     async def test_build_aggregate_content_falls_back_to_sections(self):
         ctx = types.SimpleNamespace()
@@ -231,6 +232,50 @@ class AggregatePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["engine"], "fallback")
         self.assertIn("New GPU appears", result["title"])
         self.assertEqual(result["sections"][0]["source"], "VideoCardz")
+
+    async def test_build_aggregate_content_fallback_uses_translation_without_llm_retry(self):
+        ctx = types.SimpleNamespace()
+        cfg = RSSConfig(
+            feeds=[],
+            targets=[],
+            jobs=[],
+            llm_enabled=True,
+            llm_provider_id="provider-default",
+            google_translate_enabled=True,
+            google_translate_api_key="key",
+        )
+        pipe = FeedPipeline(ctx, cfg)
+
+        async def aggregate_fail(job, items, unified_msg_origin=""):
+            return None, "timeout"
+
+        async def google_translate(source):
+            return {
+                "title": f"中文：{source['title']}",
+                "summary": f"中文摘要：{source['summary']}",
+            }, "ok"
+
+        async def llm_translate(entry, source):
+            raise AssertionError("aggregate fallback should not retry item LLM")
+
+        pipe._try_llm_aggregate_content = aggregate_fail
+        pipe._try_google_translate_fields = google_translate
+        pipe._try_llm_translate_fields = llm_translate
+
+        result = await pipe.build_aggregate_content(
+            {"id": "job-aggregate", "aggregate_max_items": 5},
+            [
+                {"feed_title": "TechPowerUp", "title": "NVIDIA news", "summary": "GPU update."},
+                {"feed_title": "VideoCardz", "title": "Intel news", "summary": "CPU update."},
+            ],
+        )
+
+        self.assertEqual(result["engine"], "fallback")
+        self.assertEqual(result["llm_reason"], "timeout")
+        self.assertEqual(result["title"], "RSS 聚合")
+        self.assertEqual(result["sections"][0]["title"], "中文：NVIDIA news")
+        self.assertEqual(result["sections"][0]["summary"], "中文摘要：GPU update.")
+        self.assertEqual(result["sections"][1]["title"], "中文：Intel news")
 
 
 class AggregateSchedulerTests(unittest.IsolatedAsyncioTestCase):
