@@ -181,7 +181,7 @@ class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.marked, [("guid-1", 123), ("guid-2", 123)])
         self.assertTrue(storage.updated)
 
-    async def test_permanent_target_failures_are_treated_as_seen(self):
+    async def test_permanent_target_failures_are_not_marked_seen(self):
         class FakeStorage:
             def __init__(self):
                 self.marked = []
@@ -231,7 +231,7 @@ class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):
 
         await scheduler._run_job_once_guarded(job)
 
-        self.assertEqual(storage.marked, [("item-1", 123)])
+        self.assertEqual(storage.marked, [])
 
     async def test_job_level_dedup_ttl_overrides_global_default(self):
         class FakeStorage:

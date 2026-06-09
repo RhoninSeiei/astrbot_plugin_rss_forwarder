@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
@@ -36,6 +37,7 @@ class FeedDispatcher:
     """分发层：负责把新内容推送到目标会话/渠道。"""
 
     _PENDING_DISPATCH_TTL_SECONDS = 120
+    _DISABLED_ORIGIN_TTL_SECONDS = 300
     _IMAGE_HASH_TIMEOUT_SECONDS = 8
     _IMAGE_HASH_MAX_BYTES = 8 * 1024 * 1024
     _INLINE_MEDIA_TIMEOUT_SECONDS = 15
@@ -58,7 +60,7 @@ class FeedDispatcher:
             for target in self._target_map.values()
         }
         self._job_target_origins = self._build_job_target_map(config)
-        self._disabled_origins: set[str] = set()
+        self._disabled_origins: dict[str, float] = {}
         self._daily_digest_image_renderer = DailyDigestImageRenderer()
         self._aggregate_image_renderer = AggregateCardImageRenderer()
         self._feed_send_images = {
@@ -83,6 +85,18 @@ class FeedDispatcher:
             if origins:
                 mapping[job.id] = origins
         return mapping
+
+    def _is_origin_temporarily_disabled(self, origin: str) -> bool:
+        disabled_until = self._disabled_origins.get(origin)
+        if not disabled_until:
+            return False
+        if disabled_until <= time.monotonic():
+            self._disabled_origins.pop(origin, None)
+            return False
+        return True
+
+    def _disable_origin_temporarily(self, origin: str) -> None:
+        self._disabled_origins[origin] = time.monotonic() + self._DISABLED_ORIGIN_TTL_SECONDS
 
     def _resolve_origins(self, item: dict[str, Any]) -> list[str]:
         target_origins = item.get("_target_origins")
@@ -1077,7 +1091,7 @@ class FeedDispatcher:
 
         result = DispatchResult()
         for unified_msg_origin in origins:
-            if unified_msg_origin in self._disabled_origins:
+            if self._is_origin_temporarily_disabled(unified_msg_origin):
                 result.skipped_disabled_count += 1
                 result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
@@ -1140,11 +1154,11 @@ class FeedDispatcher:
             except Exception as exc:
                 await self._release_dispatch(fingerprint)
                 if self._is_permanent_target_error(exc):
-                    self._disabled_origins.add(unified_msg_origin)
+                    self._disable_origin_temporarily(unified_msg_origin)
                     result.permanent_failure_count += 1
                     result.permanent_failure_origins.append(unified_msg_origin)
                     logger.error(
-                        "主动消息发送失败 origin=%s: %s。已将该 target 标记为无效，本次运行内不再重试。",
+                        "主动消息发送失败 origin=%s: %s。已将该 target 短时间暂停重试。",
                         unified_msg_origin,
                         exc or "unknown error",
                     )
@@ -1270,7 +1284,7 @@ class FeedDispatcher:
 
         result = DispatchResult()
         for unified_msg_origin in origins:
-            if unified_msg_origin in self._disabled_origins:
+            if self._is_origin_temporarily_disabled(unified_msg_origin):
                 result.skipped_disabled_count += 1
                 result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
@@ -1293,11 +1307,11 @@ class FeedDispatcher:
             except Exception as exc:
                 await self._release_dispatch(fingerprint)
                 if self._is_permanent_target_error(exc):
-                    self._disabled_origins.add(unified_msg_origin)
+                    self._disable_origin_temporarily(unified_msg_origin)
                     result.permanent_failure_count += 1
                     result.permanent_failure_origins.append(unified_msg_origin)
                     logger.error(
-                        "聚合推送发送失败 origin=%s: %s。已将该 target 标记为无效，本次运行内不再重试。",
+                        "聚合推送发送失败 origin=%s: %s。已将该 target 短时间暂停重试。",
                         unified_msg_origin,
                         exc or "unknown error",
                     )
@@ -1336,7 +1350,7 @@ class FeedDispatcher:
 
         result = DispatchResult()
         for unified_msg_origin in origins:
-            if unified_msg_origin in self._disabled_origins:
+            if self._is_origin_temporarily_disabled(unified_msg_origin):
                 result.skipped_disabled_count += 1
                 result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
@@ -1359,11 +1373,11 @@ class FeedDispatcher:
             except Exception as exc:
                 await self._release_dispatch(fingerprint)
                 if self._is_permanent_target_error(exc):
-                    self._disabled_origins.add(unified_msg_origin)
+                    self._disable_origin_temporarily(unified_msg_origin)
                     result.permanent_failure_count += 1
                     result.permanent_failure_origins.append(unified_msg_origin)
                     logger.error(
-                        "日报发送失败 origin=%s: %s。已将该 target 标记为无效，本次运行内不再重试。",
+                        "日报发送失败 origin=%s: %s。已将该 target 短时间暂停重试。",
                         unified_msg_origin,
                         exc or "unknown error",
                     )
@@ -1377,13 +1391,39 @@ class FeedDispatcher:
     def _is_permanent_target_error(exc: Exception) -> bool:
         text = str(exc or "").strip().lower()
         if not text:
-            return True
+            return False
+        transient_markers = (
+            "timeout",
+            "timed out",
+            "retcode=1200",
+            "rich media transfer failed",
+            "eventchecker failed",
+            "api not available",
+            "apinotavailable",
+            "serviceandmethod",
+            "ntevent",
+            "server disconnected",
+            "connection",
+            "temporarily",
+            "temporary",
+            "超时",
+            "暂时",
+            "临时",
+            "连接",
+        )
+        if any(marker in text for marker in transient_markers):
+            return False
         permanent_markers = (
             "not support",
             "unsupported",
-            "invalid",
+            "invalid target",
+            "invalid origin",
+            "invalid session",
+            "target not found",
+            "session not found",
             "not found",
-            "no such",
+            "no such target",
+            "no such session",
             "无效",
             "不支持",
             "不存在",

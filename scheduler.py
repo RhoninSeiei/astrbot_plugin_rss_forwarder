@@ -837,12 +837,14 @@ class RSSScheduler:
             return []
         completed = set(self._result_origins(result, "success_origins"))
         completed.update(self._result_origins(result, "skipped_duplicate_origins"))
-        completed.update(self._result_origins(result, "permanent_failure_origins"))
-        completed.update(self._result_origins(result, "skipped_disabled_origins"))
+        pending_set = set(pending_origins or target_origins)
         if completed:
-            pending_set = set(pending_origins or target_origins)
             return sorted(completed & pending_set)
-        if getattr(result, "transient_failure_count", 0) > 0:
+        if (
+            getattr(result, "permanent_failure_count", 0) > 0
+            or getattr(result, "skipped_disabled_count", 0) > 0
+            or getattr(result, "transient_failure_count", 0) > 0
+        ):
             return []
         return list(pending_origins or target_origins)
 
@@ -1193,18 +1195,19 @@ class RSSScheduler:
                                     pending_target_origins,
                                     dispatch_result,
                                 )
-                                if has_target_scope:
-                                    await self._mark_seen_for_origins(
-                                        job,
-                                        completed_origins,
-                                        seen_keys,
-                                        ttl_seconds=dedup_ttl_seconds,
-                                    )
-                                else:
-                                    await self._mark_seen_all(
-                                        seen_keys,
-                                        ttl_seconds=dedup_ttl_seconds,
-                                    )
+                                if completed_origins:
+                                    if has_target_scope:
+                                        await self._mark_seen_for_origins(
+                                            job,
+                                            completed_origins,
+                                            seen_keys,
+                                            ttl_seconds=dedup_ttl_seconds,
+                                        )
+                                    else:
+                                        await self._mark_seen_all(
+                                            seen_keys,
+                                            ttl_seconds=dedup_ttl_seconds,
+                                        )
                                 skipped_invalid_target_count += 1
                                 continue
                             dispatch_fail_count += 1
@@ -1412,13 +1415,14 @@ class RSSScheduler:
                         pending_origins,
                         dispatch_result,
                     )
-                    await self._mark_aggregate_entries_seen(
-                        job,
-                        entries,
-                        completed_origins,
-                        has_target_scope=has_target_scope,
-                        ttl_seconds=dedup_ttl_seconds,
-                    )
+                    if completed_origins:
+                        await self._mark_aggregate_entries_seen(
+                            job,
+                            entries,
+                            completed_origins,
+                            has_target_scope=has_target_scope,
+                            ttl_seconds=dedup_ttl_seconds,
+                        )
                     counters["skipped_invalid_target_count"] += 1
                     continue
                 counters["dispatch_fail_count"] += 1

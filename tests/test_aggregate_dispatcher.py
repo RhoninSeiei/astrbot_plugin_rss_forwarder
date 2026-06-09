@@ -165,6 +165,64 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(payload.chain[0], _Image)
         self.assertEqual(payload.chain[0].path, "/tmp/aggregate.png")
 
+    def test_target_error_classifier_keeps_transient_send_errors_retryable(self):
+        transient_messages = [
+            "",
+            "Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/sendMsg",
+            "EventChecker Failed: rich media transfer failed",
+            "ApiNotAvailable",
+            "retcode=1200",
+        ]
+        for message in transient_messages:
+            with self.subTest(message=message):
+                self.assertFalse(FeedDispatcher._is_permanent_target_error(Exception(message)))
+
+        permanent_messages = [
+            "unsupported target platform",
+            "target not found",
+            "no such target",
+            "目标不存在",
+            "平台不支持主动消息",
+        ]
+        for message in permanent_messages:
+            with self.subTest(message=message):
+                self.assertTrue(FeedDispatcher._is_permanent_target_error(Exception(message)))
+
+    async def test_transient_send_error_does_not_disable_origin(self):
+        class FailingContext(_FakeContext):
+            async def send_message(self, origin, payload):
+                self.sent.append((origin, payload))
+                raise Exception("")
+
+        context = FailingContext()
+        dispatcher = FeedDispatcher(
+            context=context,
+            config=self._build_config(),
+            storage=_FakeStorage(),
+        )
+        dispatcher._build_aggregate_digest_text_chain = lambda digest: "aggregate-payload"
+
+        digest = {
+            "id": "aggregate-1",
+            "job_id": "job-1",
+            "title": "聚合标题",
+            "content": "1. 内容",
+            "item_count": 1,
+            "_target_origins": ["qq:group:2"],
+            "target_ids": ["target-1"],
+            "render_mode": "text",
+        }
+
+        first = await dispatcher.dispatch_aggregate_digest(digest)
+        second = await dispatcher.dispatch_aggregate_digest(digest)
+
+        self.assertEqual(first.transient_failure_count, 1)
+        self.assertEqual(first.permanent_failure_count, 0)
+        self.assertEqual(second.transient_failure_count, 1)
+        self.assertEqual(second.skipped_disabled_count, 0)
+        self.assertEqual(context.sent, [("qq:group:2", "aggregate-payload"), ("qq:group:2", "aggregate-payload")])
+
+
 
 if __name__ == "__main__":
     unittest.main()

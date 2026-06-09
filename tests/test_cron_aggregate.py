@@ -405,6 +405,117 @@ class AggregateSchedulerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_aggregate_permanent_target_failure_keeps_items_pending(self):
+        group_origin = "qq:group:1"
+
+        class FakeStorage:
+            def __init__(self):
+                self.marked = []
+
+            def build_seen_keys(self, item):
+                return [item["guid"]]
+
+            async def has_seen(self, item_id, ttl_seconds=None):
+                return False
+
+            async def mark_seen(self, item_id, ttl_seconds=0):
+                self.marked.append((item_id, ttl_seconds))
+
+            async def get_feed_state(self, feed_id):
+                return {"last_success_time": 0}
+
+            async def update_feed_state(self, *args, **kwargs):
+                return {}
+
+            async def archive_digest_items(self, items):
+                self.archived = list(items)
+
+        class FakeFetcher:
+            async def fetch(self, job):
+                return [{"feed_id": "feed-1"}]
+
+        class FakeParser:
+            def parse(self, raw_items, job):
+                return [
+                    {
+                        "feed_id": "feed-1",
+                        "guid": "guid-1",
+                        "title": "NVIDIA driver released",
+                        "summary": "Driver fixes games.",
+                        "published_at": "",
+                    },
+                    {
+                        "feed_id": "feed-1",
+                        "guid": "guid-2",
+                        "title": "AMD BIOS update",
+                        "summary": "New BIOS improves memory training.",
+                        "published_at": "",
+                    },
+                ]
+
+        class FakePipeline:
+            async def build_aggregate_content(self, job, items, unified_msg_origin=""):
+                return {
+                    "title": "硬件快讯",
+                    "content": "1. NVIDIA 驱动更新\n2. AMD BIOS 更新",
+                    "sections": [],
+                    "engine": "llm",
+                    "llm_reason": "ok",
+                }
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.aggregates = []
+
+            async def dispatch_aggregate_digest(self, digest):
+                self.aggregates.append(digest)
+                return DispatchResult(
+                    permanent_failure_count=1,
+                    permanent_failure_origins=[group_origin],
+                )
+
+        config = RSSConfig.from_context(
+            {
+                "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
+                "targets": [
+                    {
+                        "id": "target-1",
+                        "platform": "qq",
+                        "unified_msg_origin": group_origin,
+                        "enabled": True,
+                    }
+                ],
+                "jobs": [
+                    {
+                        "id": "job-aggregate",
+                        "feed_ids": ["feed-1"],
+                        "target_ids": ["target-1"],
+                        "interval_seconds": 300,
+                        "aggregate_enabled": True,
+                        "aggregate_max_items": 5,
+                        "enabled": True,
+                    }
+                ],
+                "dedup_ttl_seconds": 123,
+            }
+        )
+        storage = FakeStorage()
+        dispatcher = FakeDispatcher()
+        scheduler = RSSScheduler(
+            config=config,
+            fetcher=FakeFetcher(),
+            parser=FakeParser(),
+            dispatcher=dispatcher,
+            storage=storage,
+            pipeline=FakePipeline(),
+        )
+
+        await scheduler._run_job_once_guarded(config.jobs[0])
+
+        self.assertEqual(len(dispatcher.aggregates), 1)
+        self.assertEqual(storage.marked, [])
+
+
 
 if __name__ == "__main__":
     unittest.main()
