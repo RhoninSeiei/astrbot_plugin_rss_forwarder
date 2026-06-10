@@ -41,9 +41,15 @@ DailyDigestImageRenderer = dispatcher_module.DailyDigestImageRenderer
 
 
 class _FakeContext:
-    def __init__(self, fail_first_send: bool = False, fail_on_calls: set[int] | None = None):
+    def __init__(
+        self,
+        fail_first_send: bool = False,
+        fail_on_calls: set[int] | None = None,
+        send_results: list[object] | None = None,
+    ):
         self.fail_first_send = fail_first_send
         self.fail_on_calls = set(fail_on_calls or set())
+        self.send_results = list(send_results or [])
         if fail_first_send:
             self.fail_on_calls.add(1)
         self.send_calls = 0
@@ -54,6 +60,9 @@ class _FakeContext:
         if self.send_calls in self.fail_on_calls:
             raise RuntimeError("temporary send failure")
         self.sent.append((unified_msg_origin, payload))
+        if self.send_results:
+            return self.send_results.pop(0)
+        return None
 
 
 class _FakeStorage:
@@ -293,6 +302,33 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context.sent), 1)
         self.assertEqual(len(storage.confirms), 1)
 
+    async def test_daily_digest_send_false_releases_dispatch_claim_for_retry(self):
+        context = _FakeContext(send_results=[False, True])
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._build_daily_digest_text_chain = lambda digest: "digest-payload"
+
+        digest = {
+            "id": "digest-send-false",
+            "title": "芯片日报",
+            "target_ids": ["target-1"],
+            "render_mode": "text",
+            "window_start_text": "2026-03-27 09:00",
+            "window_end_text": "2026-03-28 09:00",
+            "item_count": 2,
+            "content": "1. [TechPowerUp] AMD 推出新 CPU",
+        }
+
+        first = await dispatcher.dispatch_daily_digest(digest)
+        second = await dispatcher.dispatch_daily_digest(digest)
+
+        self.assertEqual(first.transient_failure_count, 1)
+        self.assertEqual(first.success_count, 0)
+        self.assertEqual(second.success_count, 1)
+        self.assertEqual(len(storage.releases), 1)
+        self.assertEqual(len(context.sent), 2)
+        self.assertEqual(len(storage.confirms), 1)
+
     async def test_duplicate_dispatch_uses_source_fields_when_translation_differs(self):
         context = _FakeContext()
         storage = _FakeStorage()
@@ -357,6 +393,30 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.success_count, 1)
         self.assertEqual(len(storage.releases), 1)
         self.assertEqual(len(context.sent), 1)
+
+    async def test_send_false_releases_dispatch_claim_for_retry(self):
+        context = _FakeContext(send_results=[False, True])
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._build_text_message_chain = lambda item, **kwargs: "payload"
+
+        item = {
+            "job_id": "job-1",
+            "guid": "guid-send-false",
+            "title": "Send False",
+            "summary": "Send false summary",
+            "link": "https://example.com/post/send-false",
+            "published_at": "2026-03-27T00:02:00+00:00",
+        }
+
+        first = await dispatcher.dispatch(item)
+        second = await dispatcher.dispatch(item)
+
+        self.assertEqual(first.transient_failure_count, 1)
+        self.assertEqual(first.success_count, 0)
+        self.assertEqual(second.success_count, 1)
+        self.assertEqual(len(storage.releases), 1)
+        self.assertEqual(len(context.sent), 2)
 
     async def test_daily_digest_dispatch_uses_target_ids_and_blocks_duplicates(self):
         context = _FakeContext()

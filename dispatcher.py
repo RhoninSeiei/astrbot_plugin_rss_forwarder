@@ -1083,6 +1083,21 @@ class FeedDispatcher:
                 logger.warning("build rendered image chain failed, fallback to image_result: %s", exc)
         return image_result
 
+    @staticmethod
+    def _ensure_send_message_success(send_result: Any, unified_msg_origin: str) -> None:
+        if send_result is False:
+            raise RuntimeError(f"context.send_message returned False origin={unified_msg_origin}")
+
+    @staticmethod
+    def _payload_debug_label(payload: Any) -> str:
+        chain = getattr(payload, "chain", None)
+        if isinstance(chain, list):
+            component_names = ",".join(type(component).__name__ for component in chain[:4])
+            if len(chain) > 4:
+                component_names += ",..."
+            return f"{type(payload).__name__}[{component_names}]"
+        return type(payload).__name__
+
     async def dispatch(self, item: dict) -> DispatchResult:
         origins = self._resolve_origins(item)
         if not origins:
@@ -1138,13 +1153,15 @@ class FeedDispatcher:
                 )
                 continue
             try:
-                await self.context.send_message(unified_msg_origin, payload)
+                send_result = await self.context.send_message(unified_msg_origin, payload)
+                self._ensure_send_message_success(send_result, unified_msg_origin)
                 result.success_count += 1
                 result.success_origins.append(unified_msg_origin)
                 await self._confirm_dispatch(fingerprint)
                 for extra_payload in extra_payloads:
                     try:
-                        await self.context.send_message(unified_msg_origin, extra_payload)
+                        extra_send_result = await self.context.send_message(unified_msg_origin, extra_payload)
+                        self._ensure_send_message_success(extra_send_result, unified_msg_origin)
                     except Exception as exc:
                         logger.warning(
                             "extra source media send failed origin=%s: %s",
@@ -1300,10 +1317,18 @@ class FeedDispatcher:
                 )
                 continue
             try:
-                await self.context.send_message(unified_msg_origin, payload)
+                send_result = await self.context.send_message(unified_msg_origin, payload)
+                self._ensure_send_message_success(send_result, unified_msg_origin)
                 result.success_count += 1
                 result.success_origins.append(unified_msg_origin)
                 await self._confirm_dispatch(fingerprint)
+                logger.info(
+                    "aggregate digest sent origin=%s digest=%s render_mode=%s payload=%s",
+                    unified_msg_origin,
+                    str(digest.get("id", "") or "").strip(),
+                    render_mode,
+                    self._payload_debug_label(payload),
+                )
             except Exception as exc:
                 await self._release_dispatch(fingerprint)
                 if self._is_permanent_target_error(exc):
@@ -1366,10 +1391,18 @@ class FeedDispatcher:
                 )
                 continue
             try:
-                await self.context.send_message(unified_msg_origin, payload)
+                send_result = await self.context.send_message(unified_msg_origin, payload)
+                self._ensure_send_message_success(send_result, unified_msg_origin)
                 result.success_count += 1
                 result.success_origins.append(unified_msg_origin)
                 await self._confirm_dispatch(fingerprint)
+                logger.info(
+                    "daily digest sent origin=%s digest=%s render_mode=%s payload=%s",
+                    unified_msg_origin,
+                    str(digest.get("id", "") or "").strip(),
+                    render_mode,
+                    self._payload_debug_label(payload),
+                )
             except Exception as exc:
                 await self._release_dispatch(fingerprint)
                 if self._is_permanent_target_error(exc):

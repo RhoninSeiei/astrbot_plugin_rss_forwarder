@@ -62,11 +62,13 @@ class _FakeStorage:
 
 
 class _FakeContext:
-    def __init__(self):
+    def __init__(self, send_result=True):
+        self.send_result = send_result
         self.sent = []
 
     async def send_message(self, origin, payload):
         self.sent.append((origin, payload))
+        return self.send_result
 
 
 class _MessageChain:
@@ -220,6 +222,36 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.permanent_failure_count, 0)
         self.assertEqual(second.transient_failure_count, 1)
         self.assertEqual(second.skipped_disabled_count, 0)
+        self.assertEqual(context.sent, [("qq:group:2", "aggregate-payload"), ("qq:group:2", "aggregate-payload")])
+
+    async def test_aggregate_send_false_releases_dispatch_claim_for_retry(self):
+        context = _FakeContext(send_result=False)
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(
+            context=context,
+            config=self._build_config(),
+            storage=storage,
+        )
+        dispatcher._build_aggregate_digest_text_chain = lambda digest: "aggregate-payload"
+
+        digest = {
+            "id": "aggregate-1",
+            "job_id": "job-1",
+            "title": "聚合标题",
+            "content": "1. 内容",
+            "item_count": 1,
+            "_target_origins": ["qq:group:2"],
+            "target_ids": ["target-1"],
+            "render_mode": "text",
+        }
+
+        first = await dispatcher.dispatch_aggregate_digest(digest)
+        context.send_result = True
+        second = await dispatcher.dispatch_aggregate_digest(digest)
+
+        self.assertEqual(first.transient_failure_count, 1)
+        self.assertEqual(first.success_count, 0)
+        self.assertEqual(second.success_count, 1)
         self.assertEqual(context.sent, [("qq:group:2", "aggregate-payload"), ("qq:group:2", "aggregate-payload")])
 
 
