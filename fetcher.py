@@ -3,11 +3,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from urllib.request import ProxyHandler, Request, build_opener, getproxies
+from urllib.request import getproxies
 
 from astrbot.api import logger
 
 from .config import RSSConfig
+from .source_http import request_source
 from .storage import FeedStorage
 from .twitter_source import TwitterTimelineFetcher
 
@@ -29,6 +30,7 @@ class FeedFetcher:
         self._storage = storage
         self._twitter_fetcher = TwitterTimelineFetcher()
         self._twitter_media_cache_dir = storage.plugin_cache_dir() / "twitter_media"
+        self._relaxed_tls_warned_feed_ids: set[str] = set()
 
     async def fetch(self, job) -> list[dict[str, Any]]:
         feed_ids = list(getattr(job, "feed_ids", []) or [])
@@ -47,6 +49,7 @@ class FeedFetcher:
             feed = feed_map.get(feed_id)
             if feed is None:
                 continue
+            self._warn_if_relaxed_tls(feed)
             if getattr(feed, "source_type", "rss") == "twitter":
                 fetched_twitter = await self._fetch_single_twitter_feed(feed)
                 if fetched_twitter is None:
@@ -84,30 +87,24 @@ class FeedFetcher:
             headers["If-Modified-Since"] = last_modified
 
         def _request_once():
-            if self._should_use_httpx(proxy_url):
-                return self._request_with_httpx(
-                    feed_id=feed.id,
-                    url=url,
-                    headers=headers,
-                    proxy_url=proxy_url,
-                    timeout=feed.timeout,
-                )
-
-            req = Request(url=url, headers=headers)
-            opener = (
-                build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
-                if proxy_url
-                else build_opener()
+            response = request_source(
+                url=url,
+                headers=headers,
+                proxy_url=proxy_url,
+                timeout=feed.timeout,
+                verify_ssl=bool(getattr(feed, "verify_ssl", True)),
+                max_bytes=None,
+                max_redirects=None,
             )
-            with opener.open(req, timeout=feed.timeout) as resp:  # noqa: S310
-                body = resp.read().decode("utf-8", errors="ignore")
-                return FetchedFeed(
-                    feed_id=feed.id,
-                    body=body,
-                    etag=str(resp.headers.get("ETag", "")).strip(),
-                    last_modified=str(resp.headers.get("Last-Modified", "")).strip(),
-                    status=int(getattr(resp, "status", 200) or 200),
-                )
+            return FetchedFeed(
+                feed_id=feed.id,
+                body=response.body.decode("utf-8", errors="ignore"),
+                etag=str(response.headers.get("ETag", "")).strip(),
+                last_modified=str(
+                    response.headers.get("Last-Modified", "")
+                ).strip(),
+                status=int(response.status or 200),
+            )
 
         try:
             return await asyncio.to_thread(_request_once)
@@ -168,35 +165,6 @@ class FeedFetcher:
         return url, headers
 
     @staticmethod
-    def _request_with_httpx(
-        *,
-        feed_id: str,
-        url: str,
-        headers: dict[str, str],
-        proxy_url: str,
-        timeout: int,
-    ) -> FetchedFeed:
-        import httpx
-
-        kwargs: dict[str, Any] = {
-            "headers": headers,
-            "timeout": timeout,
-            "follow_redirects": True,
-        }
-        if proxy_url:
-            kwargs["proxy"] = proxy_url
-        with httpx.Client(**kwargs) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            return FetchedFeed(
-                feed_id=feed_id,
-                body=response.text,
-                etag=str(response.headers.get("ETag", "")).strip(),
-                last_modified=str(response.headers.get("Last-Modified", "")).strip(),
-                status=int(response.status_code or 200),
-            )
-
-    @staticmethod
     def _should_use_httpx(proxy_url: str) -> bool:
         return str(proxy_url or "").strip().lower().startswith(
             ("socks://", "socks5://", "socks5h://", "socks4://")
@@ -207,6 +175,18 @@ class FeedFetcher:
         if str(proxy_url or "").strip():
             return "feed"
         return "system" if getproxies() else "off"
+
+    def _warn_if_relaxed_tls(self, feed) -> None:
+        if bool(getattr(feed, "verify_ssl", True)):
+            return
+        feed_id = str(getattr(feed, "id", "") or "")
+        if feed_id in self._relaxed_tls_warned_feed_ids:
+            return
+        self._relaxed_tls_warned_feed_ids.add(feed_id)
+        logger.warning(
+            "feed=%s source TLS certificate verification is disabled",
+            feed_id,
+        )
 
     @staticmethod
     def _redact_url_for_log(url: str) -> str:

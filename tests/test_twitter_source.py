@@ -1,6 +1,10 @@
+import inspect
 import sys
 import types
 import unittest
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from unittest import mock
 
 
 astrbot_module = types.ModuleType("astrbot")
@@ -13,7 +17,26 @@ astrbot_api_module.logger = types.SimpleNamespace(
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules["astrbot.api"] = astrbot_api_module
 
-from twitter_source import TwitterTimelineFetcher
+ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_NAME = "astrbot_twitter_source_testpkg"
+package_module = types.ModuleType(PACKAGE_NAME)
+package_module.__path__ = [str(ROOT)]
+sys.modules[PACKAGE_NAME] = package_module
+
+
+def _load_module(module_name: str):
+    full_name = f"{PACKAGE_NAME}.{module_name}"
+    spec = spec_from_file_location(full_name, ROOT / f"{module_name}.py")
+    module = module_from_spec(spec)
+    sys.modules[full_name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+source_http_module = _load_module("source_http")
+twitter_module = _load_module("twitter_source")
+TwitterTimelineFetcher = twitter_module.TwitterTimelineFetcher
 
 
 class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
@@ -74,7 +97,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         fetcher = TwitterTimelineFetcher()
 
-        def fake_open_text(url, proxy_url, timeout):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl):
             if url.endswith("/alice"):
                 return """
                 <div class="timeline-item"><a class="tweet-link" href="/alice/status/300"></a></div>
@@ -116,7 +139,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
         opened_urls = []
         fetcher = TwitterTimelineFetcher()
 
-        def fake_open_text(url, proxy_url, timeout):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl):
             opened_urls.append(url)
             if url.endswith("/alice"):
                 return """
@@ -144,6 +167,155 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [url for url in opened_urls if "/status/" in url],
             ["https://nitter.example.com/alice/status/300"],
+        )
+
+    async def test_fetch_passes_relaxed_tls_to_timeline_and_detail(self):
+        class Feed:
+            id = "tw-relaxed"
+            username = "alice"
+            nitter_url = "https://nitter.example.com"
+            url = ""
+            proxy_url = "socks5://127.0.0.1:1080"
+            timeout = 14
+            verify_ssl = False
+            send_images = True
+            send_videos = True
+            send_link = True
+            max_new_items = 1
+
+        calls = []
+
+        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+            calls.append((url, proxy_url, timeout, verify_ssl))
+            if url.endswith("/alice"):
+                return '<a href="/alice/status/200"></a>'
+            return """
+            <div class="main-tweet">
+              <a class="fullname">Alice</a>
+              <div class="tweet-content media-body">relaxed item</div>
+            </div>
+            """
+
+        with mock.patch.object(
+            TwitterTimelineFetcher,
+            "_open_text",
+            staticmethod(fake_open_text),
+        ):
+            result = await TwitterTimelineFetcher().fetch(
+                Feed(),
+                {"since_id": "100"},
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "https://nitter.example.com/alice",
+                    "socks5://127.0.0.1:1080",
+                    14,
+                    False,
+                ),
+                (
+                    "https://nitter.example.com/alice/status/200",
+                    "socks5://127.0.0.1:1080",
+                    14,
+                    False,
+                ),
+            ],
+        )
+
+    def test_open_text_uses_shared_source_transport(self):
+        parameter_count = len(inspect.signature(TwitterTimelineFetcher._open_text).parameters)
+        if parameter_count != 4:
+            self.fail("_open_text must accept verify_ssl as its fourth parameter")
+
+        captured = {}
+
+        def fake_request_source(**kwargs):
+            captured.update(kwargs)
+            return source_http_module.SourceHttpResponse(
+                body="<html>共享请求</html>".encode(),
+                status=200,
+                headers={},
+                final_url=kwargs["url"],
+            )
+
+        with mock.patch.object(
+            twitter_module,
+            "request_source",
+            fake_request_source,
+            create=True,
+        ):
+            result = TwitterTimelineFetcher._open_text(
+                "https://nitter.example.com/alice",
+                "http://127.0.0.1:7890",
+                12,
+                False,
+            )
+
+        self.assertEqual(result, "<html>共享请求</html>")
+        self.assertEqual(captured["proxy_url"], "http://127.0.0.1:7890")
+        self.assertEqual(captured["timeout"], 12)
+        self.assertIs(captured["verify_ssl"], False)
+        self.assertIsNone(captured["max_bytes"])
+        self.assertIsNone(captured["max_redirects"])
+        self.assertIn("text/html", captured["headers"]["Accept"])
+
+    async def test_relaxed_source_tls_is_not_passed_to_media_cache_downloader(self):
+        class Feed:
+            id = "tw-relaxed"
+            username = "alice"
+            nitter_url = "https://nitter.example.com"
+            url = ""
+            proxy_url = "http://127.0.0.1:7890"
+            timeout = 13
+            verify_ssl = False
+            send_images = True
+            send_videos = True
+            send_link = True
+            max_new_items = 1
+
+        media_calls = []
+
+        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+            if url.endswith("/alice"):
+                return '<a href="/alice/status/200"></a>'
+            return """
+            <div class="main-tweet">
+              <a class="fullname">Alice</a>
+              <div class="tweet-content media-body">media item</div>
+              <a class="still-image"><img src="/pic/a.jpg"/></a>
+            </div>
+            """
+
+        def fake_cache_media_url(url, cache_dir, proxy_url, timeout, media_kind):
+            media_calls.append((url, cache_dir, proxy_url, timeout, media_kind))
+            return None
+
+        fetcher = TwitterTimelineFetcher()
+        cache_dir = types.SimpleNamespace(mkdir=lambda **kwargs: None)
+        with (
+            mock.patch.object(
+                TwitterTimelineFetcher,
+                "_open_text",
+                staticmethod(fake_open_text),
+            ),
+            mock.patch.object(fetcher, "_cache_media_url", fake_cache_media_url),
+            mock.patch.object(fetcher, "_cleanup_media_cache", lambda path: None),
+        ):
+            result = await fetcher.fetch(
+                Feed(),
+                {"since_id": "100"},
+                cache_dir=cache_dir,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(media_calls), 1)
+        self.assertEqual(media_calls[0][0], "https://nitter.example.com/pic/a.jpg")
+        self.assertEqual(
+            media_calls[0][2:],
+            ("http://127.0.0.1:7890", 13, "image"),
         )
 
 

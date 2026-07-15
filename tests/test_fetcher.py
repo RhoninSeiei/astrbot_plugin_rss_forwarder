@@ -4,6 +4,7 @@ import types
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from unittest import mock
 
 import httpx
 
@@ -36,30 +37,20 @@ def _load_module(module_name: str):
 
 
 _load_module("config")
+source_http_module = _load_module("source_http")
 fetcher_module = _load_module("fetcher")
 FeedFetcher = fetcher_module.FeedFetcher
 
 
 class _FakeStorage:
+    def __init__(self, states=None):
+        self._states = states or {}
+
     async def get_feed_state(self, feed_id):
-        return {}
+        return dict(self._states.get(feed_id, {}))
 
     def plugin_cache_dir(self):
         return Path("/tmp/astrbot-rss-fetcher-test")
-
-
-class _FakeResponse:
-    status = 200
-    headers = {"ETag": "etag-a", "Last-Modified": "Tue, 12 May 2026 00:00:00 GMT"}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def read(self):
-        return b"<rss><channel></channel></rss>"
 
 
 class FeedFetcherTests(unittest.TestCase):
@@ -92,28 +83,27 @@ class FeedFetcherTests(unittest.TestCase):
         self.assertIs(result[0]["send_videos"], False)
         self.assertEqual(result[0]["proxy_url"], "http://127.0.0.1:7890")
 
-    def test_rss_fetch_uses_configured_http_proxy_and_browser_headers(self):
+    def test_rss_fetch_uses_shared_transport_with_tls_proxy_conditionals_and_metadata(self):
         captured = {}
 
-        def fake_proxy_handler(mapping):
-            captured["proxy_mapping"] = mapping
-            return ("proxy", mapping)
+        def fake_request_source(**kwargs):
+            captured["request_source"] = kwargs
+            return source_http_module.SourceHttpResponse(
+                body=b"<rss><channel><title>shared</title></channel></rss>",
+                status=206,
+                headers={
+                    "ETag": "etag-shared",
+                    "Last-Modified": "Wed, 13 May 2026 00:00:00 GMT",
+                },
+                final_url=kwargs["url"],
+            )
 
-        class FakeOpener:
-            def open(self, request, timeout):
-                captured["timeout"] = timeout
-                captured["headers"] = dict(request.header_items())
-                return _FakeResponse()
-
-        def fake_build_opener(*args):
-            captured["opener_args"] = args
-            return FakeOpener()
-
-        original_proxy_handler = fetcher_module.ProxyHandler
-        original_build_opener = fetcher_module.build_opener
-        fetcher_module.ProxyHandler = fake_proxy_handler
-        fetcher_module.build_opener = fake_build_opener
-        try:
+        with mock.patch.object(
+            fetcher_module,
+            "request_source",
+            fake_request_source,
+            create=True,
+        ):
             feed = types.SimpleNamespace(
                 id="rss-1",
                 url="https://example.com/feed.xml",
@@ -121,31 +111,159 @@ class FeedFetcherTests(unittest.TestCase):
                 key="",
                 timeout=17,
                 proxy_url="http://172.20.0.1:7890",
+                verify_ssl=False,
             )
-            fetcher = FeedFetcher(types.SimpleNamespace(feeds=[]), _FakeStorage())
+            fetcher = FeedFetcher(
+                types.SimpleNamespace(feeds=[]),
+                _FakeStorage(
+                    {
+                        "rss-1": {
+                            "etag": "etag-before",
+                            "last_modified": "Tue, 12 May 2026 00:00:00 GMT",
+                        }
+                    }
+                ),
+            )
 
             result = asyncio.run(fetcher._fetch_single_feed(feed))
-        finally:
-            fetcher_module.ProxyHandler = original_proxy_handler
-            fetcher_module.build_opener = original_build_opener
 
         self.assertIsNotNone(result)
-        self.assertEqual(captured["proxy_mapping"]["http"], "http://172.20.0.1:7890")
-        self.assertEqual(captured["proxy_mapping"]["https"], "http://172.20.0.1:7890")
-        self.assertEqual(captured["timeout"], 17)
-        self.assertIn("Mozilla/5.0", captured["headers"]["User-agent"])
-        self.assertIn("application/rss+xml", captured["headers"]["Accept"])
-        self.assertIn("en-US", captured["headers"]["Accept-language"])
+        self.assertIn("request_source", captured)
+        request_args = captured["request_source"]
+        self.assertEqual(request_args["proxy_url"], "http://172.20.0.1:7890")
+        self.assertEqual(request_args["timeout"], 17)
+        self.assertIs(request_args["verify_ssl"], False)
+        self.assertIsNone(request_args["max_bytes"])
+        self.assertIsNone(request_args["max_redirects"])
+        self.assertIn("Mozilla/5.0", request_args["headers"]["User-Agent"])
+        self.assertIn("application/rss+xml", request_args["headers"]["Accept"])
+        self.assertIn("en-US", request_args["headers"]["Accept-Language"])
+        self.assertEqual(request_args["headers"]["If-None-Match"], "etag-before")
+        self.assertEqual(
+            request_args["headers"]["If-Modified-Since"],
+            "Tue, 12 May 2026 00:00:00 GMT",
+        )
+        self.assertEqual(result.body, "<rss><channel><title>shared</title></channel></rss>")
+        self.assertEqual(result.etag, "etag-shared")
+        self.assertEqual(result.last_modified, "Wed, 13 May 2026 00:00:00 GMT")
+        self.assertEqual(result.status, 206)
+
+    def test_rss_fetch_defaults_legacy_feed_to_strict_tls(self):
+        captured = {}
+
+        def fake_request_source(**kwargs):
+            captured.update(kwargs)
+            return source_http_module.SourceHttpResponse(
+                body=b"<rss/>",
+                status=200,
+                headers={},
+                final_url=kwargs["url"],
+            )
+
+        with mock.patch.object(
+            fetcher_module,
+            "request_source",
+            fake_request_source,
+            create=True,
+        ):
+            feed = types.SimpleNamespace(
+                id="legacy-rss",
+                url="https://example.com/feed.xml",
+                auth_mode="none",
+                key="",
+                timeout=10,
+                proxy_url="",
+            )
+            result = asyncio.run(
+                FeedFetcher(
+                    types.SimpleNamespace(feeds=[]),
+                    _FakeStorage(),
+                )._fetch_single_feed(feed)
+            )
+
+        self.assertIsNotNone(result)
+        self.assertIn("verify_ssl", captured)
+        self.assertIs(captured["verify_ssl"], True)
+
+    def test_relaxed_tls_warning_is_once_per_rss_feed_and_contains_only_feed_id(self):
+        warnings = []
+
+        class FakeLogger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                warnings.append(args[0] % args[1:])
+
+        feed = types.SimpleNamespace(
+            id="rss-relaxed",
+            source_type="rss",
+            enabled=True,
+            verify_ssl=False,
+            url="https://user:secret@example.com/feed.xml?key=query-secret",
+            username="source-user",
+            proxy_url="http://proxy-user:proxy-secret@127.0.0.1:7890",
+        )
+        fetcher = FeedFetcher(types.SimpleNamespace(feeds=[feed]), _FakeStorage())
+
+        async def fake_fetch_single(_feed, **_kwargs):
+            return None
+
+        fetcher._fetch_single_feed = fake_fetch_single
+        with mock.patch.object(fetcher_module, "logger", FakeLogger()):
+            asyncio.run(fetcher.fetch_feed_ids([feed.id]))
+            asyncio.run(fetcher.fetch_feed_ids([feed.id]))
+
+        self.assertEqual(
+            warnings,
+            ["feed=rss-relaxed source TLS certificate verification is disabled"],
+        )
+        rendered = "\n".join(warnings)
+        for secret in (
+            "query-secret",
+            "source-user",
+            "proxy-user",
+            "proxy-secret",
+            "example.com",
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_relaxed_tls_warning_is_once_per_twitter_feed(self):
+        warnings = []
+
+        class FakeLogger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                warnings.append(args[0] % args[1:])
+
+        feed = types.SimpleNamespace(
+            id="twitter-relaxed",
+            source_type="twitter",
+            enabled=True,
+            verify_ssl=False,
+            username="private-user",
+            nitter_url="https://nitter.example.com/private-user",
+            proxy_url="http://proxy-user:proxy-secret@127.0.0.1:7890",
+        )
+        fetcher = FeedFetcher(types.SimpleNamespace(feeds=[feed]), _FakeStorage())
+
+        async def fake_fetch_twitter(_feed):
+            return None
+
+        fetcher._fetch_single_twitter_feed = fake_fetch_twitter
+        with mock.patch.object(fetcher_module, "logger", FakeLogger()):
+            asyncio.run(fetcher.fetch_feed_ids([feed.id]))
+            asyncio.run(fetcher.fetch_feed_ids([feed.id]))
+
+        self.assertEqual(
+            warnings,
+            ["feed=twitter-relaxed source TLS certificate verification is disabled"],
+        )
 
     def test_rss_fetch_failure_log_includes_job_feed_url_and_proxy_state(self):
         captured = {}
-
-        class FakeOpener:
-            def open(self, request, timeout):
-                raise OSError("certificate verify failed")
-
-        def fake_build_opener(*args):
-            return FakeOpener()
 
         class FakeLogger:
             def info(self, *args, **kwargs):
@@ -154,11 +272,17 @@ class FeedFetcherTests(unittest.TestCase):
             def warning(self, *args, **kwargs):
                 captured["warning"] = (args, kwargs)
 
-        original_build_opener = fetcher_module.build_opener
-        original_logger = fetcher_module.logger
-        fetcher_module.build_opener = fake_build_opener
-        fetcher_module.logger = FakeLogger()
-        try:
+        def fake_request_source(**kwargs):
+            raise OSError("certificate verify failed")
+
+        with (
+            mock.patch.object(
+                fetcher_module,
+                "request_source",
+                fake_request_source,
+            ),
+            mock.patch.object(fetcher_module, "logger", FakeLogger()),
+        ):
             feed = types.SimpleNamespace(
                 id="rss-1",
                 source_type="rss",
@@ -174,9 +298,6 @@ class FeedFetcherTests(unittest.TestCase):
             result = asyncio.run(
                 fetcher.fetch(types.SimpleNamespace(id="job-1", feed_ids=["rss-1"]))
             )
-        finally:
-            fetcher_module.build_opener = original_build_opener
-            fetcher_module.logger = original_logger
 
         self.assertEqual(result, [])
         args, _kwargs = captured["warning"]
@@ -207,13 +328,6 @@ class FeedFetcherTests(unittest.TestCase):
             response=response,
         )
 
-        class FakeOpener:
-            def open(self, request, timeout):
-                raise error
-
-        def fake_build_opener(*args):
-            return FakeOpener()
-
         class FakeLogger:
             def info(self, *args, **kwargs):
                 pass
@@ -221,11 +335,17 @@ class FeedFetcherTests(unittest.TestCase):
             def warning(self, *args, **kwargs):
                 captured["warning"] = (args, kwargs)
 
-        original_build_opener = fetcher_module.build_opener
-        original_logger = fetcher_module.logger
-        fetcher_module.build_opener = fake_build_opener
-        fetcher_module.logger = FakeLogger()
-        try:
+        def fake_request_source(**kwargs):
+            raise error
+
+        with (
+            mock.patch.object(
+                fetcher_module,
+                "request_source",
+                fake_request_source,
+            ),
+            mock.patch.object(fetcher_module, "logger", FakeLogger()),
+        ):
             feed = types.SimpleNamespace(
                 id="rss-1",
                 source_type="rss",
@@ -239,9 +359,6 @@ class FeedFetcherTests(unittest.TestCase):
             fetcher = FeedFetcher(types.SimpleNamespace(feeds=[feed]), _FakeStorage())
 
             result = asyncio.run(fetcher.fetch_feed_ids(["rss-1"], job_id="job-1"))
-        finally:
-            fetcher_module.build_opener = original_build_opener
-            fetcher_module.logger = original_logger
 
         self.assertEqual(result, [])
         args, _kwargs = captured["warning"]

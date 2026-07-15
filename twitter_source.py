@@ -14,6 +14,15 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from astrbot.api import logger
 
+from .source_http import request_source
+
+
+_NITTER_REQUEST_HEADERS = {
+    "User-Agent": "astrbot_plugin_rss_forwarder/0.5.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.6",
+}
+
 
 @dataclass(slots=True)
 class TwitterFetchResult:
@@ -56,6 +65,7 @@ class TwitterTimelineFetcher:
         base_url = self._resolve_nitter_url(feed)
         proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
         timeout = max(int(getattr(feed, "timeout", 10) or 10), 1)
+        verify_ssl = bool(getattr(feed, "verify_ssl", True))
         max_new_items = max(int(getattr(feed, "max_new_items", 1) or 0), 0)
 
         try:
@@ -64,6 +74,7 @@ class TwitterTimelineFetcher:
                 f"{base_url}/{username}",
                 proxy_url,
                 timeout,
+                verify_ssl,
             )
         except Exception as exc:
             logger.warning("fetch twitter feed=%s timeline failed: %s", feed.id, exc)
@@ -89,6 +100,7 @@ class TwitterTimelineFetcher:
                     f"{base_url}/{username}/status/{tweet_id}",
                     proxy_url,
                     timeout,
+                    verify_ssl,
                 )
                 item = self._parse_tweet_detail(feed, base_url, username, tweet_id, detail_html)
                 if cache_dir is not None:
@@ -132,44 +144,22 @@ class TwitterTimelineFetcher:
         return configured.rstrip("/")
 
     @staticmethod
-    def _open_text(url: str, proxy_url: str, timeout: int) -> str:
-        if TwitterTimelineFetcher._should_use_httpx(proxy_url):
-            return TwitterTimelineFetcher._open_text_with_httpx(url, proxy_url, timeout)
-
-        headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.6",
-        }
-        opener = (
-            build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
-            if proxy_url
-            else build_opener()
+    def _open_text(
+        url: str,
+        proxy_url: str,
+        timeout: int,
+        verify_ssl: bool,
+    ) -> str:
+        response = request_source(
+            url=url,
+            headers=_NITTER_REQUEST_HEADERS,
+            proxy_url=proxy_url,
+            timeout=timeout,
+            verify_ssl=verify_ssl,
+            max_bytes=None,
+            max_redirects=None,
         )
-        request = Request(url=url, headers=headers)
-        with opener.open(request, timeout=timeout) as response:  # noqa: S310
-            return response.read().decode("utf-8", errors="ignore")
-
-    @staticmethod
-    def _open_text_with_httpx(url: str, proxy_url: str, timeout: int) -> str:
-        import httpx
-
-        headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.6",
-        }
-        kwargs: dict[str, Any] = {
-            "headers": headers,
-            "timeout": timeout,
-            "follow_redirects": True,
-        }
-        if proxy_url:
-            kwargs["proxy"] = proxy_url
-        with httpx.Client(**kwargs) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            return response.text
+        return response.body.decode("utf-8", errors="ignore")
 
     @staticmethod
     def _should_use_httpx(proxy_url: str) -> bool:
