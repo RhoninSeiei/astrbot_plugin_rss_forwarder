@@ -1,10 +1,12 @@
 import inspect
+import ssl
 import sys
 import types
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from unittest import mock
+from urllib.request import HTTPSHandler
 
 
 astrbot_module = types.ModuleType("astrbot")
@@ -37,6 +39,35 @@ def _load_module(module_name: str):
 source_http_module = _load_module("source_http")
 twitter_module = _load_module("twitter_source")
 TwitterTimelineFetcher = twitter_module.TwitterTimelineFetcher
+
+
+class _FakeCacheTarget:
+    def __init__(self, name="cached.jpg"):
+        self.name = name
+        self.data = b""
+
+    def with_name(self, name):
+        return _FakeCacheTarget(name)
+
+    def write_bytes(self, data):
+        self.data = data
+
+    def replace(self, target):
+        target.data = self.data
+
+    def __str__(self):
+        return f"cache/{self.name}"
+
+
+class _FakeCacheDir:
+    def mkdir(self, **kwargs):
+        pass
+
+    def glob(self, pattern):
+        return []
+
+    def __truediv__(self, name):
+        return _FakeCacheTarget(name)
 
 
 class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
@@ -316,6 +347,170 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             media_calls[0][2:],
             ("http://127.0.0.1:7890", 13, "image"),
+        )
+
+    async def test_urllib_media_downloader_uses_strict_ssl_context_for_relaxed_feed(self):
+        class Feed:
+            id = "tw-relaxed-urllib"
+            username = "alice"
+            nitter_url = "https://nitter.example.com"
+            url = ""
+            proxy_url = "http://127.0.0.1:7890"
+            timeout = 13
+            verify_ssl = False
+            send_images = True
+            send_videos = True
+            send_link = True
+            max_new_items = 1
+
+        captured = {"source_verify_ssl": []}
+
+        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+            captured["source_verify_ssl"].append(verify_ssl)
+            if url.endswith("/alice"):
+                return '<a href="/alice/status/200"></a>'
+            return """
+            <div class="main-tweet">
+              <a class="fullname">Alice</a>
+              <div class="tweet-content media-body">media item</div>
+              <a class="still-image"><img src="/pic/a.jpg"/></a>
+            </div>
+            """
+
+        class FakeResponse:
+            headers = {"Content-Type": "image/jpeg", "Content-Length": "3"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                return b"img"
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                captured["media_request"] = request
+                captured["media_timeout"] = timeout
+                return FakeResponse()
+
+        def fake_build_opener(*handlers):
+            captured["handlers"] = handlers
+            return FakeOpener()
+
+        fetcher = TwitterTimelineFetcher()
+        with (
+            mock.patch.object(
+                TwitterTimelineFetcher,
+                "_open_text",
+                staticmethod(fake_open_text),
+            ),
+            mock.patch.object(fetcher, "_cleanup_media_cache", lambda path: None),
+            mock.patch.object(twitter_module, "build_opener", fake_build_opener),
+        ):
+            result = await fetcher.fetch(
+                Feed(),
+                {"since_id": "100"},
+                cache_dir=_FakeCacheDir(),
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured["source_verify_ssl"], [False, False])
+        https_handlers = [
+            handler
+            for handler in captured["handlers"]
+            if isinstance(handler, HTTPSHandler)
+        ]
+        self.assertEqual(len(https_handlers), 1)
+        self.assertEqual(
+            https_handlers[0]._context.verify_mode,
+            ssl.CERT_REQUIRED,
+        )
+
+    async def test_httpx_media_downloader_keeps_strict_default_for_relaxed_feed(self):
+        class Feed:
+            id = "tw-relaxed-httpx"
+            username = "alice"
+            nitter_url = "https://nitter.example.com"
+            url = ""
+            proxy_url = "socks5://127.0.0.1:1080"
+            timeout = 13
+            verify_ssl = False
+            send_images = True
+            send_videos = True
+            send_link = True
+            max_new_items = 1
+
+        captured = {"source_verify_ssl": []}
+
+        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+            captured["source_verify_ssl"].append(verify_ssl)
+            if url.endswith("/alice"):
+                return '<a href="/alice/status/200"></a>'
+            return """
+            <div class="main-tweet">
+              <a class="fullname">Alice</a>
+              <div class="tweet-content media-body">media item</div>
+              <a class="still-image"><img src="/pic/a.jpg"/></a>
+            </div>
+            """
+
+        class FakeResponse:
+            headers = {"Content-Type": "image/jpeg", "Content-Length": "3"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            def iter_bytes(self):
+                yield b"img"
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured["client_kwargs"] = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method, url):
+                captured["stream"] = (method, url)
+                return FakeResponse()
+
+        fetcher = TwitterTimelineFetcher()
+        with (
+            mock.patch.object(
+                TwitterTimelineFetcher,
+                "_open_text",
+                staticmethod(fake_open_text),
+            ),
+            mock.patch.object(fetcher, "_cleanup_media_cache", lambda path: None),
+            mock.patch.dict(
+                sys.modules,
+                {"httpx": types.SimpleNamespace(Client=FakeClient)},
+            ),
+        ):
+            result = await fetcher.fetch(
+                Feed(),
+                {"since_id": "100"},
+                cache_dir=_FakeCacheDir(),
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured["source_verify_ssl"], [False, False])
+        self.assertIs(captured["client_kwargs"].get("verify", True), True)
+        self.assertNotIn("verify_ssl", captured["client_kwargs"])
+        self.assertEqual(
+            captured["stream"],
+            ("GET", "https://nitter.example.com/pic/a.jpg"),
         )
 
 

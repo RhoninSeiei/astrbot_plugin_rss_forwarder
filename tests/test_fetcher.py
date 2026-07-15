@@ -92,8 +92,8 @@ class FeedFetcherTests(unittest.TestCase):
                 body=b"<rss><channel><title>shared</title></channel></rss>",
                 status=206,
                 headers={
-                    "ETag": "etag-shared",
-                    "Last-Modified": "Wed, 13 May 2026 00:00:00 GMT",
+                    "etag": "etag-shared",
+                    "last-modified": "Wed, 13 May 2026 00:00:00 GMT",
                 },
                 final_url=kwargs["url"],
             )
@@ -281,6 +281,12 @@ class FeedFetcherTests(unittest.TestCase):
                 "request_source",
                 fake_request_source,
             ),
+            mock.patch.object(
+                fetcher_module,
+                "source_http_client",
+                lambda proxy_url: "shared-httpx",
+                create=True,
+            ),
             mock.patch.object(fetcher_module, "logger", FakeLogger()),
         ):
             feed = types.SimpleNamespace(
@@ -308,6 +314,7 @@ class FeedFetcherTests(unittest.TestCase):
         self.assertEqual(args[1], "job-1")
         self.assertEqual(args[2], "rss-1")
         self.assertEqual(args[3], "https://example.com/feed.xml?<redacted>")
+        self.assertEqual(args[5], "shared-httpx")
 
     def test_rss_fetch_failure_log_redacts_http_status_exception_details(self):
         captured = {}

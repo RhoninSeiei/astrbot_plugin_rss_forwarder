@@ -109,6 +109,33 @@ class SourceHttpPublicApiTests(unittest.TestCase):
             )
         )
 
+    def test_response_header_helpers_normalize_and_read_case_insensitively(self):
+        if not hasattr(source_http, "normalize_response_headers"):
+            self.fail("normalize_response_headers must be public")
+        if not hasattr(source_http, "get_response_header"):
+            self.fail("get_response_header must be public")
+
+        headers = source_http.normalize_response_headers(
+            {
+                "ETag": "etag-a",
+                "last-modified": "Tue, 12 May 2026 00:00:00 GMT",
+            }
+        )
+
+        self.assertEqual(
+            headers,
+            {
+                "etag": "etag-a",
+                "last-modified": "Tue, 12 May 2026 00:00:00 GMT",
+            },
+        )
+        self.assertEqual(source_http.get_response_header(headers, "ETag"), "etag-a")
+        self.assertEqual(
+            source_http.get_response_header(headers, "Last-Modified"),
+            "Tue, 12 May 2026 00:00:00 GMT",
+        )
+        self.assertEqual(source_http.get_response_header(headers, "Missing"), "")
+
 
 class SourceHttpSslAndProxyTests(unittest.TestCase):
     def test_strict_https_uses_certificate_required_context(self):
@@ -197,6 +224,22 @@ class SourceHttpSslAndProxyTests(unittest.TestCase):
 
 
 class SourceHttpSocksTests(unittest.TestCase):
+    def test_public_client_selector_recognizes_all_socks_schemes(self):
+        if not hasattr(source_http, "source_http_client"):
+            self.fail("source_http_client must be public")
+
+        for proxy_url in (
+            "socks://127.0.0.1:1080",
+            "socks4://127.0.0.1:1080",
+            "socks5://127.0.0.1:1080",
+            " SOCKS5H://127.0.0.1:1080 ",
+        ):
+            with self.subTest(proxy_url=proxy_url):
+                self.assertEqual(source_http.source_http_client(proxy_url), "httpx")
+        for proxy_url in ("", "http://127.0.0.1:7890", "https://proxy.example"):
+            with self.subTest(proxy_url=proxy_url):
+                self.assertEqual(source_http.source_http_client(proxy_url), "urllib")
+
     def _stub_httpx(self, *, error=None, chunks=None):
         captured = {}
         chunks = list(chunks or [b"socks body"])
@@ -362,7 +405,7 @@ class SourceHttpReadingAndResponseTests(unittest.TestCase):
             result = _request()
 
         self.assertEqual(result.status, 201)
-        self.assertEqual(result.headers, {"X-Source": "rss", "X-Count": "2"})
+        self.assertEqual(result.headers, {"x-source": "rss", "x-count": "2"})
         self.assertEqual(
             result.final_url, "https://example.com/redirected/feed.xml"
         )

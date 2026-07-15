@@ -8,7 +8,7 @@ from urllib.request import getproxies
 from astrbot.api import logger
 
 from .config import RSSConfig
-from .source_http import request_source
+from .source_http import get_response_header, request_source, source_http_client
 from .storage import FeedStorage
 from .twitter_source import TwitterTimelineFetcher
 
@@ -99,9 +99,9 @@ class FeedFetcher:
             return FetchedFeed(
                 feed_id=feed.id,
                 body=response.body.decode("utf-8", errors="ignore"),
-                etag=str(response.headers.get("ETag", "")).strip(),
+                etag=get_response_header(response.headers, "ETag").strip(),
                 last_modified=str(
-                    response.headers.get("Last-Modified", "")
+                    get_response_header(response.headers, "Last-Modified")
                 ).strip(),
                 status=int(response.status or 200),
             )
@@ -119,7 +119,7 @@ class FeedFetcher:
                 feed.id,
                 self._redact_url_for_log(url),
                 self._proxy_state_for_log(proxy_url),
-                "httpx" if self._should_use_httpx(proxy_url) else "urllib",
+                source_http_client(proxy_url),
                 self._exception_summary_for_log(exc),
             )
             return None
@@ -163,12 +163,6 @@ class FeedFetcher:
             headers["Authorization"] = f"Bearer {feed.key}"
 
         return url, headers
-
-    @staticmethod
-    def _should_use_httpx(proxy_url: str) -> bool:
-        return str(proxy_url or "").strip().lower().startswith(
-            ("socks://", "socks5://", "socks5h://", "socks4://")
-        )
 
     @staticmethod
     def _proxy_state_for_log(proxy_url: str) -> str:

@@ -1,4 +1,5 @@
 import ssl
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.request import (
@@ -58,8 +59,25 @@ def _read_body(response: Any, max_bytes: int | None) -> tuple[bytes, bool]:
     return body[:max_bytes], len(body) > max_bytes
 
 
-def _response_headers(headers: Any) -> dict[str, str]:
-    return {str(name): str(value) for name, value in headers.items()}
+def normalize_response_headers(headers: Any) -> dict[str, str]:
+    return {str(name).lower(): str(value) for name, value in headers.items()}
+
+
+def get_response_header(
+    headers: Mapping[str, str],
+    name: str,
+    default: str = "",
+) -> str:
+    normalized_name = str(name).lower()
+    for header_name, value in headers.items():
+        if str(header_name).lower() == normalized_name:
+            return str(value)
+    return default
+
+
+def source_http_client(proxy_url: str) -> str:
+    normalized_proxy = str(proxy_url or "").strip().lower()
+    return "httpx" if normalized_proxy.startswith(_SOCKS_SCHEMES) else "urllib"
 
 
 def _request_with_httpx(
@@ -98,7 +116,7 @@ def _request_with_httpx(
                 return SourceHttpResponse(
                     body=bytes(content[:max_bytes]),
                     status=int(response.status_code),
-                    headers=_response_headers(response.headers),
+                    headers=normalize_response_headers(response.headers),
                     final_url=str(response.url),
                     truncated=truncated,
                 )
@@ -109,7 +127,7 @@ def _request_with_httpx(
         return SourceHttpResponse(
             body=content,
             status=int(response.status_code),
-            headers=_response_headers(response.headers),
+            headers=normalize_response_headers(response.headers),
             final_url=str(response.url),
             truncated=False,
         )
@@ -130,7 +148,7 @@ def request_source(
         raise ValueError("max_bytes must be greater than zero")
 
     normalized_proxy = str(proxy_url or "").strip()
-    if normalized_proxy.lower().startswith(_SOCKS_SCHEMES):
+    if source_http_client(normalized_proxy) == "httpx":
         return _request_with_httpx(
             url=url,
             headers=headers,
@@ -164,7 +182,7 @@ def request_source(
         return SourceHttpResponse(
             body=body,
             status=int(getattr(response, "status", 200) or 200),
-            headers=_response_headers(response.headers),
+            headers=normalize_response_headers(response.headers),
             final_url=str(response.geturl()),
             truncated=truncated,
         )

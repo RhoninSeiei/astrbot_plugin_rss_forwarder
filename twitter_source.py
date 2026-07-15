@@ -10,11 +10,11 @@ from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 from astrbot.api import logger
 
-from .source_http import request_source
+from .source_http import build_ssl_context, request_source
 
 
 _NITTER_REQUEST_HEADERS = {
@@ -356,11 +356,13 @@ class TwitterTimelineFetcher:
                 media_kind,
                 cache_key,
             )
-        opener = (
-            build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
-            if proxy_url
-            else build_opener()
-        )
+        handlers = [HTTPSHandler(context=build_ssl_context(True))]
+        if proxy_url:
+            handlers.insert(
+                0,
+                ProxyHandler({"http": proxy_url, "https": proxy_url}),
+            )
+        opener = build_opener(*handlers)
         request = Request(url=media_url, headers=headers)
         with opener.open(request, timeout=timeout) as response:  # noqa: S310
             content_type = str(response.headers.get("Content-Type", "") or "")
