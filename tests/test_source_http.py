@@ -21,6 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class _LocalHttpHandler(http.server.BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(2)
+
     def do_GET(self):
         self.server.requests.append(
             {
@@ -41,7 +45,13 @@ class _LocalHttpHandler(http.server.BaseHTTPRequestHandler):
 
 class _ThreadingServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
+
+
+class _ThreadingHttpServer(http.server.ThreadingHTTPServer):
+    daemon_threads = False
+    block_on_close = True
 
 
 class _Socks4Endpoint(socketserver.BaseRequestHandler):
@@ -68,6 +78,7 @@ class _Socks4Endpoint(socketserver.BaseRequestHandler):
         raise ValueError("SOCKS4 field is too long")
 
     def handle(self):
+        self.request.settimeout(2)
         header = self._read_exact(self.request, 8)
         version, command = header[0], header[1]
         destination_port = int.from_bytes(header[2:4], "big")
@@ -127,6 +138,8 @@ def _running_server(server):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        if thread.is_alive():
+            raise RuntimeError("local test server thread did not stop")
 
 
 class _FakeUrllibResponse:
@@ -539,7 +552,7 @@ class SourceHttpSocksTests(unittest.TestCase):
         self.assertNotIn("token=", rendered)
 
     def test_real_socks4_dependency_connects_to_local_endpoint(self):
-        http_server = http.server.ThreadingHTTPServer(
+        http_server = _ThreadingHttpServer(
             ("127.0.0.1", 0),
             _LocalHttpHandler,
         )
