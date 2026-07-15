@@ -68,6 +68,9 @@ def _load_main(package_name: str):
     sys.modules[package_name] = package
 
     class RSSCommands:
+        def __init__(self, source_probe_service=None):
+            self.source_probe_service = source_probe_service
+
         async def rss_router(self, _event):
             if False:
                 yield None

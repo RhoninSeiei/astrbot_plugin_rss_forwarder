@@ -299,6 +299,147 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.calls, 2)
         self.assertEqual(service.max_active, 1)
 
+    async def test_rss_probe_cancellation_waits_before_releasing_reusable_lock(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class CancellationProbeService:
+            def __init__(self):
+                self.calls = 0
+                self.active = 0
+                self.max_active = 0
+
+            async def probe(self, feed):
+                self.calls += 1
+                call_number = self.calls
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                try:
+                    if call_number == 1:
+                        entered.set()
+                        await release.wait()
+                    await asyncio.sleep(0)
+                    return _ProbeReport()
+                finally:
+                    self.active -= 1
+
+        service = CancellationProbeService()
+        feed = FeedConfig(id="feed-1", url="https://feeds.example/rss.xml")
+        commands = self._probe_commands(service, [feed])
+
+        async def run_probe():
+            return [
+                result
+                async for result in commands.rss_probe(
+                    _FakeEvent("/rss probe feed-1")
+                )
+            ]
+
+        first = asyncio.create_task(run_probe())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        first.cancel()
+        second = asyncio.create_task(run_probe())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        outcomes = None
+        try:
+            self.assertFalse(first.done())
+            self.assertEqual(service.calls, 1)
+            self.assertFalse(second.done())
+        finally:
+            release.set()
+            outcomes = await asyncio.gather(
+                first,
+                second,
+                return_exceptions=True,
+            )
+
+        self.assertIsInstance(outcomes[0], asyncio.CancelledError)
+        self.assertEqual(len(outcomes[1]), 1)
+        self.assertEqual(service.calls, 2)
+        self.assertEqual(service.max_active, 1)
+
+        third = await run_probe()
+
+        self.assertEqual(len(third), 1)
+        self.assertEqual(service.calls, 3)
+        self.assertEqual(service.max_active, 1)
+        self.assertFalse(commands._rss_probe_lock.locked())
+
+    async def test_rss_probe_returns_fixed_message_when_service_raises(self):
+        class FailingProbeService:
+            async def probe(self, feed):
+                raise RuntimeError("probe-secret-detail")
+
+        feed = FeedConfig(id="feed-1", url="https://feeds.example/rss.xml")
+        commands = self._probe_commands(FailingProbeService(), [feed])
+
+        try:
+            results = [
+                result
+                async for result in commands.rss_probe(
+                    _FakeEvent("/rss probe feed-1")
+                )
+            ]
+        except Exception as exc:
+            self.fail(f"普通探测异常逸出：{type(exc).__name__}")
+
+        self.assertEqual(results, ["来源探测失败，请稍后重试。"])
+        self.assertNotIn("probe-secret-detail", results[0])
+
+    async def test_rss_probe_returns_fixed_message_when_report_serialization_raises(self):
+        class SerializationReport:
+            def as_dict(self):
+                raise RuntimeError("report-secret-detail")
+
+        feed = FeedConfig(id="feed-1", url="https://feeds.example/rss.xml")
+        commands = self._probe_commands(
+            _ProbeService(SerializationReport()),
+            [feed],
+        )
+
+        try:
+            results = [
+                result
+                async for result in commands.rss_probe(
+                    _FakeEvent("/rss probe feed-1")
+                )
+            ]
+        except Exception as exc:
+            self.fail(f"普通报告异常逸出：{type(exc).__name__}")
+
+        self.assertEqual(results, ["来源探测失败，请稍后重试。"])
+        self.assertNotIn("report-secret-detail", results[0])
+
+    async def test_rss_probe_returns_fixed_message_when_formatting_raises(self):
+        class FormattingPayload(dict):
+            def get(self, key, default=None):
+                raise RuntimeError("format-secret-detail")
+
+        class FormattingReport:
+            def as_dict(self):
+                return FormattingPayload({"attempts": []})
+
+        feed = FeedConfig(id="feed-1", url="https://feeds.example/rss.xml")
+        commands = self._probe_commands(
+            _ProbeService(FormattingReport()),
+            [feed],
+        )
+
+        try:
+            results = [
+                result
+                async for result in commands.rss_probe(
+                    _FakeEvent("/rss probe feed-1")
+                )
+            ]
+        except Exception as exc:
+            self.fail(f"普通格式化异常逸出：{type(exc).__name__}")
+
+        self.assertEqual(results, ["来源探测失败，请稍后重试。"])
+        self.assertNotIn("format-secret-detail", results[0])
+
     async def test_rss_help_describes_probe_as_non_persistent_connectivity_check(self):
         commands = RSSCommands()
 

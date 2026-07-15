@@ -88,9 +88,32 @@ class RSSCommands:
             yield event.plain_result("来源探测服务不可用。")
             return
 
-        async with self._rss_probe_lock:
-            report = await self.source_probe_service.probe(feed)
-        yield event.plain_result(self._format_probe_report(report.as_dict()))
+        try:
+            async with self._rss_probe_lock:
+                probe_task = asyncio.create_task(
+                    self.source_probe_service.probe(feed)
+                )
+                try:
+                    report = await asyncio.shield(probe_task)
+                except asyncio.CancelledError:
+                    while not probe_task.done():
+                        try:
+                            await asyncio.shield(probe_task)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:
+                            break
+                    if probe_task.done():
+                        try:
+                            probe_task.result()
+                        except (Exception, asyncio.CancelledError):
+                            pass
+                    raise
+            message = self._format_probe_report(report.as_dict())
+        except Exception:
+            yield event.plain_result("来源探测失败，请稍后重试。")
+            return
+        yield event.plain_result(message)
 
     async def rss_list(self, event: AstrMessageEvent):
         scheduler = self.scheduler
