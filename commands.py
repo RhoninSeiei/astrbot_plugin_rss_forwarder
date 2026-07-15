@@ -1,10 +1,25 @@
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any
+
 from astrbot.api.event import AstrMessageEvent
+
+if TYPE_CHECKING:
+    from .source_probe import SourceProbeService
 
 
 class RSSCommands:
     """命令入口。"""
 
     scheduler = None
+
+    def __init__(
+        self,
+        source_probe_service: SourceProbeService | None = None,
+    ) -> None:
+        self.source_probe_service = source_probe_service
+        self._rss_probe_lock = asyncio.Lock()
 
     async def rss_router(self, event: AstrMessageEvent):
         """兜底消息路由：在未命中 wake/at 指令条件时，仍可处理 /rss 子命令。"""
@@ -28,25 +43,54 @@ class RSSCommands:
             return
 
         route_map = {
+            "help": self.rss_help,
             "list": self.rss_list,
             "status": self.rss_status,
             "run": self.rss_run,
             "pause": self.rss_pause,
             "resume": self.rss_resume,
             "reset": self.rss_reset,
+            "probe": self.rss_probe,
             "test": self.rss_test,
             "test_translate": self.rss_test,
         }
 
         handler = route_map.get(sub)
         if handler is None:
-            yield event.plain_result(
-                "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|reset|test [sample text]|digest run [digest_id]]"
-            )
+            yield event.plain_result(self._help_text())
             return
 
         async for result in handler(event):
             yield result
+
+    async def rss_help(self, event: AstrMessageEvent):
+        yield event.plain_result(self._help_text())
+
+    async def rss_probe(self, event: AstrMessageEvent):
+        feed_id = self._extract_param(event)
+        if not feed_id:
+            yield event.plain_result("用法：/rss probe <feed_id>")
+            return
+
+        feed = next(
+            (
+                feed
+                for feed in self.scheduler.config.feeds
+                if str(feed.id) == feed_id
+            ),
+            None,
+        )
+        if feed is None:
+            yield event.plain_result("未找到指定来源。")
+            return
+
+        if self.source_probe_service is None:
+            yield event.plain_result("来源探测服务不可用。")
+            return
+
+        async with self._rss_probe_lock:
+            report = await self.source_probe_service.probe(feed)
+        yield event.plain_result(self._format_probe_report(report.as_dict()))
 
     async def rss_list(self, event: AstrMessageEvent):
         scheduler = self.scheduler
@@ -293,6 +337,106 @@ class RSSCommands:
     @staticmethod
     def _bool_text(value: bool) -> str:
         return "on" if value else "off"
+
+    @staticmethod
+    def _help_text() -> str:
+        return (
+            "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|"
+            "reset|probe <feed_id>|test [sample text]|digest run [digest_id]]\n"
+            "/rss probe <feed_id>：仅检查连接，不保存设置。"
+        )
+
+    @staticmethod
+    def _format_probe_report(report: dict[str, Any]) -> str:
+        mode_names = {
+            "direct_strict",
+            "proxy_strict",
+            "direct_relaxed",
+            "proxy_relaxed",
+        }
+        feed_kinds = {"rss", "atom", "rdf", "nitter"}
+        error_types = {
+            "tls_certificate",
+            "proxy",
+            "dns",
+            "connect",
+            "timeout",
+            "http_status",
+            "invalid_feed",
+            "unknown",
+        }
+        recommendation_codes = mode_names | {"invalid_feed", "unreachable"}
+
+        lines = ["来源探测结果："]
+        attempts = report.get("attempts", [])
+        if not isinstance(attempts, list):
+            attempts = []
+        for raw_attempt in attempts:
+            if not isinstance(raw_attempt, dict):
+                continue
+            mode = str(raw_attempt.get("mode", ""))
+            if mode not in mode_names:
+                mode = "unknown"
+            ok = raw_attempt.get("ok") is True
+            latency = raw_attempt.get("latency_ms")
+            if isinstance(latency, bool) or not isinstance(latency, int):
+                latency = 0
+            latency = max(0, latency)
+            http_status = raw_attempt.get("http_status")
+            if isinstance(http_status, bool) or not isinstance(http_status, int):
+                http_status_text = "-"
+            else:
+                http_status_text = str(http_status)
+            feed_kind = str(raw_attempt.get("feed_kind", ""))
+            is_feed = raw_attempt.get("is_feed") is True and feed_kind in feed_kinds
+            content_text = f"已识别({feed_kind})" if is_feed else "未识别"
+            error_type = str(raw_attempt.get("error_type", ""))
+            if ok:
+                error_type = "-"
+            elif error_type not in error_types:
+                error_type = "unknown"
+            lines.append(
+                f"{mode}：{'成功' if ok else '失败'} "
+                f"延迟={latency}ms HTTP={http_status_text} "
+                f"内容={content_text} 分类错误={error_type}"
+            )
+
+        recommendation = report.get("recommendation", {})
+        if not isinstance(recommendation, dict):
+            recommendation = {}
+        code = str(recommendation.get("code", ""))
+        if code not in recommendation_codes:
+            code = "unknown"
+        verify_ssl = recommendation.get("verify_ssl")
+        use_proxy = recommendation.get("use_proxy")
+        recommendation_messages = {
+            "direct_strict": "默认网络与严格证书校验可用。",
+            "proxy_strict": "来源代理与严格证书校验可用。",
+            "direct_relaxed": "默认网络仅在关闭证书校验时可用，存在证书安全隐患。",
+            "proxy_relaxed": "来源代理仅在关闭证书校验时可用，存在证书安全隐患。",
+            "invalid_feed": "来源可访问，但响应内容无法识别为订阅源。",
+            "unreachable": "所有探测模式均失败，请根据分类错误检查来源配置。",
+            "unknown": "无法生成建议。",
+        }
+        if code in {"direct_strict", "proxy_strict"} and verify_ssl is None:
+            recommendation_message = "HTTP 来源可用，TLS 不适用。"
+        else:
+            recommendation_message = recommendation_messages[code]
+        lines.append(
+            f"建议：{recommendation_message} "
+            f"code={code} "
+            f"verify_ssl={RSSCommands._optional_bool_text(verify_ssl)} "
+            f"use_proxy={RSSCommands._optional_bool_text(use_proxy)}"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _optional_bool_text(value: Any) -> str:
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        return "n/a"
 
     @staticmethod
     def _format_success_time(result) -> str:

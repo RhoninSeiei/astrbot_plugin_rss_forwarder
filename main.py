@@ -48,7 +48,11 @@ class RSSPlugin(Star, RSSCommands):
         dispatcher = FeedDispatcher(context=context, config=config, storage=storage, renderer=self)
         pipeline = FeedPipeline(context=context, config=config)
         semantic_deduper = SemanticDedupService(context=context, config=config, storage=storage)
-        self.source_probe_service = SourceProbeService()
+        source_probe_service = SourceProbeService()
+        RSSCommands.__init__(
+            self,
+            source_probe_service=source_probe_service,
+        )
 
         self.scheduler = RSSScheduler(
             config=config,
@@ -65,7 +69,7 @@ class RSSPlugin(Star, RSSCommands):
 
             self._source_probe_api = SourceProbeApi(
                 config,
-                self.source_probe_service,
+                source_probe_service,
             )
             self._source_probe_api.register(self.context)
         else:

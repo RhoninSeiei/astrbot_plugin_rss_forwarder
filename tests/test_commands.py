@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 import unittest
@@ -42,6 +43,7 @@ scheduler_module = _load_module("scheduler")
 RSSCommands = commands_module.RSSCommands
 DailyDigestConfig = config_module.DailyDigestConfig
 DigestExecutionResult = scheduler_module.DigestExecutionResult
+FeedConfig = config_module.FeedConfig
 
 
 class _FakeEvent:
@@ -52,7 +54,262 @@ class _FakeEvent:
         return text
 
 
+class _ProbeReport:
+    def __init__(self, payload=None):
+        self._payload = payload or {
+            "feed_id": "feed-1",
+            "source_type": "rss",
+            "attempts": [],
+            "recommendation": {
+                "code": "direct_strict",
+                "verify_ssl": True,
+                "use_proxy": False,
+                "message": "默认网络与严格证书校验可用。",
+            },
+        }
+
+    def as_dict(self):
+        return dict(self._payload)
+
+
+class _ProbeService:
+    def __init__(self, report=None):
+        self.report = report or _ProbeReport()
+        self.calls = []
+
+    async def probe(self, feed):
+        self.calls.append(feed)
+        return self.report
+
+
 class CommandsTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _probe_commands(service, feeds):
+        commands = RSSCommands(source_probe_service=service)
+        commands.scheduler = types.SimpleNamespace(
+            config=types.SimpleNamespace(feeds=feeds),
+        )
+        return commands
+
+    async def test_rss_probe_is_in_router_map(self):
+        feed = FeedConfig(
+            id="feed-1",
+            url="https://feeds.example/rss.xml",
+        )
+        service = _ProbeService()
+        commands = self._probe_commands(service, [feed])
+
+        results = [
+            result
+            async for result in commands.rss_router(
+                _FakeEvent("/rss probe feed-1")
+            )
+        ]
+
+        self.assertEqual(service.calls, [feed])
+        self.assertEqual(len(results), 1)
+
+    async def test_rss_probe_without_feed_id_shows_exact_usage(self):
+        commands = self._probe_commands(_ProbeService(), [])
+
+        results = [
+            result
+            async for result in commands.rss_router(_FakeEvent("/rss probe"))
+        ]
+
+        self.assertEqual(results, ["用法：/rss probe <feed_id>"])
+
+    async def test_rss_probe_unknown_feed_id_returns_concise_message(self):
+        commands = self._probe_commands(_ProbeService(), [])
+
+        results = [
+            result
+            async for result in commands.rss_router(
+                _FakeEvent("/rss probe missing-feed")
+            )
+        ]
+
+        self.assertEqual(results, ["未找到指定来源。"])
+
+    async def test_rss_probe_formats_attempts_and_final_recommendation(self):
+        payload = {
+            "feed_id": "feed-1",
+            "source_type": "rss",
+            "attempts": [
+                {
+                    "mode": "direct_strict",
+                    "ok": True,
+                    "http_status": 200,
+                    "content_type": "application/rss+xml",
+                    "latency_ms": 18,
+                    "is_feed": True,
+                    "feed_kind": "rss",
+                    "truncated": False,
+                    "error_type": "",
+                    "error_message": "",
+                },
+                {
+                    "mode": "proxy_strict",
+                    "ok": False,
+                    "http_status": 502,
+                    "content_type": "text/html",
+                    "latency_ms": 27,
+                    "is_feed": False,
+                    "feed_kind": "unknown",
+                    "truncated": False,
+                    "error_type": "proxy",
+                    "error_message": "proxy failed",
+                },
+            ],
+            "recommendation": {
+                "code": "direct_strict",
+                "verify_ssl": True,
+                "use_proxy": False,
+                "message": "默认网络与严格证书校验可用。",
+            },
+        }
+        feed = FeedConfig(id="feed-1", url="https://feeds.example/rss.xml")
+        commands = self._probe_commands(
+            _ProbeService(_ProbeReport(payload)),
+            [feed],
+        )
+
+        results = [
+            result
+            async for result in commands.rss_probe(
+                _FakeEvent("/rss probe feed-1")
+            )
+        ]
+        lines = results[0].splitlines()
+
+        self.assertIn(
+            "direct_strict：成功 延迟=18ms HTTP=200 内容=已识别(rss) 分类错误=-",
+            lines,
+        )
+        self.assertIn(
+            "proxy_strict：失败 延迟=27ms HTTP=502 内容=未识别 分类错误=proxy",
+            lines,
+        )
+        self.assertEqual(
+            lines[-1],
+            "建议：默认网络与严格证书校验可用。 "
+            "code=direct_strict verify_ssl=true use_proxy=false",
+        )
+
+    async def test_rss_probe_output_omits_secrets_proxy_address_and_full_query(self):
+        secret = "source-secret-key"
+        proxy_address = "proxy.internal.example:8443"
+        full_query = "?auth=source-secret-key&format=rss"
+        feed_id = f"feed{full_query}&proxy={proxy_address}"
+        payload = {
+            "feed_id": feed_id,
+            "source_type": "rss",
+            "attempts": [
+                {
+                    "mode": "proxy_strict",
+                    "ok": False,
+                    "http_status": None,
+                    "content_type": "",
+                    "latency_ms": 31,
+                    "is_feed": False,
+                    "feed_kind": "unknown",
+                    "truncated": False,
+                    "error_type": "proxy",
+                    "error_message": (
+                        f"https://feeds.example/rss.xml{full_query} via "
+                        f"http://operator:proxy-password@{proxy_address}"
+                    ),
+                }
+            ],
+            "recommendation": {
+                "code": "unreachable",
+                "verify_ssl": None,
+                "use_proxy": None,
+                "message": (
+                    f"来源代理访问失败：http://operator:proxy-password@{proxy_address}"
+                ),
+            },
+        }
+        feed = FeedConfig(
+            id=feed_id,
+            url=f"https://feeds.example/rss.xml{full_query}",
+            auth_mode="query",
+            key=secret,
+            proxy_url=f"http://operator:proxy-password@{proxy_address}",
+        )
+        commands = self._probe_commands(
+            _ProbeService(_ProbeReport(payload)),
+            [feed],
+        )
+
+        results = [
+            result
+            async for result in commands.rss_probe(
+                _FakeEvent(f"/rss probe {feed_id}")
+            )
+        ]
+        message = results[0]
+
+        self.assertNotIn(secret, message)
+        self.assertNotIn("proxy-password", message)
+        self.assertNotIn(proxy_address, message)
+        self.assertNotIn(full_query, message)
+
+    async def test_rss_probe_serializes_concurrent_calls_per_command_service(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class SerialProbeService:
+            def __init__(self):
+                self.calls = 0
+                self.active = 0
+                self.max_active = 0
+
+            async def probe(self, feed):
+                self.calls += 1
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                if self.calls == 1:
+                    entered.set()
+                    await release.wait()
+                self.active -= 1
+                return _ProbeReport()
+
+        service = SerialProbeService()
+        feed = FeedConfig(id="feed-1", url="https://feeds.example/rss.xml")
+        commands = self._probe_commands(service, [feed])
+
+        async def run_probe():
+            return [
+                result
+                async for result in commands.rss_probe(
+                    _FakeEvent("/rss probe feed-1")
+                )
+            ]
+
+        first = asyncio.create_task(run_probe())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        second = asyncio.create_task(run_probe())
+        await asyncio.sleep(0)
+
+        self.assertEqual(service.calls, 1)
+        self.assertFalse(second.done())
+        release.set()
+        await asyncio.gather(first, second)
+        self.assertEqual(service.calls, 2)
+        self.assertEqual(service.max_active, 1)
+
+    async def test_rss_help_describes_probe_as_non_persistent_connectivity_check(self):
+        commands = RSSCommands()
+
+        results = [
+            result
+            async for result in commands.rss_router(_FakeEvent("/rss help"))
+        ]
+
+        self.assertIn("/rss probe <feed_id>", results[0])
+        self.assertIn("仅检查连接，不保存设置", results[0])
+
     async def test_rss_digest_run_routes_to_scheduler(self):
         commands = RSSCommands()
         digest_result = DigestExecutionResult(
