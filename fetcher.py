@@ -1,4 +1,5 @@
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -122,7 +123,7 @@ class FeedFetcher:
                 self._redact_url_for_log(url),
                 self._proxy_state_for_log(proxy_url),
                 "httpx" if self._should_use_httpx(proxy_url) else "urllib",
-                exc,
+                self._exception_summary_for_log(exc),
             )
             return None
 
@@ -211,4 +212,28 @@ class FeedFetcher:
     def _redact_url_for_log(url: str) -> str:
         parsed = urlparse(str(url or ""))
         query = "<redacted>" if parsed.query else ""
-        return urlunparse(parsed._replace(query=query, fragment=""))
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urlunparse(
+            parsed._replace(netloc=netloc, query=query, fragment="")
+        )
+
+    @classmethod
+    def _exception_summary_for_log(cls, exc: Exception) -> str:
+        category = type(exc).__name__
+        message = re.sub(
+            r"(?im)\b(?:authorization|cookie)\s*[:=]\s*[^\r\n]*",
+            "<redacted>",
+            str(exc),
+        )
+        message = re.sub(
+            r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>'\"]+",
+            lambda match: cls._redact_url_for_log(match.group(0)),
+            message,
+        )
+        message = " ".join(message.split())
+
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        status = f" HTTP {status_code};" if status_code is not None else ""
+        summary = f"{category}:{status} {message}".strip()
+        return summary if len(summary) <= 240 else f"{summary[:237]}..."

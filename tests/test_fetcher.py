@@ -5,6 +5,8 @@ import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import httpx
+
 
 astrbot_module = types.ModuleType("astrbot")
 astrbot_api_module = types.ModuleType("astrbot.api")
@@ -185,6 +187,77 @@ class FeedFetcherTests(unittest.TestCase):
         self.assertEqual(args[1], "job-1")
         self.assertEqual(args[2], "rss-1")
         self.assertEqual(args[3], "https://example.com/feed.xml?<redacted>")
+
+    def test_rss_fetch_failure_log_redacts_http_status_exception_details(self):
+        captured = {}
+        request = httpx.Request(
+            "GET",
+            "https://user:password@example.com/feed.xml?key=secret-token&x=1",
+            headers={
+                "Authorization": "Bearer header-secret",
+                "Cookie": "session=cookie-secret",
+            },
+        )
+        response = httpx.Response(401, request=request)
+        error = httpx.HTTPStatusError(
+            "401 Unauthorized for request URL "
+            "https://user:password@example.com/feed.xml?key=secret-token&x=1\n"
+            "Authorization: Bearer header-secret\nCookie: session=cookie-secret",
+            request=request,
+            response=response,
+        )
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                raise error
+
+        def fake_build_opener(*args):
+            return FakeOpener()
+
+        class FakeLogger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                captured["warning"] = (args, kwargs)
+
+        original_build_opener = fetcher_module.build_opener
+        original_logger = fetcher_module.logger
+        fetcher_module.build_opener = fake_build_opener
+        fetcher_module.logger = FakeLogger()
+        try:
+            feed = types.SimpleNamespace(
+                id="rss-1",
+                source_type="rss",
+                enabled=True,
+                url="https://example.com/feed.xml",
+                auth_mode="none",
+                key="",
+                timeout=17,
+                proxy_url="",
+            )
+            fetcher = FeedFetcher(types.SimpleNamespace(feeds=[feed]), _FakeStorage())
+
+            result = asyncio.run(fetcher.fetch_feed_ids(["rss-1"], job_id="job-1"))
+        finally:
+            fetcher_module.build_opener = original_build_opener
+            fetcher_module.logger = original_logger
+
+        self.assertEqual(result, [])
+        args, _kwargs = captured["warning"]
+        rendered = args[0] % args[1:]
+        self.assertIn("HTTPStatusError", rendered)
+        self.assertIn("401", rendered)
+        self.assertNotIn("secret-token", rendered)
+        self.assertNotIn("key=", rendered)
+        self.assertNotIn("x=1", rendered)
+        self.assertNotIn("Authorization", rendered)
+        self.assertNotIn("Cookie", rendered)
+        self.assertNotIn("user:password", rendered)
+        self.assertNotIn("header-secret", rendered)
+        self.assertNotIn("cookie-secret", rendered)
+        self.assertNotIn("\n", rendered)
+        self.assertLessEqual(len(args[-1]), 240)
 
 
 if __name__ == "__main__":
