@@ -1,0 +1,121 @@
+{
+  "pages": {
+    "source-diagnostics": {
+      "title": "Source diagnostics",
+      "description": "Check source access through the direct network, the source proxy, and strict or relaxed TLS verification. Probes do not save configuration.",
+      "headings": {
+        "source": "Source",
+        "draft": "Draft configuration",
+        "results": "Probe results",
+        "recommendation": "Configuration recommendation"
+      },
+      "source": {
+        "label": "Select source",
+        "draft": "Draft source",
+        "savedSummary": "Saved sources use their complete backend configuration; this page shows redacted details only.",
+        "disabled": "Disabled",
+        "empty": "No saved sources"
+      },
+      "sourceTypes": {
+        "rss": "RSS",
+        "twitter": "Twitter / Nitter"
+      },
+      "fields": {
+        "sourceType": "Source type",
+        "sourceAddress": "Source address",
+        "proxyConfigured": "Source proxy configured",
+        "currentTls": "Current TLS verification",
+        "url": "RSS URL",
+        "nitterUrl": "Nitter base URL",
+        "username": "Twitter username",
+        "proxyUrl": "Source proxy URL",
+        "timeout": "Timeout in seconds",
+        "verifySsl": "Verify the source TLS certificate",
+        "authMode": "Authentication mode",
+        "temporaryKey": "Temporary key",
+        "fullCheck": "Run every applicable mode"
+      },
+      "auth": {
+        "none": "No authentication",
+        "query": "Query parameter key",
+        "header": "Authorization header"
+      },
+      "actions": {
+        "run": "Run probe",
+        "running": "Running probe…"
+      },
+      "results": {
+        "mode": "Mode",
+        "status": "Status",
+        "latency": "Latency",
+        "httpStatus": "HTTP status",
+        "feedRecognition": "Content recognition",
+        "error": "Error",
+        "none": "—"
+      },
+      "statuses": {
+        "success": "Success",
+        "failure": "Failed",
+        "skipped": "Skipped",
+        "pending": "Pending"
+      },
+      "errors": {
+        "load": "Could not load the source list",
+        "request": "The source probe failed",
+        "validation": "Check the draft fields.",
+        "invalidTimeout": "Timeout must be an integer from 3 through 30.",
+        "types": {
+          "dns": "DNS resolution",
+          "connect": "Connection",
+          "timeout": "Timeout",
+          "tls_certificate": "TLS certificate",
+          "proxy": "Source proxy",
+          "http_status": "HTTP status",
+          "invalid_feed": "Content format",
+          "unknown": "Unknown error"
+        }
+      },
+      "recommendation": {
+        "none": "A recommendation appears after a probe completes.",
+        "tlsLabel": "TLS verification",
+        "proxyLabel": "Source proxy",
+        "keepEnabled": "Keep enabled",
+        "disable": "Consider disabling for this source only",
+        "notApplicable": "Not applicable or keep current value",
+        "useProxy": "Use the current source proxy",
+        "noProxy": "No source proxy required",
+        "proxyUnchanged": "Keep current value",
+        "warningHeading": "Certificate security warning",
+        "securityWarning": "Disabling certificate verification removes server identity checks and can permit a man-in-the-middle attack.",
+        "onlyThisSource": "Apply this setting only to the current source; article and media downloads continue to use strict verification.",
+        "codes": {
+          "direct_strict": "The direct network works with strict certificate verification.",
+          "proxy_strict": "The source proxy works with strict certificate verification.",
+          "direct_relaxed": "The direct network works only when certificate verification is disabled.",
+          "proxy_relaxed": "The source proxy works only when certificate verification is disabled.",
+          "invalid_feed": "The source is reachable, but its response is not a supported feed.",
+          "unreachable": "No applicable mode completed successfully."
+        }
+      },
+      "values": {
+        "yes": "Yes",
+        "no": "No",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "recognized": "Recognized",
+        "unrecognized": "Not recognized",
+        "notApplicable": "Not applicable"
+      },
+      "units": {
+        "seconds": "seconds",
+        "milliseconds": "ms"
+      },
+      "modes": {
+        "direct_strict": "Direct network · strict TLS",
+        "proxy_strict": "Source proxy · strict TLS",
+        "direct_relaxed": "Direct network · relaxed TLS",
+        "proxy_relaxed": "Source proxy · relaxed TLS"
+      }
+    }
+  }
+}

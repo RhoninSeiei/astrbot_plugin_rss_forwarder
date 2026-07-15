@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title></title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="page-header">
+        <h1 data-i18n="title"></h1>
+        <p data-i18n="description"></p>
+      </header>
+
+      <form id="probe-form" novalidate>
+        <section class="tool-section" aria-labelledby="source-heading">
+          <h2 id="source-heading" data-i18n="headings.source"></h2>
+
+          <div class="field field-wide">
+            <label for="source-select" data-i18n="source.label"></label>
+            <select id="source-select"></select>
+          </div>
+
+          <div id="saved-source" class="saved-source" hidden>
+            <p class="section-note" data-i18n="source.savedSummary"></p>
+            <dl class="source-facts">
+              <div>
+                <dt data-i18n="fields.sourceType"></dt>
+                <dd id="saved-source-type"></dd>
+              </div>
+              <div>
+                <dt data-i18n="fields.sourceAddress"></dt>
+                <dd id="saved-source-url" class="breakable"></dd>
+              </div>
+              <div>
+                <dt data-i18n="fields.proxyConfigured"></dt>
+                <dd id="saved-source-proxy"></dd>
+              </div>
+              <div>
+                <dt data-i18n="fields.timeout"></dt>
+                <dd id="saved-source-timeout"></dd>
+              </div>
+              <div>
+                <dt data-i18n="fields.currentTls"></dt>
+                <dd id="saved-source-tls"></dd>
+              </div>
+            </dl>
+          </div>
+
+          <div id="draft-fields" class="draft-fields">
+            <h3 data-i18n="headings.draft"></h3>
+
+            <fieldset class="field source-type-field">
+              <legend data-i18n="fields.sourceType"></legend>
+              <div class="segment-control">
+                <input
+                  id="source-type-rss"
+                  type="radio"
+                  name="source-type"
+                  value="rss"
+                  checked
+                />
+                <label for="source-type-rss" data-i18n="sourceTypes.rss"></label>
+                <input
+                  id="source-type-twitter"
+                  type="radio"
+                  name="source-type"
+                  value="twitter"
+                />
+                <label
+                  for="source-type-twitter"
+                  data-i18n="sourceTypes.twitter"
+                ></label>
+              </div>
+            </fieldset>
+
+            <div id="rss-fields" class="field-grid">
+              <div class="field field-wide">
+                <label for="source-url" data-i18n="fields.url"></label>
+                <input
+                  id="source-url"
+                  type="url"
+                  inputmode="url"
+                  spellcheck="false"
+                  required
+                />
+              </div>
+
+              <div class="field">
+                <label for="auth-mode" data-i18n="fields.authMode"></label>
+                <select id="auth-mode">
+                  <option value="none" data-i18n="auth.none"></option>
+                  <option value="query" data-i18n="auth.query"></option>
+                  <option value="header" data-i18n="auth.header"></option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label
+                  for="temporary-key"
+                  data-i18n="fields.temporaryKey"
+                ></label>
+                <input
+                  id="temporary-key"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+
+            <div id="twitter-fields" class="field-grid" hidden>
+              <div class="field">
+                <label
+                  for="twitter-username"
+                  data-i18n="fields.username"
+                ></label>
+                <input
+                  id="twitter-username"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  required
+                />
+              </div>
+
+              <div class="field">
+                <label for="nitter-url" data-i18n="fields.nitterUrl"></label>
+                <input
+                  id="nitter-url"
+                  type="url"
+                  inputmode="url"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+
+            <div class="field-grid common-fields">
+              <div class="field field-wide">
+                <label for="proxy-url" data-i18n="fields.proxyUrl"></label>
+                <input
+                  id="proxy-url"
+                  type="url"
+                  inputmode="url"
+                  spellcheck="false"
+                />
+              </div>
+
+              <div class="field">
+                <label for="timeout" data-i18n="fields.timeout"></label>
+                <input
+                  id="timeout"
+                  type="number"
+                  min="3"
+                  max="30"
+                  step="1"
+                  value="10"
+                  required
+                />
+              </div>
+
+              <div class="field checkbox-field">
+                <input id="verify-ssl" type="checkbox" checked />
+                <label for="verify-ssl" data-i18n="fields.verifySsl"></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="command-row">
+            <div class="field checkbox-field full-check-field">
+              <input id="full-check" type="checkbox" />
+              <label for="full-check" data-i18n="fields.fullCheck"></label>
+            </div>
+            <button id="run-probe" type="submit">
+              <span data-i18n="actions.run"></span>
+            </button>
+          </div>
+
+          <p id="request-status" class="request-status" aria-live="polite"></p>
+          <p
+            id="error-text"
+            class="error-text breakable"
+            role="alert"
+            aria-live="polite"
+            hidden
+          ></p>
+        </section>
+      </form>
+
+      <section class="tool-section result-section" aria-labelledby="results-heading">
+        <h2 id="results-heading" data-i18n="headings.results"></h2>
+        <div class="result-frame">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="results.mode"></th>
+                <th scope="col" data-i18n="results.status"></th>
+                <th scope="col" data-i18n="results.latency"></th>
+                <th scope="col" data-i18n="results.httpStatus"></th>
+                <th scope="col" data-i18n="results.feedRecognition"></th>
+                <th scope="col" data-i18n="results.error"></th>
+              </tr>
+            </thead>
+            <tbody id="result-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section
+        class="recommendation-section"
+        aria-labelledby="recommendation-heading"
+      >
+        <h2
+          id="recommendation-heading"
+          data-i18n="headings.recommendation"
+        ></h2>
+        <p id="recommendation-message" class="breakable"></p>
+        <dl id="recommendation-facts" class="recommendation-facts" hidden>
+          <div>
+            <dt data-i18n="recommendation.tlsLabel"></dt>
+            <dd id="recommendation-tls"></dd>
+          </div>
+          <div>
+            <dt data-i18n="recommendation.proxyLabel"></dt>
+            <dd id="recommendation-proxy"></dd>
+          </div>
+        </dl>
+        <div id="security-warning" class="security-warning" role="alert" hidden>
+          <strong data-i18n="recommendation.warningHeading"></strong>
+          <span id="security-warning-text"></span>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

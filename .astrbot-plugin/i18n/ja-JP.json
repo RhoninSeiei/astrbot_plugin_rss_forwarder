@@ -1,0 +1,121 @@
+{
+  "pages": {
+    "source-diagnostics": {
+      "title": "ソース診断",
+      "description": "直接接続、ソースプロキシ、厳格または緩和した TLS 検証でソースへの接続を確認します。診断結果は設定に保存されません。",
+      "headings": {
+        "source": "ソース",
+        "draft": "下書き設定",
+        "results": "診断結果",
+        "recommendation": "設定の提案"
+      },
+      "source": {
+        "label": "ソースを選択",
+        "draft": "下書きソース",
+        "savedSummary": "保存済みソースではバックエンドの完全な設定を使用します。このページには秘匿化した情報だけを表示します。",
+        "disabled": "無効",
+        "empty": "保存済みソースはありません"
+      },
+      "sourceTypes": {
+        "rss": "RSS",
+        "twitter": "Twitter / Nitter"
+      },
+      "fields": {
+        "sourceType": "ソース種別",
+        "sourceAddress": "ソースアドレス",
+        "proxyConfigured": "ソースプロキシ設定済み",
+        "currentTls": "現在の TLS 検証",
+        "url": "RSS URL",
+        "nitterUrl": "Nitter ベース URL",
+        "username": "Twitter ユーザー名",
+        "proxyUrl": "ソースプロキシ URL",
+        "timeout": "タイムアウト秒数",
+        "verifySsl": "ソースの TLS 証明書を検証する",
+        "authMode": "認証方式",
+        "temporaryKey": "一時 key",
+        "fullCheck": "適用可能な全モードを確認する"
+      },
+      "auth": {
+        "none": "認証なし",
+        "query": "クエリパラメーター key",
+        "header": "Authorization ヘッダー"
+      },
+      "actions": {
+        "run": "診断を開始",
+        "running": "診断中…"
+      },
+      "results": {
+        "mode": "モード",
+        "status": "状態",
+        "latency": "所要時間",
+        "httpStatus": "HTTP 状態",
+        "feedRecognition": "コンテンツ判定",
+        "error": "エラー",
+        "none": "—"
+      },
+      "statuses": {
+        "success": "成功",
+        "failure": "失敗",
+        "skipped": "スキップ",
+        "pending": "未実行"
+      },
+      "errors": {
+        "load": "ソース一覧を読み込めませんでした",
+        "request": "ソース診断に失敗しました",
+        "validation": "下書きの入力内容を確認してください。",
+        "invalidTimeout": "タイムアウトには 3 から 30 までの整数を指定してください。",
+        "types": {
+          "dns": "DNS 名前解決",
+          "connect": "接続",
+          "timeout": "タイムアウト",
+          "tls_certificate": "TLS 証明書",
+          "proxy": "ソースプロキシ",
+          "http_status": "HTTP 状態",
+          "invalid_feed": "コンテンツ形式",
+          "unknown": "不明なエラー"
+        }
+      },
+      "recommendation": {
+        "none": "診断完了後に提案を表示します。",
+        "tlsLabel": "TLS 検証",
+        "proxyLabel": "ソースプロキシ",
+        "keepEnabled": "有効のままにする",
+        "disable": "このソースだけ無効化を検討",
+        "notApplicable": "対象外または現状を維持",
+        "useProxy": "現在のソースプロキシを使用",
+        "noProxy": "ソースプロキシは不要",
+        "proxyUnchanged": "現状を維持",
+        "warningHeading": "証明書のセキュリティ警告",
+        "securityWarning": "証明書検証を無効にするとサーバーの身元を確認できず、中間者攻撃を受ける可能性があります。",
+        "onlyThisSource": "この設定は現在のソースだけに適用してください。記事本文とメディアのダウンロードでは厳格な検証を続けます。",
+        "codes": {
+          "direct_strict": "直接接続と厳格な証明書検証を利用できます。",
+          "proxy_strict": "ソースプロキシと厳格な証明書検証を利用できます。",
+          "direct_relaxed": "証明書検証を無効にした場合だけ直接接続を利用できます。",
+          "proxy_relaxed": "証明書検証を無効にした場合だけソースプロキシを利用できます。",
+          "invalid_feed": "ソースには接続できますが、応答を対応フィードとして判定できません。",
+          "unreachable": "適用可能な全モードで接続に失敗しました。"
+        }
+      },
+      "values": {
+        "yes": "はい",
+        "no": "いいえ",
+        "enabled": "有効",
+        "disabled": "無効",
+        "recognized": "判定済み",
+        "unrecognized": "判定できません",
+        "notApplicable": "対象外"
+      },
+      "units": {
+        "seconds": "秒",
+        "milliseconds": "ミリ秒"
+      },
+      "modes": {
+        "direct_strict": "直接接続 · 厳格 TLS",
+        "proxy_strict": "ソースプロキシ · 厳格 TLS",
+        "direct_relaxed": "直接接続 · 緩和 TLS",
+        "proxy_relaxed": "ソースプロキシ · 緩和 TLS"
+      }
+    }
+  }
+}
