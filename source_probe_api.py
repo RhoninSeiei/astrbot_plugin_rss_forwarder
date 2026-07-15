@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import unicodedata
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -12,7 +13,7 @@ from .source_probe import SourceProbeService
 
 
 PLUGIN_NAME = "astrbot_plugin_rss_forwarder"
-_ANONYMOUS_LOCK_KEY = "__anonymous__"
+_ANONYMOUS_LOCK_KEY = "anonymous"
 _SOURCE_SCHEMES = {"http", "https"}
 _PROXY_SCHEMES = {"http", "https", "socks4", "socks5", "socks5h"}
 
@@ -90,7 +91,7 @@ class SourceProbeApi:
             except ValueError as exc:
                 return error_response(str(exc), status_code=400)
 
-        lock_key = _request_lock_key(request.username)
+        lock_key = _request_lock_key(request.username, request.client_host)
         lock = self._probe_locks.get(lock_key)
         if lock is None:
             lock = asyncio.Lock()
@@ -118,10 +119,11 @@ class SourceProbeApi:
         return next((feed for feed in self._config.feeds if feed.id == feed_id), None)
 
 
-def _request_lock_key(username: str | None) -> str:
-    if username is None:
-        return _ANONYMOUS_LOCK_KEY
-    return username
+def _request_lock_key(username: str | None, client_host: str | None) -> str:
+    for value in (username, client_host):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _ANONYMOUS_LOCK_KEY
 
 
 def _draft_feed(raw_draft: Any) -> FeedConfig:
@@ -203,6 +205,9 @@ def _string_field(values: dict[str, Any], name: str, default: str) -> str:
 
 
 def _validate_url(value: str, field_name: str, schemes: set[str]) -> None:
+    authority = _raw_url_authority(value)
+    if not authority or _has_forbidden_url_host_character(authority):
+        raise ValueError(f"{field_name} must be a valid URL")
     try:
         parsed = urlsplit(value)
         scheme = parsed.scheme.lower()
@@ -210,8 +215,34 @@ def _validate_url(value: str, field_name: str, schemes: set[str]) -> None:
         parsed.port
     except ValueError:
         raise ValueError(f"{field_name} must be a valid URL") from None
-    if scheme not in schemes or not hostname:
+    if (
+        scheme not in schemes
+        or not hostname
+        or _has_forbidden_url_host_character(hostname)
+    ):
         raise ValueError(f"{field_name} must be a valid URL")
+
+
+def _raw_url_authority(value: str) -> str:
+    scheme_end = value.find("://")
+    if scheme_end < 0:
+        return ""
+    authority_start = scheme_end + 3
+    authority_end = len(value)
+    for delimiter in "/?#":
+        delimiter_index = value.find(delimiter, authority_start)
+        if delimiter_index >= 0:
+            authority_end = min(authority_end, delimiter_index)
+    return value[authority_start:authority_end]
+
+
+def _has_forbidden_url_host_character(value: str) -> bool:
+    return any(
+        character == "\\"
+        or character.isspace()
+        or unicodedata.category(character) == "Cc"
+        for character in value
+    )
 
 
 def _redact_url(value: str) -> str:
@@ -230,25 +261,61 @@ def _redact_url(value: str) -> str:
 
 def _feed_secrets(feed: FeedConfig) -> tuple[str, ...]:
     secrets = [str(feed.key or "")]
-    for value in (feed.url, feed.nitter_url, feed.proxy_url):
+    for value in (feed.url, feed.nitter_url):
         try:
             parsed = urlsplit(str(value or ""))
         except ValueError:
             continue
         secrets.extend((parsed.username or "", parsed.password or ""))
-    return tuple(secret for secret in secrets if secret)
+    secrets.extend(_proxy_secret_variants(feed.proxy_url))
+    return tuple(sorted(set(filter(None, secrets)), key=len, reverse=True))
+
+
+def _proxy_secret_variants(proxy_url: str) -> tuple[str, ...]:
+    raw_url = str(proxy_url or "")
+    if not raw_url:
+        return ()
+    try:
+        parsed = urlsplit(raw_url)
+        hostname = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        return (raw_url,)
+
+    safe_hostname = f"[{hostname}]" if ":" in hostname else hostname
+    host_port = f"{safe_hostname}:{port}" if port is not None else safe_hostname
+    without_userinfo = urlunsplit(
+        (parsed.scheme, host_port, parsed.path, parsed.query, parsed.fragment)
+    )
+    without_userinfo_and_query = urlunsplit(
+        (parsed.scheme, host_port, parsed.path, "", "")
+    )
+    return (
+        raw_url,
+        without_userinfo,
+        without_userinfo_and_query,
+        host_port,
+        hostname,
+        parsed.username or "",
+        parsed.password or "",
+    )
 
 
 def _redact_report_secrets(value: Any, secrets: tuple[str, ...]) -> Any:
+    ordered_secrets = tuple(sorted(set(filter(None, secrets)), key=len, reverse=True))
+    return _redact_report_value(value, ordered_secrets)
+
+
+def _redact_report_value(value: Any, secrets: tuple[str, ...]) -> Any:
     if isinstance(value, dict):
         return {
-            key: _redact_report_secrets(item, secrets)
+            key: _redact_report_value(item, secrets)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact_report_secrets(item, secrets) for item in value]
+        return [_redact_report_value(item, secrets) for item in value]
     if isinstance(value, tuple):
-        return tuple(_redact_report_secrets(item, secrets) for item in value)
+        return tuple(_redact_report_value(item, secrets) for item in value)
     if isinstance(value, str):
         for secret in secrets:
             value = value.replace(secret, "<redacted>")
