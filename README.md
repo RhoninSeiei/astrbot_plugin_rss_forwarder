@@ -119,7 +119,7 @@ Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新
 
 `verify_ssl` 位于 `feeds[]` 的每个来源设置中，`RSS/Atom 源` 与 `Twitter/Nitter 源` 两种模板均提供该字段。通常应保持开启，以校验来源服务器身份并防止内容在传输中被冒充。该设置只控制 RSS 文档、Nitter 时间线和 Nitter 推文详情请求；正文、图片、视频及其他媒体下载始终采用严格证书校验。
 
-AstrBot v4.24.1 及以上版本可从 `插件详情 -> 来源诊断` 打开 Plugin Page。较早版本缺少 Plugin Pages 支持，轮询功能与 `/rss probe` 命令仍可使用。诊断结果包含以下四种模式：
+AstrBot v4.24.1 已支持 Plugin Pages。在该版本中，入口可能显示页面目录名 `source-diagnostics`；支持插件 i18n 的较新版本会显示本地化标题 `来源诊断`。可从 `插件详情` 中选择对应入口打开页面。早于 v4.24.1 的版本仍可使用轮询功能与 `/rss probe` 命令。诊断结果包含以下四种模式：
 
 - `direct_strict`：使用默认网络并执行严格证书校验。
 - `proxy_strict`：使用来源设置中的 `proxy_url` 并执行严格证书校验。

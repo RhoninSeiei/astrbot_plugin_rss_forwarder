@@ -460,6 +460,31 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(metadata_version, runtime_version)
         self.assertEqual(metadata_version, "0.7.1")
 
+    def test_readmes_document_source_diagnostics_entry_labels(self):
+        expected_titles = {
+            "README.md": "来源诊断",
+            "README.en.md": "Source diagnostics",
+            "README.ja.md": "ソース診断",
+        }
+        release_heading = re.compile(r"(?m)^#{1,6}\s+v?\d+\.\d+\.\d+\s*$")
+
+        for readme_path, expected_title in expected_titles.items():
+            with self.subTest(readme=readme_path):
+                content = Path(readme_path).read_text(encoding="utf-8")
+                for required_text in (
+                    "source-diagnostics",
+                    "v4.24.1",
+                    f"`{expected_title}`",
+                ):
+                    self.assertTrue(
+                        required_text in content,
+                        f"{readme_path} missing {required_text!r}",
+                    )
+                self.assertIsNone(
+                    release_heading.search(content),
+                    f"{readme_path} contains a release-history heading",
+                )
+
     def test_display_flags_parse(self):
         conf = _minimal_runtime_conf()
         conf.update(

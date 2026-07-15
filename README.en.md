@@ -133,7 +133,7 @@ Daily digest fields:
 
 `verify_ssl` appears in every `feeds[]` source entry, in both the `RSS/Atom Source` and `Twitter/Nitter Source` templates. Keep it enabled for normal use so the source server's identity is verified and content cannot be silently impersonated in transit. The setting applies only to RSS documents, Nitter timelines, and Nitter tweet-detail requests; article bodies, images, videos, and other media downloads always use strict certificate verification.
 
-On AstrBot v4.24.1 or newer, open the Plugin Page from `Plugin Details -> Source Diagnostics`. Earlier AstrBot versions do not provide Plugin Pages, but polling and the `/rss probe` command remain available. Diagnostic results use four modes:
+AstrBot v4.24.1 supports Plugin Pages. On that release, the entry may appear under its directory name `source-diagnostics`; newer AstrBot releases with plugin i18n support show the localized title `Source diagnostics`. Open either entry from `Plugin Details`. AstrBot releases earlier than v4.24.1 still support polling and the `/rss probe` command. Diagnostic results use four modes:
 
 - `direct_strict`: use the default network with strict certificate verification.
 - `proxy_strict`: use the source's `proxy_url` with strict certificate verification.
