@@ -1,5 +1,6 @@
 import ast
 import json
+import re
 import sys
 import types
 import unittest
@@ -431,6 +432,33 @@ class ConfigTranslationTests(unittest.TestCase):
 
         self.assertIsNotNone(register_call)
         self.assertEqual(register_call.args[0].value, "astrbot_plugin_rss_forwarder")
+
+    def test_release_versions_match_and_equal_0_7_1(self):
+        metadata_text = Path("metadata.yaml").read_text(encoding="utf-8")
+        metadata_match = re.search(
+            r"(?m)^version:\s*(v?\d+\.\d+\.\d+)\s*$",
+            metadata_text,
+        )
+        self.assertIsNotNone(metadata_match)
+        metadata_version = metadata_match.group(1).removeprefix("v")
+
+        tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+        register_call = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "register"
+            ),
+            None,
+        )
+        self.assertIsNotNone(register_call)
+        self.assertGreaterEqual(len(register_call.args), 4)
+        self.assertIsInstance(register_call.args[3], ast.Constant)
+        runtime_version = register_call.args[3].value
+
+        self.assertEqual(metadata_version, runtime_version)
+        self.assertEqual(metadata_version, "0.7.1")
 
     def test_display_flags_parse(self):
         conf = _minimal_runtime_conf()

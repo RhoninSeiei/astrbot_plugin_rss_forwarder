@@ -129,6 +129,21 @@ Daily digest fields:
 - `prompt_template`
 - `enabled`
 
+## Source-Level TLS Verification and Diagnostics
+
+`verify_ssl` appears in every `feeds[]` source entry, in both the `RSS/Atom Source` and `Twitter/Nitter Source` templates. Keep it enabled for normal use so the source server's identity is verified and content cannot be silently impersonated in transit. The setting applies only to RSS documents, Nitter timelines, and Nitter tweet-detail requests; article bodies, images, videos, and other media downloads always use strict certificate verification.
+
+On AstrBot v4.24.1 or newer, open the Plugin Page from `Plugin Details -> Source Diagnostics`. Earlier AstrBot versions do not provide Plugin Pages, but polling and the `/rss probe` command remain available. Diagnostic results use four modes:
+
+- `direct_strict`: use the default network with strict certificate verification.
+- `proxy_strict`: use the source's `proxy_url` with strict certificate verification.
+- `direct_relaxed`: use the default network without certificate verification, only to determine whether a failure is certificate-related.
+- `proxy_relaxed`: use the source proxy without certificate verification, only to determine whether the proxy path has a certificate problem.
+
+A successful `relaxed` mode means the source becomes reachable after certificate verification is disabled and therefore carries a certificate security warning. Keep strict verification for normal use; change `verify_ssl` for a source only after confirming a certificate-chain problem and accepting the security implications. Recommendations shown by the page are not saved automatically and must be applied manually in the source settings.
+
+For older AstrBot versions or mobile administration, run `/rss probe <feed_id>` in an administrator conversation to inspect a saved source. The command reports the same mode results and recommendation without changing source settings or polling state.
+
 ## Translation Credential Setup
 
 ### 1. AstrBot LLM provider
