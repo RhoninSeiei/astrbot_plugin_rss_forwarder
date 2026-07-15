@@ -62,7 +62,7 @@ class _FakeResponse:
 
 class FeedFetcherTests(unittest.TestCase):
     def test_rss_fetch_metadata_includes_media_flags_and_max_items(self):
-        async def fake_fetch_single(feed):
+        async def fake_fetch_single(feed, **_kwargs):
             return fetcher_module.FetchedFeed(
                 feed_id=feed.id,
                 body="<rss><channel></channel></rss>",
@@ -134,6 +134,57 @@ class FeedFetcherTests(unittest.TestCase):
         self.assertIn("Mozilla/5.0", captured["headers"]["User-agent"])
         self.assertIn("application/rss+xml", captured["headers"]["Accept"])
         self.assertIn("en-US", captured["headers"]["Accept-language"])
+
+    def test_rss_fetch_failure_log_includes_job_feed_url_and_proxy_state(self):
+        captured = {}
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                raise OSError("certificate verify failed")
+
+        def fake_build_opener(*args):
+            return FakeOpener()
+
+        class FakeLogger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                captured["warning"] = (args, kwargs)
+
+        original_build_opener = fetcher_module.build_opener
+        original_logger = fetcher_module.logger
+        fetcher_module.build_opener = fake_build_opener
+        fetcher_module.logger = FakeLogger()
+        try:
+            feed = types.SimpleNamespace(
+                id="rss-1",
+                source_type="rss",
+                enabled=True,
+                url="https://example.com/feed.xml?key=secret-token",
+                auth_mode="none",
+                key="",
+                timeout=17,
+                proxy_url="",
+            )
+            fetcher = FeedFetcher(types.SimpleNamespace(feeds=[feed]), _FakeStorage())
+
+            result = asyncio.run(
+                fetcher.fetch(types.SimpleNamespace(id="job-1", feed_ids=["rss-1"]))
+            )
+        finally:
+            fetcher_module.build_opener = original_build_opener
+            fetcher_module.logger = original_logger
+
+        self.assertEqual(result, [])
+        args, _kwargs = captured["warning"]
+        self.assertIn("job=%s", args[0])
+        self.assertIn("feed=%s", args[0])
+        self.assertIn("url=%s", args[0])
+        self.assertIn("proxy=%s", args[0])
+        self.assertEqual(args[1], "job-1")
+        self.assertEqual(args[2], "rss-1")
+        self.assertEqual(args[3], "https://example.com/feed.xml?<redacted>")
 
 
 if __name__ == "__main__":

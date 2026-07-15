@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import ProxyHandler, Request, build_opener, getproxies
 
 from astrbot.api import logger
 
@@ -31,9 +31,15 @@ class FeedFetcher:
 
     async def fetch(self, job) -> list[dict[str, Any]]:
         feed_ids = list(getattr(job, "feed_ids", []) or [])
-        return await self.fetch_feed_ids(feed_ids)
+        job_id = str(getattr(job, "id", "") or "").strip()
+        return await self.fetch_feed_ids(feed_ids, job_id=job_id)
 
-    async def fetch_feed_ids(self, feed_ids: list[str]) -> list[dict[str, Any]]:
+    async def fetch_feed_ids(
+        self,
+        feed_ids: list[str],
+        *,
+        job_id: str = "",
+    ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         feed_map = {feed.id: feed for feed in self._config.feeds if feed.enabled}
         for feed_id in feed_ids:
@@ -46,7 +52,7 @@ class FeedFetcher:
                     continue
                 items.append(fetched_twitter)
                 continue
-            fetched = await self._fetch_single_feed(feed)
+            fetched = await self._fetch_single_feed(feed, job_id=job_id)
             if fetched is None:
                 continue
             items.append(
@@ -64,7 +70,7 @@ class FeedFetcher:
             )
         return items
 
-    async def _fetch_single_feed(self, feed) -> FetchedFeed | None:
+    async def _fetch_single_feed(self, feed, *, job_id: str = "") -> FetchedFeed | None:
         state = await self._storage.get_feed_state(feed.id)
         etag = str(state.get("etag", "")).strip()
         last_modified = str(state.get("last_modified", "")).strip()
@@ -109,7 +115,15 @@ class FeedFetcher:
             if "304" in str(exc):
                 logger.info("feed=%s not modified (304)", feed.id)
                 return None
-            logger.warning("fetch feed=%s failed: %s", feed.id, exc)
+            logger.warning(
+                "fetch job=%s feed=%s url=%s proxy=%s client=%s failed: %s",
+                job_id or "-",
+                feed.id,
+                self._redact_url_for_log(url),
+                self._proxy_state_for_log(proxy_url),
+                "httpx" if self._should_use_httpx(proxy_url) else "urllib",
+                exc,
+            )
             return None
 
     async def _fetch_single_twitter_feed(self, feed) -> dict[str, Any] | None:
@@ -186,3 +200,15 @@ class FeedFetcher:
         return str(proxy_url or "").strip().lower().startswith(
             ("socks://", "socks5://", "socks5h://", "socks4://")
         )
+
+    @staticmethod
+    def _proxy_state_for_log(proxy_url: str) -> str:
+        if str(proxy_url or "").strip():
+            return "feed"
+        return "system" if getproxies() else "off"
+
+    @staticmethod
+    def _redact_url_for_log(url: str) -> str:
+        parsed = urlparse(str(url or ""))
+        query = "<redacted>" if parsed.query else ""
+        return urlunparse(parsed._replace(query=query, fragment=""))
