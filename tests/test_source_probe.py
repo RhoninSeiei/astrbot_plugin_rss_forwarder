@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import httpx
+from urllib3.exceptions import MaxRetryError
 
 
 astrbot_module = types.ModuleType("astrbot")
@@ -419,6 +420,27 @@ class SourceProbeErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(error_type, expected)
                 if expected == "http_status":
                     self.assertEqual(status, 502)
+
+    def test_classifies_urllib3_socks_failure_without_exposing_credentials(self):
+        error = MaxRetryError(
+            None,
+            "/feed.xml?token=query-secret",
+            OSError(
+                "SOCKSConnection proxy-user:proxy-password@127.0.0.1:1080 "
+                "connection refused"
+            ),
+        )
+
+        error_type, message, status = classify_probe_error(
+            error,
+            secrets=("proxy-password",),
+        )
+
+        self.assertEqual(error_type, "proxy")
+        self.assertIsNone(status)
+        self.assertNotIn("proxy-password", message)
+        self.assertNotIn("query-secret", message)
+        self.assertNotIn("token=", message)
 
     async def test_non_success_response_object_is_classified_as_http_status(self):
         def requester(**kwargs):

@@ -10,14 +10,13 @@ from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
-from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 from astrbot.api import logger
 
 from .source_http import (
     NITTER_REQUEST_HEADERS,
     build_nitter_timeline_request,
-    build_ssl_context,
+    get_response_header,
     request_source,
 )
 
@@ -165,16 +164,6 @@ class TwitterTimelineFetcher:
             max_redirects=None,
         )
         return response.body.decode("utf-8", errors="ignore")
-
-    @staticmethod
-    def _should_use_httpx(proxy_url: str) -> bool:
-        if str(proxy_url or "").strip().lower().startswith(("socks://", "socks5://", "socks5h://", "socks4://")):
-            return True
-        try:
-            import httpx  # noqa: F401
-        except Exception:
-            return False
-        return False
 
     def _extract_timeline_ids(self, html: str, username: str) -> list[str]:
         pattern = re.compile(
@@ -352,89 +341,28 @@ class TwitterTimelineFetcher:
             "User-Agent": "astrbot_plugin_rss_forwarder/0.5.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
             "Accept": "*/*",
         }
-        if self._should_use_httpx(proxy_url):
-            return self._cache_media_url_with_httpx(
-                media_url,
-                cache_dir,
-                proxy_url,
-                timeout,
-                media_kind,
-                cache_key,
-            )
-        handlers = [HTTPSHandler(context=build_ssl_context(True))]
-        if proxy_url:
-            handlers.insert(
-                0,
-                ProxyHandler({"http": proxy_url, "https": proxy_url}),
-            )
-        opener = build_opener(*handlers)
-        request = Request(url=media_url, headers=headers)
-        with opener.open(request, timeout=timeout) as response:  # noqa: S310
-            content_type = str(response.headers.get("Content-Type", "") or "")
-            content_length = str(response.headers.get("Content-Length", "") or "").strip()
-            if content_length:
-                try:
-                    if int(content_length) > self.MEDIA_MAX_FILE_BYTES:
-                        return None
-                except ValueError:
-                    pass
-            data = response.read(self.MEDIA_MAX_FILE_BYTES + 1)
-
-        if not data or len(data) > self.MEDIA_MAX_FILE_BYTES:
-            return None
-
-        ext = self._guess_media_extension(media_url, content_type, media_kind)
-        target = cache_dir / f"{cache_key}{ext}"
-        temp_target = target.with_name(f"{target.name}.tmp")
-        temp_target.write_bytes(data)
-        temp_target.replace(target)
-        return target
-
-    def _cache_media_url_with_httpx(
-        self,
-        media_url: str,
-        cache_dir: Path,
-        proxy_url: str,
-        timeout: int,
-        media_kind: str,
-        cache_key: str,
-    ) -> Path | None:
-        import httpx
-
-        headers = {
-            "User-Agent": "astrbot_plugin_rss_forwarder/0.5.0 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
-            "Accept": "*/*",
-        }
-        kwargs: dict[str, Any] = {
-            "headers": headers,
-            "timeout": timeout,
-            "follow_redirects": True,
-        }
-        if proxy_url:
-            kwargs["proxy"] = proxy_url
-        with httpx.Client(**kwargs) as client:
-            with client.stream("GET", media_url) as response:
-                response.raise_for_status()
-                content_type = str(response.headers.get("Content-Type", "") or "")
-                content_length = str(response.headers.get("Content-Length", "") or "").strip()
-                if content_length:
-                    try:
-                        if int(content_length) > self.MEDIA_MAX_FILE_BYTES:
-                            return None
-                    except ValueError:
-                        pass
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > self.MEDIA_MAX_FILE_BYTES:
-                        return None
-                    chunks.append(chunk)
-
-        data = b"".join(chunks)
-        if not data:
+        response = request_source(
+            url=media_url,
+            headers=headers,
+            proxy_url=proxy_url,
+            timeout=timeout,
+            verify_ssl=True,
+            max_bytes=self.MEDIA_MAX_FILE_BYTES,
+            max_redirects=None,
+        )
+        content_type = get_response_header(response.headers, "Content-Type")
+        content_length = get_response_header(
+            response.headers,
+            "Content-Length",
+        ).strip()
+        if content_length:
+            try:
+                if int(content_length) > self.MEDIA_MAX_FILE_BYTES:
+                    return None
+            except ValueError:
+                pass
+        data = response.body
+        if not data or response.truncated:
             return None
         ext = self._guess_media_extension(media_url, content_type, media_kind)
         target = cache_dir / f"{cache_key}{ext}"

@@ -178,6 +178,7 @@ def classify_probe_error(
             "proxy authentication",
             "proxy protocol",
             "tunnel connection",
+            "socksconnection",
         )
     ):
         return "proxy", message, None

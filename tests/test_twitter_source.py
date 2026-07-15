@@ -1,12 +1,10 @@
 import inspect
-import ssl
 import sys
 import types
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from unittest import mock
-from urllib.request import HTTPSHandler
 
 
 astrbot_module = types.ModuleType("astrbot")
@@ -427,7 +425,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
             ("http://127.0.0.1:7890", 13, "image"),
         )
 
-    async def test_urllib_media_downloader_uses_strict_ssl_context_for_relaxed_feed(self):
+    async def test_http_proxy_media_uses_shared_transport_with_strict_tls(self):
         class Feed:
             id = "tw-relaxed-urllib"
             username = "alice"
@@ -455,27 +453,14 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
             </div>
             """
 
-        class FakeResponse:
-            headers = {"Content-Type": "image/jpeg", "Content-Length": "3"}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self, size=-1):
-                return b"img"
-
-        class FakeOpener:
-            def open(self, request, timeout):
-                captured["media_request"] = request
-                captured["media_timeout"] = timeout
-                return FakeResponse()
-
-        def fake_build_opener(*handlers):
-            captured["handlers"] = handlers
-            return FakeOpener()
+        def fake_request_source(**kwargs):
+            captured["media_request"] = kwargs
+            return source_http_module.SourceHttpResponse(
+                body=b"img",
+                status=200,
+                headers={"content-type": "image/jpeg", "content-length": "3"},
+                final_url="https://nitter.example.com/pic/a.jpg",
+            )
 
         fetcher = TwitterTimelineFetcher()
         with (
@@ -485,7 +470,11 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
                 staticmethod(fake_open_text),
             ),
             mock.patch.object(fetcher, "_cleanup_media_cache", lambda path: None),
-            mock.patch.object(twitter_module, "build_opener", fake_build_opener),
+            mock.patch.object(
+                twitter_module,
+                "request_source",
+                fake_request_source,
+            ),
         ):
             result = await fetcher.fetch(
                 Feed(),
@@ -495,24 +484,24 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(captured["source_verify_ssl"], [False, False])
-        https_handlers = [
-            handler
-            for handler in captured["handlers"]
-            if isinstance(handler, HTTPSHandler)
-        ]
-        self.assertEqual(len(https_handlers), 1)
         self.assertEqual(
-            https_handlers[0]._context.verify_mode,
-            ssl.CERT_REQUIRED,
+            captured["media_request"]["proxy_url"],
+            "http://127.0.0.1:7890",
         )
+        self.assertIs(captured["media_request"]["verify_ssl"], True)
+        self.assertEqual(
+            captured["media_request"]["max_bytes"],
+            fetcher.MEDIA_MAX_FILE_BYTES,
+        )
+        self.assertIsNone(captured["media_request"]["max_redirects"])
 
-    async def test_httpx_media_downloader_keeps_strict_default_for_relaxed_feed(self):
+    async def test_socks4_media_uses_shared_transport_with_strict_tls(self):
         class Feed:
-            id = "tw-relaxed-httpx"
+            id = "tw-relaxed-socks4"
             username = "alice"
             nitter_url = "https://nitter.example.com"
             url = ""
-            proxy_url = "socks5://127.0.0.1:1080"
+            proxy_url = "socks4://127.0.0.1:1080"
             timeout = 13
             verify_ssl = False
             send_images = True
@@ -534,34 +523,14 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
             </div>
             """
 
-        class FakeResponse:
-            headers = {"Content-Type": "image/jpeg", "Content-Length": "3"}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def raise_for_status(self):
-                pass
-
-            def iter_bytes(self):
-                yield b"img"
-
-        class FakeClient:
-            def __init__(self, **kwargs):
-                captured["client_kwargs"] = kwargs
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def stream(self, method, url):
-                captured["stream"] = (method, url)
-                return FakeResponse()
+        def fake_request_source(**kwargs):
+            captured["media_request"] = kwargs
+            return source_http_module.SourceHttpResponse(
+                body=b"img",
+                status=200,
+                headers={"content-type": "image/jpeg", "content-length": "3"},
+                final_url="https://nitter.example.com/pic/a.jpg",
+            )
 
         fetcher = TwitterTimelineFetcher()
         with (
@@ -571,9 +540,10 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
                 staticmethod(fake_open_text),
             ),
             mock.patch.object(fetcher, "_cleanup_media_cache", lambda path: None),
-            mock.patch.dict(
-                sys.modules,
-                {"httpx": types.SimpleNamespace(Client=FakeClient)},
+            mock.patch.object(
+                twitter_module,
+                "request_source",
+                fake_request_source,
             ),
         ):
             result = await fetcher.fetch(
@@ -584,12 +554,16 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(captured["source_verify_ssl"], [False, False])
-        self.assertIs(captured["client_kwargs"].get("verify", True), True)
-        self.assertNotIn("verify_ssl", captured["client_kwargs"])
         self.assertEqual(
-            captured["stream"],
-            ("GET", "https://nitter.example.com/pic/a.jpg"),
+            captured["media_request"]["proxy_url"],
+            "socks4://127.0.0.1:1080",
         )
+        self.assertIs(captured["media_request"]["verify_ssl"], True)
+        self.assertEqual(
+            captured["media_request"]["max_bytes"],
+            fetcher.MEDIA_MAX_FILE_BYTES,
+        )
+        self.assertIsNone(captured["media_request"]["max_redirects"])
 
 
 if __name__ == "__main__":
