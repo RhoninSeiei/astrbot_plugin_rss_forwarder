@@ -52,6 +52,7 @@ class FeedConfig:
     key: str = ""
     enabled: bool = True
     timeout: int = 10
+    verify_ssl: bool = True
 
 
 @dataclass(slots=True)
@@ -195,6 +196,14 @@ class RSSConfig:
         jobs_raw = cls._normalize_collection(runtime_conf.get("jobs", []))
         daily_digests_raw = cls._normalize_collection(runtime_conf.get("daily_digests", []))
 
+        for item in feeds_raw:
+            raw_verify_ssl = item.get("verify_ssl", True)
+            if not isinstance(raw_verify_ssl, bool):
+                feed_id = str(item.get("id", "")).strip()
+                raise ConfigValidationError(
+                    f"feeds[{feed_id}].verify_ssl 必须是 bool"
+                )
+
         feeds = [
             FeedConfig(
                 id=str(item.get("id", "")).strip(),
@@ -212,6 +221,7 @@ class RSSConfig:
                 key=str(item.get("key", "")).strip(),
                 enabled=bool(item.get("enabled", True)),
                 timeout=int(item.get("timeout", 10)),
+                verify_ssl=bool(item.get("verify_ssl", True)),
             )
             for item in feeds_raw
         ]

@@ -110,6 +110,41 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertEqual(cfg.feeds[0].max_new_items, 0)
         self.assertTrue(cfg.feeds[0].send_images)
 
+    def test_feed_verify_ssl_defaults_to_true_for_legacy_config(self):
+        conf = _minimal_runtime_conf()
+        config = RSSConfig.from_context(conf)
+        self.assertTrue(config.feeds[0].verify_ssl)
+
+    def test_feed_verify_ssl_parses_false_for_rss_and_twitter(self):
+        conf = _minimal_runtime_conf()
+        conf["feeds"] = [
+            {
+                "id": "rss-insecure",
+                "url": "https://example.com/feed.xml",
+                "verify_ssl": False,
+            },
+            {
+                "id": "twitter-insecure",
+                "source_type": "twitter",
+                "username": "example",
+                "nitter_url": "https://nitter.example.com",
+                "verify_ssl": False,
+            },
+        ]
+        conf["jobs"][0]["feed_ids"] = ["rss-insecure", "twitter-insecure"]
+        config = RSSConfig.from_context(conf)
+        self.assertEqual(
+            [feed.verify_ssl for feed in config.feeds],
+            [False, False],
+        )
+
+    def test_feed_verify_ssl_rejects_non_bool_value(self):
+        conf = _minimal_runtime_conf()
+        conf["feeds"][0]["verify_ssl"] = "false"
+
+        with self.assertRaises(ConfigValidationError):
+            RSSConfig.from_context(conf)
+
     def test_daily_digest_parses_and_preserves_no_implicit_job(self):
         conf = {
             "feeds": [{"id": "feed-1", "url": "https://example.com/rss", "enabled": True}],
@@ -379,6 +414,12 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertNotIn("username", templates["rss_feed"]["items"])
         self.assertNotIn("auth_mode", templates["twitter_feed"]["items"])
         self.assertIn("max_new_items", templates["twitter_feed"]["items"])
+
+    def test_source_templates_expose_verify_ssl(self):
+        schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
+        templates = schema["feeds"]["templates"]
+        self.assertTrue(templates["rss_feed"]["items"]["verify_ssl"]["default"])
+        self.assertTrue(templates["twitter_feed"]["items"]["verify_ssl"]["default"])
 
     def test_runtime_register_name_matches_package_name(self):
         tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
