@@ -249,6 +249,34 @@ class SourceProbeContentRecognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(attempt.is_feed)
                 self.assertEqual(attempt.feed_kind, "unknown")
 
+    async def test_recognizes_truncated_xml_after_first_root_start_element(self):
+        cases = {
+            "rss": b"<rss version='2.0'><channel><title>partial",
+            "atom": (
+                b"<feed xmlns='http://www.w3.org/2005/Atom'>"
+                b"<title>partial"
+            ),
+            "rdf": (
+                b"<rdf:RDF "
+                b"xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>"
+                b"<item>partial"
+            ),
+        }
+
+        for expected, body in cases.items():
+            with self.subTest(expected=expected):
+                attempt = await self._kind_for(body)
+                self.assertTrue(attempt.is_feed)
+                self.assertEqual(attempt.feed_kind, expected)
+
+    async def test_rejects_rss_with_nonempty_namespace(self):
+        attempt = await self._kind_for(
+            b'<x:rss xmlns:x="urn:fake"><channel></channel></x:rss>'
+        )
+
+        self.assertFalse(attempt.is_feed)
+        self.assertEqual(attempt.feed_kind, "unknown")
+
     async def test_recognizes_nitter_timeline_with_tweet_content(self):
         body = b"<html><div class='timeline-item'><div class='tweet-content'>post</div></div></html>"
 
@@ -473,7 +501,7 @@ class SourceProbeErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
             secrets=(),
         )
 
-        self.assertIn("/feed.xml", message)
+        self.assertIn("<relative-url-redacted>", message)
         self.assertNotIn("token=", message)
         self.assertNotIn("relative-secret", message)
         self.assertNotIn("next=", message)
@@ -529,6 +557,65 @@ class SourceProbeErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
             "leaked-query",
             "fragment",
             "?token=",
+        ):
+            self.assertNotIn(forbidden, message)
+        self.assertLessEqual(len(message), 500)
+
+    def test_sanitizer_redacts_mixed_quoted_header_dictionary_conservatively(self):
+        message = sanitize_error_message(
+            RuntimeError(
+                "prefix {'aUtHoRiZaTiOn': \"Bearer mixed-token\", "
+                "\"Cookie\": 'sid=mixed-secret'} trailing-text"
+            ),
+            secrets=(),
+        )
+
+        self.assertEqual(message, "<request-headers-redacted>")
+
+    def test_sanitizer_redacts_header_dictionary_with_escaped_quote_values(self):
+        message = sanitize_error_message(
+            RuntimeError(
+                "prefix {\"Authorization\": \"Bearer tok\\\"en\", "
+                "'Cookie': 'sid=sec\\'ret'} trailing-text"
+            ),
+            secrets=(),
+        )
+
+        self.assertEqual(message, "<request-headers-redacted>")
+
+    def test_sanitizer_removes_absolute_url_query_with_spaces_and_following_tokens(self):
+        message = sanitize_error_message(
+            RuntimeError(
+                "failed https://user:password@example.com/feed.xml?first=one "
+                "second=two#fragment trailing-token"
+            ),
+            secrets=(),
+        )
+
+        for forbidden in (
+            "user",
+            "password",
+            "first=",
+            "second=",
+            "fragment",
+            "trailing-token",
+        ):
+            self.assertNotIn(forbidden, message)
+        self.assertLessEqual(len(message), 500)
+
+    def test_sanitizer_removes_relative_url_query_with_spaces_and_following_tokens(self):
+        message = sanitize_error_message(
+            RuntimeError(
+                "failed /feed.xml?first=one second=two#fragment trailing-token"
+            ),
+            secrets=(),
+        )
+
+        for forbidden in (
+            "first=",
+            "second=",
+            "fragment",
+            "trailing-token",
         ):
             self.assertNotIn(forbidden, message)
         self.assertLessEqual(len(message), 500)

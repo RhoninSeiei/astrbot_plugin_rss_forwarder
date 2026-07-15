@@ -120,24 +120,24 @@ def _sanitize_url(match: re.Match[str]) -> str:
 
 def sanitize_error_message(exc: BaseException, *, secrets) -> str:
     message = str(exc)
-    message = re.sub(
-        r"(?i)'(?:authorization|cookie)'\s*:\s*'[^']*'",
-        "<redacted-header>",
+    if re.search(
+        r"(?i)(?:['\"]\s*)?(?:authorization|cookie)(?:\s*['\"])?\s*:",
         message,
-    )
+    ):
+        return "<request-headers-redacted>"
     message = re.sub(
-        r'(?i)"(?:authorization|cookie)"\s*:\s*"[^"]*"',
-        "<redacted-header>",
-        message,
-    )
-    message = re.sub(
-        r"(?im)\b(?:authorization|cookie)\s*[:=]\s*[^\r\n]*",
-        "",
+        r"(?i)\b[a-z][a-z0-9+.-]*://[^\r\n?#]*[?#][^\r\n]*",
+        _sanitize_url,
         message,
     )
     message = re.sub(
         r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>'\"]+",
         _sanitize_url,
+        message,
+    )
+    message = re.sub(
+        r"(?<![:\w])(/[^\r\n?#]*[?#][^\r\n]*)",
+        "<relative-url-redacted>",
         message,
     )
     message = re.sub(
@@ -437,8 +437,19 @@ class SourceProbeService:
             count=1,
             flags=re.IGNORECASE,
         )
+        root = None
+        xml_parser = ElementTree.XMLPullParser(events=("start",))
         try:
-            root = ElementTree.fromstring(text)
+            for offset in range(0, len(text), 256):
+                xml_parser.feed(text[offset : offset + 256])
+                flush = getattr(xml_parser, "flush", None)
+                if callable(flush):
+                    flush()
+                for _event, element in xml_parser.read_events():
+                    root = element
+                    break
+                if root is not None:
+                    break
         except ElementTree.ParseError:
             root = None
         if root is not None and isinstance(root.tag, str):
@@ -447,7 +458,7 @@ class SourceProbeService:
             else:
                 namespace, local_name = "", root.tag
             local_name = local_name.lower()
-            if local_name == "rss":
+            if local_name == "rss" and not namespace:
                 return "rss"
             if local_name == "feed" and namespace == _ATOM_NAMESPACE:
                 return "atom"
