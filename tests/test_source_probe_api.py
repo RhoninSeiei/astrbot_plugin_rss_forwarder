@@ -436,6 +436,68 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_recommendation_port_redaction_inherits_attempt_error_type(self):
+        proxy_detail = "x" * 470 + " port 1080 " + "y" * 80
+        proxy_recommendation = ("诊断建议：" + proxy_detail)[:500]
+        cases = (
+            (
+                "proxy",
+                proxy_detail,
+                proxy_recommendation,
+                proxy_recommendation.replace("1080", "<redacted>"),
+            ),
+            (
+                "http_status",
+                "HTTP status 1080 remains",
+                "来源状态异常：HTTP status 1080 remains",
+                "来源状态异常：HTTP status 1080 remains",
+            ),
+        )
+
+        for error_type, error_message, recommendation_message, expected in cases:
+            def report_recommendation_port(_feed, _full_check):
+                return _Report(
+                    {
+                        "feed_id": "draft",
+                        "source_type": "rss",
+                        "attempts": [
+                            {
+                                "error_type": error_type,
+                                "error_message": error_message,
+                            }
+                        ],
+                        "recommendation": {
+                            "code": "unreachable",
+                            "verify_ssl": True,
+                            "use_proxy": False,
+                            "message": recommendation_message,
+                        },
+                    }
+                )
+
+            api = SourceProbeApi(_config(), _Service(report_recommendation_port))
+            with self.subTest(error_type=error_type):
+                response = await self._run(
+                    api,
+                    {
+                        "draft": {
+                            "source_type": "rss",
+                            "url": "https://example.com/feed.xml",
+                            "proxy_url": "socks5://proxy.example:1080",
+                        }
+                    },
+                )
+
+                self.assertEqual(response["status_code"], 200)
+                self.assertEqual(
+                    response["data"]["recommendation"]["message"],
+                    expected,
+                )
+                self.assertEqual(
+                    response["data"]["recommendation"]["code"],
+                    "unreachable",
+                )
+
     async def test_report_redacts_only_the_standalone_proxy_port_number(self):
         def report_proxy_port(_feed, _full_check):
             return _Report(
@@ -656,6 +718,59 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
                     response["data"]["recommendation"],
                     {"code": "direct_strict"},
                 )
+
+    async def test_proxy_hostname_redaction_normalizes_ipv6_zone_identifiers(self):
+        error_message = (
+            "compressed=fe80::1%eth0; "
+            "expanded=fe80:0000:0000:0000:0000:0000:0000:0001%eth0; "
+            "encoded=[fe80::1%25eth0]"
+        )
+        expected = (
+            "compressed=<redacted>; expanded=<redacted>; "
+            "encoded=[<redacted>]"
+        )
+
+        for proxy_url in (
+            "socks5://[fe80::1%eth0]:1080",
+            "socks5://[fe80::1%25eth0]:1080",
+        ):
+            def report_scoped_ipv6(_feed, _full_check):
+                return _Report(
+                    {
+                        "feed_id": "draft",
+                        "source_type": "rss",
+                        "attempts": [
+                            {
+                                "error_type": "proxy",
+                                "error_message": error_message,
+                            }
+                        ],
+                        "recommendation": {"code": "direct_strict"},
+                    }
+                )
+
+            api = SourceProbeApi(_config(), _Service(report_scoped_ipv6))
+            with self.subTest(proxy_url=proxy_url):
+                try:
+                    response = await self._run(
+                        api,
+                        {
+                            "draft": {
+                                "source_type": "rss",
+                                "url": "https://example.com/feed.xml",
+                                "proxy_url": proxy_url,
+                            }
+                        },
+                    )
+                except Exception as exc:
+                    self.fail(f"API raised {type(exc).__name__}: {exc}")
+
+                self.assertEqual(response["status_code"], 200)
+                self.assertEqual(
+                    response["data"]["attempts"][0]["error_message"],
+                    expected,
+                )
+                json.dumps(response, ensure_ascii=False)
 
     async def test_draft_twitter_accepts_typed_source_fields(self):
         captured = []

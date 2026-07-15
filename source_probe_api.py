@@ -317,8 +317,13 @@ def _proxy_error_values(
 
 def _proxy_hostname_variants(hostname: str) -> tuple[str, ...]:
     variants = {hostname}
+    address_hostname = hostname
+    scope: str | None = None
+    if ":" in hostname and "%" in hostname:
+        address_hostname, raw_scope = hostname.split("%", 1)
+        scope = raw_scope[2:] if raw_scope.startswith("25") else raw_scope
     try:
-        address = ipaddress.ip_address(hostname)
+        address = ipaddress.ip_address(address_hostname)
     except ValueError:
         try:
             variants.add(hostname.encode("idna").decode("ascii"))
@@ -329,7 +334,20 @@ def _proxy_hostname_variants(hostname: str) -> tuple[str, ...]:
         except UnicodeError:
             pass
     else:
-        variants.update((str(address), address.compressed, address.exploded))
+        address_variants = {str(address)}
+        try:
+            address_variants.add(address.compressed)
+        except ValueError:
+            pass
+        try:
+            address_variants.add(address.exploded)
+        except ValueError:
+            pass
+        variants.update(address_variants)
+        if scope:
+            for address_variant in address_variants:
+                variants.add(f"{address_variant}%{scope}")
+                variants.add(f"{address_variant}%25{scope}")
     return tuple(sorted(filter(None, variants), key=len, reverse=True))
 
 
@@ -374,9 +392,38 @@ def _redact_report_secrets(value: Any, feed: FeedConfig) -> Any:
             redacted_recommendation["message"] = _redact_error_message(
                 message,
                 feed,
+                error_type=_recommendation_error_type(message, attempts),
             )
         redacted["recommendation"] = redacted_recommendation
     return redacted
+
+
+def _recommendation_error_type(message: str, attempts: Any) -> str:
+    typed_attempts = []
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            error_message = attempt.get("error_message")
+            error_type = attempt.get("error_type")
+            if isinstance(error_message, str) and isinstance(error_type, str):
+                if error_message:
+                    typed_attempts.append((error_message, error_type))
+
+    for error_message, error_type in typed_attempts:
+        if error_message in message:
+            return error_type
+
+    if len(message) == 500:
+        for error_message, error_type in typed_attempts:
+            maximum_overlap = min(len(message), len(error_message))
+            for overlap in range(maximum_overlap, 31, -1):
+                if message.endswith(error_message[:overlap]):
+                    return error_type
+
+    if message.startswith("来源代理访问失败"):
+        return "proxy"
+    return ""
 
 
 def _redact_error_message(
