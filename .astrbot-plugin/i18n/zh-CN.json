@@ -42,7 +42,8 @@
       },
       "actions": {
         "run": "开始探测",
-        "running": "正在探测…"
+        "running": "正在探测…",
+        "completed": "探测完成。"
       },
       "results": {
         "mode": "模式",
@@ -87,6 +88,7 @@
         "proxyUnchanged": "保持现状",
         "warningHeading": "证书安全警告",
         "securityWarning": "关闭证书校验会失去服务器身份验证，可能遭受中间人攻击。",
+        "relaxedSuccessContext": "完整检查中宽松模式成功仅表示该模式可用；严格模式成功时仍应保持证书校验开启，不能仅据此关闭校验。",
         "onlyThisSource": "该设置仅应影响当前来源，正文和媒体下载继续使用严格校验。",
         "codes": {
           "direct_strict": "默认网络与严格证书校验可用。",
@@ -103,6 +105,7 @@
         "enabled": "开启",
         "disabled": "关闭",
         "recognized": "已识别",
+        "unknown": "未知",
         "unrecognized": "未识别",
         "notApplicable": "不适用"
       },

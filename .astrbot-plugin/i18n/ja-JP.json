@@ -42,7 +42,8 @@
       },
       "actions": {
         "run": "診断を開始",
-        "running": "診断中…"
+        "running": "診断中…",
+        "completed": "診断が完了しました。"
       },
       "results": {
         "mode": "モード",
@@ -87,6 +88,7 @@
         "proxyUnchanged": "現状を維持",
         "warningHeading": "証明書のセキュリティ警告",
         "securityWarning": "証明書検証を無効にするとサーバーの身元を確認できず、中間者攻撃を受ける可能性があります。",
+        "relaxedSuccessContext": "完全チェック中の緩和モード成功は、そのモードが利用可能であることだけを示します。厳格モードが成功している場合、証明書検証を無効にする理由にはなりません。",
         "onlyThisSource": "この設定は現在のソースだけに適用してください。記事本文とメディアのダウンロードでは厳格な検証を続けます。",
         "codes": {
           "direct_strict": "直接接続と厳格な証明書検証を利用できます。",
@@ -103,6 +105,7 @@
         "enabled": "有効",
         "disabled": "無効",
         "recognized": "判定済み",
+        "unknown": "不明",
         "unrecognized": "判定できません",
         "notApplicable": "対象外"
       },

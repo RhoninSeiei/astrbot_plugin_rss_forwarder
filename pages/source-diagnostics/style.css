@@ -9,6 +9,7 @@
   --color-border-strong: #b8c1cc;
   --color-accent: #3b6fd8;
   --color-accent-hover: #315fba;
+  --color-button-text: #ffffff;
   --color-accent-soft: #edf3ff;
   --color-success: #197044;
   --color-success-soft: #edf8f2;
@@ -34,6 +35,7 @@
   --color-border-strong: #4a5360;
   --color-accent: #82aaff;
   --color-accent-hover: #a0bcff;
+  --color-button-text: #14213d;
   --color-accent-soft: #202d49;
   --color-success: #72d7a5;
   --color-success-soft: #193428;
@@ -293,7 +295,7 @@ button {
   padding: 0.45rem 1rem;
   border-color: var(--color-accent);
   background: var(--color-accent);
-  color: #ffffff;
+  color: var(--color-button-text);
   font-weight: 650;
   cursor: pointer;
 }

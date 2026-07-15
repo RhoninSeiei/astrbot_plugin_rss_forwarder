@@ -40,6 +40,7 @@ const FALLBACKS = {
   "auth.header": "Authorization 请求头",
   "actions.run": "开始探测",
   "actions.running": "正在探测…",
+  "actions.completed": "探测完成。",
   "results.mode": "模式",
   "results.status": "状态",
   "results.latency": "耗时",
@@ -74,6 +75,7 @@ const FALLBACKS = {
   "recommendation.proxyUnchanged": "保持现状",
   "recommendation.warningHeading": "证书安全警告",
   "recommendation.securityWarning": "关闭证书校验会失去服务器身份验证，可能遭受中间人攻击。",
+  "recommendation.relaxedSuccessContext": "完整检查中宽松模式成功仅表示该模式可用；严格模式成功时仍应保持证书校验开启，不能仅据此关闭校验。",
   "recommendation.onlyThisSource": "该设置仅应影响当前来源，正文和媒体下载继续使用严格校验。",
   "recommendation.codes.direct_strict": "默认网络与严格证书校验可用。",
   "recommendation.codes.proxy_strict": "来源代理与严格证书校验可用。",
@@ -86,6 +88,7 @@ const FALLBACKS = {
   "values.enabled": "开启",
   "values.disabled": "关闭",
   "values.recognized": "已识别",
+  "values.unknown": "未知",
   "values.unrecognized": "未识别",
   "values.notApplicable": "不适用",
   "units.seconds": "秒",
@@ -134,6 +137,7 @@ const securityWarningText = document.getElementById("security-warning-text");
 let feeds = [];
 let latestReport = null;
 let requestActive = false;
+let requestStatusKey = "";
 
 function t(key, fallback = "") {
   return bridge.t(`${I18N_PREFIX}.${key}`, fallback || FALLBACKS[key] || key);
@@ -289,7 +293,7 @@ function renderRequestState() {
   runButtonText.textContent = requestActive
     ? t("actions.running")
     : t("actions.run");
-  requestStatus.textContent = requestActive ? t("actions.running") : "";
+  requestStatus.textContent = requestStatusKey ? t(requestStatusKey) : "";
   form.setAttribute("aria-busy", requestActive ? "true" : "false");
 }
 
@@ -348,7 +352,7 @@ function renderResults(report) {
       resultCell(
         attempt
           ? attempt.is_feed
-            ? `${t("values.recognized")} · ${attempt.feed_kind || "unknown"}`
+            ? `${t("values.recognized")} · ${attempt.feed_kind || t("values.unknown")}`
             : t("values.unrecognized")
           : t("results.none"),
         "results.feedRecognition",
@@ -402,11 +406,10 @@ function renderRecommendation(report) {
   const relaxedSucceeded = Array.isArray(report.attempts) && report.attempts.some(
     (attempt) => attempt.ok && String(attempt.mode).endsWith("_relaxed"),
   );
-  const showSecurityWarning =
-    recommendation.verify_ssl === false && relaxedSucceeded;
+  const showSecurityWarning = relaxedSucceeded;
   securityWarning.hidden = !showSecurityWarning;
   securityWarningText.textContent = showSecurityWarning
-    ? `${t("recommendation.securityWarning")} ${t("recommendation.onlyThisSource")}`
+    ? `${t("recommendation.securityWarning")} ${t("recommendation.relaxedSuccessContext")} ${t("recommendation.onlyThisSource")}`
     : "";
 }
 
@@ -418,19 +421,21 @@ async function loadFeeds() {
     renderSourceMode();
   } catch (error) {
     showError(error);
-    requestStatus.textContent = t("errors.load");
   }
 }
 
 async function runProbe(event) {
   event.preventDefault();
   clearError();
+  requestStatusKey = "";
+  renderRequestState();
 
   if (sourceSelect.value === DRAFT_SOURCE_ID && !form.reportValidity()) {
     showError(new Error(t("errors.validation")));
     return;
   }
 
+  requestStatusKey = "actions.running";
   requestActive = true;
   runButton.disabled = true;
   renderRequestState();
@@ -439,7 +444,9 @@ async function runProbe(event) {
     latestReport = await bridge.apiPost("source-probe/run", requestBody);
     renderResults(latestReport);
     renderRecommendation(latestReport);
+    requestStatusKey = "actions.completed";
   } catch (error) {
+    requestStatusKey = "";
     showError(error);
   } finally {
     temporaryKeyInput.value = "";

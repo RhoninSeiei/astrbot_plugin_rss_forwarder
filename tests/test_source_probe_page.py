@@ -46,6 +46,7 @@ REQUIRED_TRANSLATION_PATHS = (
     "auth.header",
     "actions.run",
     "actions.running",
+    "actions.completed",
     "results.status",
     "results.latency",
     "results.httpStatus",
@@ -60,7 +61,9 @@ REQUIRED_TRANSLATION_PATHS = (
     "errors.validation",
     "recommendation.none",
     "recommendation.onlyThisSource",
+    "recommendation.relaxedSuccessContext",
     "recommendation.securityWarning",
+    "values.unknown",
 )
 
 
@@ -77,6 +80,41 @@ def _nested_value(values: dict[str, object], dotted_path: str) -> object:
             raise AssertionError(f"missing translation key: {dotted_path}")
         current = current[segment]
     return current
+
+
+def _css_variables(style: str, selector: str) -> dict[str, str]:
+    match = re.search(
+        rf"{re.escape(selector)}\s*\{{(?P<body>[\s\S]*?)\}}",
+        style,
+    )
+    if match is None:
+        raise AssertionError(f"missing CSS selector: {selector}")
+    return dict(
+        re.findall(
+            r"--([a-z0-9-]+):\s*(#[0-9a-f]{6})\s*;",
+            match.group("body"),
+            re.IGNORECASE,
+        )
+    )
+
+
+def _relative_luminance(hex_color: str) -> float:
+    channels = [int(hex_color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [
+        channel / 12.92
+        if channel <= 0.04045
+        else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast_ratio(first: str, second: str) -> float:
+    lighter, darker = sorted(
+        (_relative_luminance(first), _relative_luminance(second)),
+        reverse=True,
+    )
+    return (lighter + 0.05) / (darker + 0.05)
 
 
 class _FormContractParser(HTMLParser):
@@ -204,15 +242,44 @@ class SourceProbePageContractTests(unittest.TestCase):
         self.assertIn("bridge.t(", script)
         self.assertIn("document.title", script)
 
-    def test_errors_use_text_content_and_relaxed_tls_success_has_warning(self):
+    def test_errors_use_text_content(self):
         script = _read(SCRIPT_PATH)
         self.assertRegex(
             script,
             r"errorText\.textContent\s*=\s*error\.message",
         )
+
+    def test_any_relaxed_success_has_warning_independent_from_recommendation(self):
+        script = _read(SCRIPT_PATH)
+        self.assertIn("const showSecurityWarning = relaxedSucceeded;", script)
         self.assertIn("recommendation.verify_ssl === false", script)
+        self.assertIn('t("recommendation.relaxedSuccessContext")', script)
         self.assertIn("recommendation.securityWarning", script)
         self.assertIn("recommendation.onlyThisSource", script)
+
+    def test_unknown_result_copy_is_translated(self):
+        script = _read(SCRIPT_PATH)
+        self.assertIn('attempt.feed_kind || t("values.unknown")', script)
+        self.assertNotIn('attempt.feed_kind || "unknown"', script)
+
+    def test_request_status_preserves_localized_completion_state(self):
+        script = _read(SCRIPT_PATH)
+        self.assertIn('let requestStatusKey = "";', script)
+        self.assertIn('requestStatusKey = "actions.running";', script)
+        self.assertIn('requestStatusKey = "actions.completed";', script)
+        self.assertIn(
+            'requestStatus.textContent = requestStatusKey ? t(requestStatusKey) : "";',
+            script,
+        )
+        self.assertRegex(
+            script,
+            r"catch\s*\(error\)\s*\{\s*requestStatusKey\s*=\s*[\"']{2};"
+            r"[\s\S]*?showError\(error\)",
+        )
+        self.assertRegex(
+            script,
+            r"function renderTranslations\(\)[\s\S]*?renderRequestState\(\)",
+        )
 
     def test_locale_files_parse_and_contain_complete_page_copy(self):
         for locale in LOCALES:
@@ -229,6 +296,22 @@ class SourceProbePageContractTests(unittest.TestCase):
                 self.assertIsInstance(value, str)
                 self.assertTrue(value.strip(), f"empty {locale}: modes.{mode}")
 
+        warning_phrases = {
+            "zh-CN": ("完整检查", "不能", "关闭"),
+            "en-US": ("full check", "not", "disable"),
+            "ja-JP": ("完全チェック", "理由", "無効"),
+        }
+        for locale, phrases in warning_phrases.items():
+            values = json.loads(_read(LOCALE_DIR / f"{locale}.json"))
+            warning = str(
+                _nested_value(
+                    values,
+                    "pages.source-diagnostics.recommendation.relaxedSuccessContext",
+                )
+            ).lower()
+            for phrase in phrases:
+                self.assertIn(phrase.lower(), warning)
+
     def test_css_supports_themes_mobile_rows_and_operational_layout(self):
         style = _read(STYLE_PATH)
         self.assertRegex(style, r":root\s*\{[\s\S]*?--color-background:")
@@ -242,6 +325,27 @@ class SourceProbePageContractTests(unittest.TestCase):
         self.assertRegex(style, r"--control-height:\s*[0-9.]+rem")
         self.assertNotIn("linear-gradient", style)
         self.assertNotIn("radial-gradient", style)
+
+    def test_dark_theme_primary_button_contrast_meets_wcag_aa(self):
+        style = _read(STYLE_PATH)
+        root_variables = _css_variables(style, ":root")
+        dark_variables = {
+            **root_variables,
+            **_css_variables(style, '[data-theme="dark"]'),
+        }
+        self.assertIn("color-button-text", dark_variables)
+        button_text = dark_variables["color-button-text"]
+        for background_name in ("color-accent", "color-accent-hover"):
+            ratio = _contrast_ratio(button_text, dark_variables[background_name])
+            self.assertGreaterEqual(
+                ratio,
+                4.5,
+                f"dark button contrast {background_name} is {ratio:.2f}:1",
+            )
+        self.assertRegex(
+            style,
+            r"button\s*\{[\s\S]*?color:\s*var\(--color-button-text\)",
+        )
 
 
 if __name__ == "__main__":

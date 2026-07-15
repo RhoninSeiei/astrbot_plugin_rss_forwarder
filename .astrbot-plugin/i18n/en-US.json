@@ -42,7 +42,8 @@
       },
       "actions": {
         "run": "Run probe",
-        "running": "Running probe…"
+        "running": "Running probe…",
+        "completed": "Probe completed."
       },
       "results": {
         "mode": "Mode",
@@ -87,6 +88,7 @@
         "proxyUnchanged": "Keep current value",
         "warningHeading": "Certificate security warning",
         "securityWarning": "Disabling certificate verification removes server identity checks and can permit a man-in-the-middle attack.",
+        "relaxedSuccessContext": "A relaxed-mode success during a full check only shows that mode is usable; it is not a reason to disable certificate verification when strict mode succeeds.",
         "onlyThisSource": "Apply this setting only to the current source; article and media downloads continue to use strict verification.",
         "codes": {
           "direct_strict": "The direct network works with strict certificate verification.",
@@ -103,6 +105,7 @@
         "enabled": "Enabled",
         "disabled": "Disabled",
         "recognized": "Recognized",
+        "unknown": "Unknown",
         "unrecognized": "Not recognized",
         "notApplicable": "Not applicable"
       },
