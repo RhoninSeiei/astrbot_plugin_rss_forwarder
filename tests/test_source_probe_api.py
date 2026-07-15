@@ -386,6 +386,104 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_report_redacts_only_the_standalone_proxy_port_number(self):
+        def report_proxy_port(_feed, _full_check):
+            return _Report(
+                {
+                    "feed_id": "draft",
+                    "source_type": "rss",
+                    "attempts": [
+                        {
+                            "error_message": (
+                                "proxy port 1080 failed after 3 attempts with status 503"
+                            )
+                        }
+                    ],
+                    "recommendation": {"code": "direct_strict"},
+                }
+            )
+
+        api = SourceProbeApi(_config(), _Service(report_proxy_port))
+
+        response = await self._run(
+            api,
+            {
+                "draft": {
+                    "source_type": "rss",
+                    "url": "https://example.com/feed.xml",
+                    "proxy_url": "socks5://proxy.example:1080",
+                }
+            },
+        )
+
+        self.assertEqual(
+            response["data"]["attempts"][0]["error_message"],
+            "proxy port <redacted> failed after 3 attempts with status 503",
+        )
+
+    async def test_short_proxy_hostnames_only_redact_error_message_boundaries(self):
+        cases = (
+            ("rss", "rssfeed"),
+            ("a", "data"),
+        )
+
+        for hostname, ordinary_word in cases:
+            proxy_url = f"socks5://proxy-user:proxy-pass@{hostname}:1080"
+
+            def report_short_hostname(_feed, _full_check):
+                return _Report(
+                    {
+                        "feed_id": hostname,
+                        "source_type": "rss",
+                        "attempts": [
+                            {
+                                "error_type": hostname,
+                                "error_message": (
+                                    f"url={proxy_url}; endpoint={hostname}:1080; "
+                                    f"host={hostname}; ordinary={ordinary_word}; "
+                                    "key=ephemeral-key; user=proxy-user; "
+                                    "password=proxy-pass"
+                                )
+                            }
+                        ],
+                        "recommendation": {"code": "direct_strict"},
+                    }
+                )
+
+            api = SourceProbeApi(_config(), _Service(report_short_hostname))
+            with self.subTest(hostname=hostname):
+                response = await self._run(
+                    api,
+                    {
+                        "draft": {
+                            "source_type": "rss",
+                            "url": "https://example.com/feed.xml",
+                            "proxy_url": proxy_url,
+                            "auth_mode": "query",
+                            "key": "ephemeral-key",
+                        }
+                    },
+                )
+
+                self.assertEqual(response["data"]["feed_id"], hostname)
+                self.assertEqual(response["data"]["source_type"], "rss")
+                self.assertEqual(
+                    response["data"]["recommendation"],
+                    {"code": "direct_strict"},
+                )
+                self.assertEqual(
+                    response["data"]["attempts"][0]["error_type"],
+                    hostname,
+                )
+                self.assertEqual(
+                    response["data"]["attempts"][0]["error_message"],
+                    (
+                        "url=<redacted>; endpoint=<redacted>; host=<redacted>; "
+                        f"ordinary={ordinary_word}; key=<redacted>; "
+                        "user=<redacted>; password=<redacted>"
+                    ),
+                )
+
     async def test_draft_twitter_accepts_typed_source_fields(self):
         captured = []
 
@@ -548,6 +646,73 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(draft=draft):
                 response = await self._run(api, {"draft": draft})
                 self.assertEqual(response["status_code"], 400)
+
+    async def test_full_raw_urls_reject_forbidden_characters_in_all_components(self):
+        api = SourceProbeApi(_config(), _Service())
+        characters = (
+            ("space", " "),
+            ("newline", "\n"),
+            ("tab", "\t"),
+            ("backslash", "\\"),
+        )
+        fields = (
+            ("url", "https://rss.example"),
+            ("nitter_url", "https://nitter.example"),
+            ("proxy_url", "socks5://proxy.example:1080"),
+        )
+        components = (
+            ("path", lambda base, char: f"{base}/bad{char}value"),
+            ("query", lambda base, char: f"{base}/feed?q=bad{char}value"),
+            ("fragment", lambda base, char: f"{base}/feed#bad{char}value"),
+        )
+
+        for field_name, base_url in fields:
+            for component_name, build_url in components:
+                for character_name, character in characters:
+                    value = build_url(base_url, character)
+                    if field_name == "url":
+                        draft = {"source_type": "rss", "url": value}
+                    elif field_name == "nitter_url":
+                        draft = {
+                            "source_type": "twitter",
+                            "username": "name",
+                            "nitter_url": value,
+                        }
+                    else:
+                        draft = {
+                            "source_type": "rss",
+                            "url": "https://example.com/feed",
+                            "proxy_url": value,
+                        }
+
+                    with self.subTest(
+                        field=field_name,
+                        component=component_name,
+                        character=character_name,
+                    ):
+                        response = await self._run(api, {"draft": draft})
+                        self.assertEqual(response["status_code"], 400)
+
+    async def test_percent_encoded_url_characters_remain_valid(self):
+        api = SourceProbeApi(_config(), _Service())
+        encoded_suffix = "/feed%20path?q=%5C#%0A"
+        drafts = (
+            {
+                "source_type": "rss",
+                "url": f"https://rss.example{encoded_suffix}",
+                "proxy_url": f"socks5://proxy.example:1080{encoded_suffix}",
+            },
+            {
+                "source_type": "twitter",
+                "username": "name",
+                "nitter_url": f"https://nitter.example{encoded_suffix}",
+            },
+        )
+
+        for draft in drafts:
+            with self.subTest(source_type=draft["source_type"]):
+                response = await self._run(api, {"draft": draft})
+                self.assertEqual(response["status_code"], 200)
 
     async def test_url_validation_accepts_ipv6_idn_and_percent_encoded_paths(self):
         captured = []

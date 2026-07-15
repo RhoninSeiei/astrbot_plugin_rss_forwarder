@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import unicodedata
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -107,7 +108,7 @@ class SourceProbeApi:
             report = await self._service.probe(feed, full_check=full_check)
             payload = _redact_report_secrets(
                 report.as_dict(),
-                _feed_secrets(feed),
+                feed,
             )
             return json_response(payload)
         finally:
@@ -147,7 +148,7 @@ def _draft_feed(raw_draft: Any) -> FeedConfig:
     if set(raw_draft) - common_fields - source_fields:
         raise ValueError("draft contains unsupported fields")
 
-    proxy_url = _string_field(raw_draft, "proxy_url", "")
+    proxy_url = _raw_string_field(raw_draft, "proxy_url", "")
     if proxy_url:
         _validate_url(proxy_url, "draft.proxy_url", _PROXY_SCHEMES)
 
@@ -165,7 +166,7 @@ def _draft_feed(raw_draft: Any) -> FeedConfig:
         username = _string_field(raw_draft, "username", "").lstrip("@")
         if not username:
             raise ValueError("draft.username must be a non-empty string")
-        nitter_url = _string_field(raw_draft, "nitter_url", "")
+        nitter_url = _raw_string_field(raw_draft, "nitter_url", "")
         if nitter_url:
             _validate_url(nitter_url, "draft.nitter_url", _SOURCE_SCHEMES)
         return FeedConfig(
@@ -179,7 +180,7 @@ def _draft_feed(raw_draft: Any) -> FeedConfig:
             verify_ssl=verify_ssl,
         )
 
-    url = _string_field(raw_draft, "url", "")
+    url = _raw_string_field(raw_draft, "url", "")
     _validate_url(url, "draft.url", _SOURCE_SCHEMES)
     auth_mode = _string_field(raw_draft, "auth_mode", "none").lower()
     if auth_mode not in {"none", "query", "header"}:
@@ -198,15 +199,21 @@ def _draft_feed(raw_draft: Any) -> FeedConfig:
 
 
 def _string_field(values: dict[str, Any], name: str, default: str) -> str:
+    return _raw_string_field(values, name, default).strip()
+
+
+def _raw_string_field(values: dict[str, Any], name: str, default: str) -> str:
     value = values.get(name, default)
     if not isinstance(value, str):
         raise ValueError(f"draft.{name} must be a string")
-    return value.strip()
+    return value
 
 
 def _validate_url(value: str, field_name: str, schemes: set[str]) -> None:
+    if _has_forbidden_url_character(value):
+        raise ValueError(f"{field_name} must be a valid URL")
     authority = _raw_url_authority(value)
-    if not authority or _has_forbidden_url_host_character(authority):
+    if not authority or _has_forbidden_url_character(authority):
         raise ValueError(f"{field_name} must be a valid URL")
     try:
         parsed = urlsplit(value)
@@ -218,7 +225,7 @@ def _validate_url(value: str, field_name: str, schemes: set[str]) -> None:
     if (
         scheme not in schemes
         or not hostname
-        or _has_forbidden_url_host_character(hostname)
+        or _has_forbidden_url_character(hostname)
     ):
         raise ValueError(f"{field_name} must be a valid URL")
 
@@ -236,7 +243,7 @@ def _raw_url_authority(value: str) -> str:
     return value[authority_start:authority_end]
 
 
-def _has_forbidden_url_host_character(value: str) -> bool:
+def _has_forbidden_url_character(value: str) -> bool:
     return any(
         character == "\\"
         or character.isspace()
@@ -259,7 +266,7 @@ def _redact_url(value: str) -> str:
     return urlunsplit((parsed.scheme.lower(), netloc, parsed.path, "", ""))
 
 
-def _feed_secrets(feed: FeedConfig) -> tuple[str, ...]:
+def _feed_error_secrets(feed: FeedConfig) -> tuple[str, ...]:
     secrets = [str(feed.key or "")]
     for value in (feed.url, feed.nitter_url):
         try:
@@ -267,20 +274,23 @@ def _feed_secrets(feed: FeedConfig) -> tuple[str, ...]:
         except ValueError:
             continue
         secrets.extend((parsed.username or "", parsed.password or ""))
-    secrets.extend(_proxy_secret_variants(feed.proxy_url))
+    proxy_values, _, _ = _proxy_error_values(feed.proxy_url)
+    secrets.extend(proxy_values)
     return tuple(sorted(set(filter(None, secrets)), key=len, reverse=True))
 
 
-def _proxy_secret_variants(proxy_url: str) -> tuple[str, ...]:
+def _proxy_error_values(
+    proxy_url: str,
+) -> tuple[tuple[str, ...], str, int | None]:
     raw_url = str(proxy_url or "")
     if not raw_url:
-        return ()
+        return (), "", None
     try:
         parsed = urlsplit(raw_url)
         hostname = parsed.hostname or ""
         port = parsed.port
     except ValueError:
-        return (raw_url,)
+        return (raw_url,), "", None
 
     safe_hostname = f"[{hostname}]" if ":" in hostname else hostname
     host_port = f"{safe_hostname}:{port}" if port is not None else safe_hostname
@@ -291,32 +301,55 @@ def _proxy_secret_variants(proxy_url: str) -> tuple[str, ...]:
         (parsed.scheme, host_port, parsed.path, "", "")
     )
     return (
-        raw_url,
-        without_userinfo,
-        without_userinfo_and_query,
-        host_port,
+        (
+            raw_url,
+            without_userinfo,
+            without_userinfo_and_query,
+            host_port,
+            parsed.username or "",
+            parsed.password or "",
+        ),
         hostname,
-        parsed.username or "",
-        parsed.password or "",
+        port,
     )
 
 
-def _redact_report_secrets(value: Any, secrets: tuple[str, ...]) -> Any:
-    ordered_secrets = tuple(sorted(set(filter(None, secrets)), key=len, reverse=True))
-    return _redact_report_value(value, ordered_secrets)
+def _redact_report_secrets(value: Any, feed: FeedConfig) -> Any:
+    if not isinstance(value, dict):
+        return value
+    redacted = dict(value)
+    attempts = value.get("attempts")
+    if not isinstance(attempts, list):
+        return redacted
+
+    redacted_attempts = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            redacted_attempts.append(attempt)
+            continue
+        redacted_attempt = dict(attempt)
+        error_message = attempt.get("error_message")
+        if isinstance(error_message, str):
+            redacted_attempt["error_message"] = _redact_error_message(
+                error_message,
+                feed,
+            )
+        redacted_attempts.append(redacted_attempt)
+    redacted["attempts"] = redacted_attempts
+    return redacted
 
 
-def _redact_report_value(value: Any, secrets: tuple[str, ...]) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _redact_report_value(item, secrets)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_report_value(item, secrets) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_report_value(item, secrets) for item in value)
-    if isinstance(value, str):
-        for secret in secrets:
-            value = value.replace(secret, "<redacted>")
+def _redact_error_message(value: str, feed: FeedConfig) -> str:
+    for secret in _feed_error_secrets(feed):
+        value = value.replace(secret, "<redacted>")
+
+    _, proxy_hostname, proxy_port = _proxy_error_values(feed.proxy_url)
+    if proxy_hostname:
+        hostname_pattern = re.compile(
+            rf"(?<![\w.-]){re.escape(proxy_hostname)}(?![\w.-])"
+        )
+        value = hostname_pattern.sub("<redacted>", value)
+    if proxy_port is not None:
+        port_pattern = re.compile(rf"(?<!\d){proxy_port}(?!\d)")
+        value = port_pattern.sub("<redacted>", value)
     return value
