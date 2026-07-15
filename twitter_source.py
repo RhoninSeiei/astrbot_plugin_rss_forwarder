@@ -60,7 +60,10 @@ class TwitterTimelineFetcher:
             return None
 
         since_id = str(state.get("since_id", "") or "").strip()
-        timeline_url, timeline_headers = build_nitter_timeline_request(feed)
+        timeline_url, timeline_headers = build_nitter_timeline_request(
+            feed,
+            default_nitter_url=self._default_nitter_url,
+        )
         base_url = timeline_url.rsplit("/", 1)[0]
         proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
         timeout = max(int(getattr(feed, "timeout", 10) or 10), 1)

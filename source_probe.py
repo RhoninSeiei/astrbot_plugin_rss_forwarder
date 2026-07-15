@@ -7,9 +7,11 @@ import ssl
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 from .config import FeedConfig
 from .source_http import (
@@ -24,29 +26,110 @@ class InvalidFeedError(ValueError):
     """Raised when a successful response is not a recognized source format."""
 
 
+_ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
+_RDF_NAMESPACE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+
+
+class _NitterContentParser(HTMLParser):
+    _VOID_ELEMENTS = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+
+    def __init__(self, username: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self._username = str(username or "").strip().lstrip("@")
+        self._stack: list[tuple[str, bool]] = []
+        self.matched = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        in_timeline = self._inspect_element(tag, attrs)
+        normalized_tag = tag.lower()
+        if normalized_tag not in self._VOID_ELEMENTS:
+            self._stack.append((normalized_tag, in_timeline))
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        self._inspect_element(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.lower()
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == normalized_tag:
+                del self._stack[index:]
+                return
+
+    def _inspect_element(self, tag: str, attrs) -> bool:
+        normalized_tag = tag.lower()
+        parent_in_timeline = self._stack[-1][1] if self._stack else False
+        attributes = {str(name).lower(): str(value or "") for name, value in attrs}
+        classes = set(attributes.get("class", "").split())
+        is_content_element = normalized_tag not in {"script", "style"}
+        in_timeline = parent_in_timeline or (
+            is_content_element and "timeline-item" in classes
+        )
+        if not in_timeline or not is_content_element:
+            return in_timeline
+        if "tweet-content" in classes:
+            self.matched = True
+        href = attributes.get("href", "")
+        if normalized_tag == "a" and self._username and re.search(
+            rf"/{re.escape(self._username)}/status/\d+(?:\b|/)",
+            href,
+            re.IGNORECASE,
+        ):
+            self.matched = True
+        return in_timeline
+
+
 def _sanitize_url(match: re.Match[str]) -> str:
     raw_url = match.group(0)
     trailing = ""
     while raw_url and raw_url[-1] in ".,;)]}":
         trailing = raw_url[-1] + trailing
         raw_url = raw_url[:-1]
-    parsed = urlparse(raw_url)
-    host = parsed.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    netloc = host
     try:
+        parsed = urlparse(raw_url)
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host
         port = parsed.port
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        sanitized = parsed._replace(
+            netloc=netloc,
+            query="",
+            fragment="",
+        ).geturl()
     except ValueError:
-        port = None
-    if port is not None:
-        netloc = f"{netloc}:{port}"
-    sanitized = parsed._replace(netloc=netloc, query="", fragment="").geturl()
+        sanitized = "<invalid-url>"
     return sanitized + trailing
 
 
 def sanitize_error_message(exc: BaseException, *, secrets) -> str:
     message = str(exc)
+    message = re.sub(
+        r"(?i)'(?:authorization|cookie)'\s*:\s*'[^']*'",
+        "<redacted-header>",
+        message,
+    )
+    message = re.sub(
+        r'(?i)"(?:authorization|cookie)"\s*:\s*"[^"]*"',
+        "<redacted-header>",
+        message,
+    )
     message = re.sub(
         r"(?im)\b(?:authorization|cookie)\s*[:=]\s*[^\r\n]*",
         "",
@@ -354,27 +437,30 @@ class SourceProbeService:
             count=1,
             flags=re.IGNORECASE,
         )
-        root_match = re.match(r"<\s*([a-z][\w.-]*(?::[a-z][\w.-]*)?)\b", text, re.IGNORECASE)
-        if root_match:
-            root = root_match.group(1).lower()
-            if root == "rss":
+        try:
+            root = ElementTree.fromstring(text)
+        except ElementTree.ParseError:
+            root = None
+        if root is not None and isinstance(root.tag, str):
+            if root.tag.startswith("{") and "}" in root.tag:
+                namespace, local_name = root.tag[1:].split("}", 1)
+            else:
+                namespace, local_name = "", root.tag
+            local_name = local_name.lower()
+            if local_name == "rss":
                 return "rss"
-            if root == "feed":
+            if local_name == "feed" and namespace == _ATOM_NAMESPACE:
                 return "atom"
-            if root == "rdf:rdf":
+            if local_name == "rdf" and namespace == _RDF_NAMESPACE:
                 return "rdf"
 
-        lowered = text.lower()
-        if "timeline-item" not in lowered:
+        nitter_parser = _NitterContentParser(username)
+        try:
+            nitter_parser.feed(text)
+            nitter_parser.close()
+        except Exception:
             return "unknown"
-        if "tweet-content" in lowered:
-            return "nitter"
-        normalized_username = str(username or "").strip().lstrip("@")
-        if normalized_username and re.search(
-            rf"<a\b[^>]*\bhref\s*=\s*['\"][^'\"]*/{re.escape(normalized_username)}/status/\d+[^'\"]*['\"]",
-            text,
-            re.IGNORECASE,
-        ):
+        if nitter_parser.matched:
             return "nitter"
         return "unknown"
 

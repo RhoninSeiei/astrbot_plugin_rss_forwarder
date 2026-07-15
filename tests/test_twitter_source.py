@@ -315,7 +315,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(
                 twitter_module,
                 "build_nitter_timeline_request",
-                lambda _feed: (
+                lambda _feed, default_nitter_url: (
                     "https://shared.example.com/alice",
                     {"Accept": "text/html", "X-Shared": "yes"},
                 ),
@@ -337,6 +337,38 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
                     {"Accept": "text/html", "X-Shared": "yes"},
                 )
             ],
+        )
+
+    async def test_fetch_preserves_instance_default_nitter_url(self):
+        class Feed:
+            id = "tw-default"
+            username = "alice"
+            nitter_url = ""
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            verify_ssl = True
+            max_new_items = 1
+
+        opened_urls = []
+
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
+            opened_urls.append(url)
+            return "<html></html>"
+
+        with mock.patch.object(
+            TwitterTimelineFetcher,
+            "_open_text",
+            staticmethod(fake_open_text),
+        ):
+            result = await TwitterTimelineFetcher(
+                default_nitter_url="https://custom-nitter.example/base/"
+            ).fetch(Feed(), {"since_id": "100"})
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            opened_urls,
+            ["https://custom-nitter.example/base/alice"],
         )
 
     async def test_relaxed_source_tls_is_not_passed_to_media_cache_downloader(self):

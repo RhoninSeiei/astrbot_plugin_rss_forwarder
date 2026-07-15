@@ -65,10 +65,14 @@ def build_rss_request(
     return url, headers
 
 
-def build_nitter_timeline_request(feed) -> tuple[str, dict[str, str]]:
+def build_nitter_timeline_request(
+    feed,
+    default_nitter_url: str = "https://nitter.net",
+) -> tuple[str, dict[str, str]]:
     base_url = (
         str(getattr(feed, "nitter_url", "") or "").strip()
         or str(getattr(feed, "url", "") or "").strip()
+        or str(default_nitter_url or "").strip()
         or "https://nitter.net"
     ).rstrip("/")
     username = str(getattr(feed, "username", "") or "").strip().lstrip("@")

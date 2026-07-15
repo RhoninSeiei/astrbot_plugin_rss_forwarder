@@ -212,7 +212,11 @@ class SourceProbeContentRecognitionTests(unittest.IsolatedAsyncioTestCase):
         cases = {
             "rss": b"\xef\xbb\xbf  \n<?xml version='1.0'?>\n<RSS version='2.0'></RSS>",
             "atom": b"\n<?XML version='1.0'?>\n<FeEd xmlns='http://www.w3.org/2005/Atom'></FeEd>",
-            "rdf": b"\t<?xml version='1.0'?>\n<RDF:RDF xmlns:rdf='urn:test'></RDF:RDF>",
+            "rdf": (
+                b"\t<?xml version='1.0'?>\n"
+                b"<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>"
+                b"</rdf:RDF>"
+            ),
         }
 
         for expected, body in cases.items():
@@ -220,6 +224,30 @@ class SourceProbeContentRecognitionTests(unittest.IsolatedAsyncioTestCase):
                 attempt = await self._kind_for(body)
                 self.assertTrue(attempt.is_feed)
                 self.assertEqual(attempt.feed_kind, expected)
+
+    async def test_rejects_atom_without_standard_namespace(self):
+        bodies = (
+            b"<feed>marketing</feed>",
+            b"<feed xmlns='urn:marketing'>marketing</feed>",
+        )
+
+        for body in bodies:
+            with self.subTest(body=body):
+                attempt = await self._kind_for(body)
+                self.assertFalse(attempt.is_feed)
+                self.assertEqual(attempt.feed_kind, "unknown")
+
+    async def test_rejects_rdf_without_standard_namespace(self):
+        bodies = (
+            b"<RDF>marketing</RDF>",
+            b"<rdf:RDF xmlns:rdf='urn:test'></rdf:RDF>",
+        )
+
+        for body in bodies:
+            with self.subTest(body=body):
+                attempt = await self._kind_for(body)
+                self.assertFalse(attempt.is_feed)
+                self.assertEqual(attempt.feed_kind, "unknown")
 
     async def test_recognizes_nitter_timeline_with_tweet_content(self):
         body = b"<html><div class='timeline-item'><div class='tweet-content'>post</div></div></html>"
@@ -271,6 +299,38 @@ class SourceProbeContentRecognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(attempt.is_feed)
                 self.assertEqual(attempt.feed_kind, "unknown")
                 self.assertEqual(attempt.error_type, "invalid_feed")
+
+    async def test_nitter_markers_inside_non_content_nodes_remain_unknown(self):
+        bodies = (
+            (
+                b"<html><script><div class='timeline-item'>"
+                b"<div class='tweet-content'>fake</div></div></script></html>"
+            ),
+            (
+                b"<html><style>.timeline-item .tweet-content { color: red; }"
+                b"</style></html>"
+            ),
+            (
+                b"<html><!-- <div class='timeline-item'>"
+                b"<a href='/alice/status/123'>fake</a></div> --></html>"
+            ),
+            b"<html><p>timeline-item tweet-content /alice/status/123</p></html>",
+            (
+                b"<html><div class='not-timeline-item'>"
+                b"<div class='tweet-content'>fake</div></div></html>"
+            ),
+        )
+        feed = _feed(
+            source_type="twitter",
+            username="Alice",
+            nitter_url="https://nitter.example.com",
+        )
+
+        for body in bodies:
+            with self.subTest(body=body):
+                attempt = await self._kind_for(body, feed=feed)
+                self.assertFalse(attempt.is_feed)
+                self.assertEqual(attempt.feed_kind, "unknown")
 
 
 class SourceProbeErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
@@ -393,7 +453,7 @@ class SourceProbeErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
             secrets=("source-secret", "password"),
         )
 
-        self.assertIn("http://example.com/feed", message)
+        self.assertIn("<invalid-url>", message)
         self.assertNotIn("user", message)
         self.assertNotIn("password", message)
         self.assertNotIn("?key=", message)
@@ -418,6 +478,60 @@ class SourceProbeErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("relative-secret", message)
         self.assertNotIn("next=", message)
         self.assertNotIn("#part", message)
+
+    def test_sanitizer_redacts_single_quoted_header_dictionary(self):
+        message = sanitize_error_message(
+            RuntimeError(
+                "headers={'Authorization': 'Bearer leaked-token', "
+                "'Cookie': 'sid=secret'}"
+            ),
+            secrets=(),
+        )
+
+        for forbidden in (
+            "leaked-token",
+            "sid=secret",
+            "Authorization",
+            "Cookie",
+        ):
+            self.assertNotIn(forbidden, message)
+
+    def test_sanitizer_redacts_double_quoted_header_dictionary(self):
+        message = sanitize_error_message(
+            RuntimeError(
+                'headers={"Authorization": "Bearer leaked-double", '
+                '"Cookie": "sid=double-secret"}'
+            ),
+            secrets=(),
+        )
+
+        for forbidden in (
+            "leaked-double",
+            "sid=double-secret",
+            "Authorization",
+            "Cookie",
+        ):
+            self.assertNotIn(forbidden, message)
+
+    def test_sanitizer_replaces_malformed_url_with_safe_placeholder(self):
+        malformed = "https://user:password@[broken/feed?token=leaked-query#fragment"
+
+        message = sanitize_error_message(
+            RuntimeError(f"failed {malformed}"),
+            secrets=(),
+        )
+
+        self.assertIn("<invalid-url>", message)
+        for forbidden in (
+            malformed,
+            "user",
+            "password",
+            "leaked-query",
+            "fragment",
+            "?token=",
+        ):
+            self.assertNotIn(forbidden, message)
+        self.assertLessEqual(len(message), 500)
 
     async def test_service_uses_sanitizer_for_reported_exceptions(self):
         def requester(**_kwargs):
@@ -547,7 +661,7 @@ class SourceProbeRecommendationTests(unittest.IsolatedAsyncioTestCase):
             "dispatcher",
             "scheduler",
             "pipeline",
-            "parser",
+            "from .parser",
             "semantic_dedup",
             "astrbot.api.web",
         ):

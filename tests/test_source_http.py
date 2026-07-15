@@ -112,6 +112,20 @@ class SourceHttpPublicApiTests(unittest.TestCase):
         self.assertIn("text/html", headers["Accept"])
         self.assertIn("astrbot_plugin_rss_forwarder", headers["User-Agent"])
 
+    def test_build_nitter_timeline_request_accepts_explicit_default_instance(self):
+        feed = types.SimpleNamespace(
+            username="alice",
+            nitter_url="",
+            url="",
+        )
+
+        url, _headers = source_http.build_nitter_timeline_request(
+            feed,
+            default_nitter_url="https://custom-nitter.example/base/",
+        )
+
+        self.assertEqual(url, "https://custom-nitter.example/base/alice")
+
     def test_response_type_and_request_signature_are_public_contract(self):
         response = source_http.SourceHttpResponse(
             body=b"body",
