@@ -121,7 +121,7 @@ def _sanitize_url(match: re.Match[str]) -> str:
 def sanitize_error_message(exc: BaseException, *, secrets) -> str:
     message = str(exc)
     if re.search(
-        r"(?i)(?:['\"]\s*)?(?:authorization|cookie)(?:\s*['\"])?\s*:",
+        r"(?i)(?:['\"]\s*)?(?:authorization|cookie)(?:\s*['\"])?\s*[:=]",
         message,
     ):
         return "<request-headers-redacted>"

@@ -583,6 +583,21 @@ class SourceProbeErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(message, "<request-headers-redacted>")
 
+    def test_sanitizer_redacts_equals_style_request_headers(self):
+        cases = (
+            "Authorization=Bearer equals-leak Cookie=session-leak",
+            "aUtHoRiZaTiOn=Bearer case-leak cOoKiE=case-session-leak",
+        )
+
+        for error_text in cases:
+            with self.subTest(error_text=error_text):
+                message = sanitize_error_message(
+                    RuntimeError(error_text),
+                    secrets=(),
+                )
+
+                self.assertEqual(message, "<request-headers-redacted>")
+
     def test_sanitizer_removes_absolute_url_query_with_spaces_and_following_tokens(self):
         message = sanitize_error_message(
             RuntimeError(
