@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import json
 import sys
+import threading
 import types
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
@@ -1284,6 +1285,100 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await first)["status_code"], 200)
         self.assertEqual((await other)["status_code"], 200)
         self.assertEqual(api._probe_locks, {})
+
+    async def test_cancelled_request_keeps_user_busy_until_network_thread_finishes(self):
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+        calls = 0
+
+        async def block(_feed, _full_check):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                def blocking_request():
+                    entered.set()
+                    release.wait(timeout=2)
+                    completed.set()
+
+                await asyncio.to_thread(blocking_request)
+            return _Report()
+
+        api = SourceProbeApi(_config(_rss_feed()), _Service(block))
+        first = asyncio.create_task(
+            self._run(api, {"feed_id": "rss-1"}, username="alice")
+        )
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        first.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        duplicate = await self._run(
+            api,
+            {"feed_id": "rss-1"},
+            username="alice",
+        )
+        try:
+            self.assertFalse(first.done())
+            self.assertEqual(duplicate["status_code"], 429)
+            self.assertEqual(calls, 1)
+            self.assertFalse(completed.is_set())
+            self.assertEqual(len(api._active_probe_tasks), 1)
+        finally:
+            release.set()
+            outcomes = await asyncio.gather(first, return_exceptions=True)
+
+        self.assertIsInstance(outcomes[0], asyncio.CancelledError)
+        self.assertTrue(completed.is_set())
+        self.assertEqual(api._probe_locks, {})
+        self.assertEqual(api._active_probe_tasks, set())
+
+        released = await self._run(
+            api,
+            {"feed_id": "rss-1"},
+            username="alice",
+        )
+        self.assertEqual(released["status_code"], 200)
+        self.assertEqual(calls, 2)
+
+    async def test_terminate_waits_for_active_page_probe_without_cancelling_it(self):
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        async def block(_feed, _full_check):
+            def blocking_request():
+                entered.set()
+                release.wait(timeout=2)
+                completed.set()
+
+            await asyncio.to_thread(blocking_request)
+            return _Report()
+
+        api = SourceProbeApi(_config(_rss_feed()), _Service(block))
+        request_task = asyncio.create_task(
+            self._run(api, {"feed_id": "rss-1"}, username="alice")
+        )
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        terminate = getattr(api, "terminate", None)
+        terminate_task = None
+        try:
+            self.assertIsNotNone(terminate)
+            terminate_task = asyncio.create_task(terminate())
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertFalse(terminate_task.done())
+            self.assertFalse(completed.is_set())
+            self.assertEqual(len(api._active_probe_tasks), 1)
+        finally:
+            release.set()
+            response = await request_task
+            if terminate_task is not None:
+                await terminate_task
+
+        self.assertEqual(response["status_code"], 200)
+        self.assertTrue(completed.is_set())
+        self.assertEqual(api._active_probe_tasks, set())
 
 
 class SourceProbeApiRegistrationTests(unittest.TestCase):

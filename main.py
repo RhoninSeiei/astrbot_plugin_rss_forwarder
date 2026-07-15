@@ -84,6 +84,8 @@ class RSSPlugin(Star, RSSCommands):
     async def terminate(self):
         """插件销毁：仅做资源编排（关闭任务）。"""
         await self.scheduler.stop()
+        if self._source_probe_api is not None:
+            await self._source_probe_api.terminate()
 
     # NOTE:
     # 这些装饰器必须挂在主插件模块(main.py)中的类方法上，

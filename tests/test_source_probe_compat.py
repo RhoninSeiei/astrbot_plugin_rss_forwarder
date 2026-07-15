@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 import types
@@ -189,6 +190,42 @@ class SourceProbeCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(importlib.util, "find_spec", return_value=object()):
             with self.assertRaisesRegex(ImportError, "adapter import failed"):
                 main_module.RSSPlugin(_Context(config), config={})
+
+    async def test_plugin_termination_waits_for_page_probe_drain(self):
+        package_name = "astrbot_source_probe_compat_terminate"
+        main_module, _logger, config, _service_type = _load_main(package_name)
+
+        class SourceProbeApi:
+            def __init__(self, api_config, service):
+                self.config = api_config
+                self.service = service
+                self.terminate_started = asyncio.Event()
+                self.release_terminate = asyncio.Event()
+
+            def register(self, _context):
+                return None
+
+            async def terminate(self):
+                self.terminate_started.set()
+                await self.release_terminate.wait()
+
+        api_module = types.ModuleType(f"{package_name}.source_probe_api")
+        api_module.SourceProbeApi = SourceProbeApi
+        sys.modules[api_module.__name__] = api_module
+
+        with mock.patch.object(importlib.util, "find_spec", return_value=object()):
+            plugin = main_module.RSSPlugin(_Context(config), config={})
+
+        terminate_task = asyncio.create_task(plugin.terminate())
+        await asyncio.sleep(0)
+        try:
+            self.assertTrue(plugin._source_probe_api.terminate_started.is_set())
+            self.assertFalse(terminate_task.done())
+        finally:
+            plugin._source_probe_api.release_terminate.set()
+            await terminate_task
+
+        self.assertTrue(plugin.scheduler.stopped)
 
 
 if __name__ == "__main__":

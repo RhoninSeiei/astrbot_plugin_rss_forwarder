@@ -25,6 +25,7 @@ class SourceProbeApi:
         self._config = config
         self._service = service
         self._probe_locks: dict[str, asyncio.Lock] = {}
+        self._active_probe_tasks: set[asyncio.Task[Any]] = set()
 
     def register(self, context: Context) -> None:
         context.register_web_api(
@@ -106,7 +107,16 @@ class SourceProbeApi:
 
         await lock.acquire()
         try:
-            report = await self._service.probe(feed, full_check=full_check)
+            probe_task = asyncio.create_task(
+                self._service.probe(feed, full_check=full_check)
+            )
+            self._active_probe_tasks.add(probe_task)
+            probe_task.add_done_callback(self._active_probe_tasks.discard)
+            try:
+                report = await asyncio.shield(probe_task)
+            except asyncio.CancelledError:
+                await _drain_probe_task(probe_task)
+                raise
             payload = _redact_report_secrets(
                 report.as_dict(),
                 feed,
@@ -117,6 +127,13 @@ class SourceProbeApi:
             if self._probe_locks.get(lock_key) is lock and not lock.locked():
                 self._probe_locks.pop(lock_key, None)
 
+    async def terminate(self) -> None:
+        while self._active_probe_tasks:
+            tasks = tuple(self._active_probe_tasks)
+            for task in tasks:
+                await _drain_probe_task(task)
+                self._active_probe_tasks.discard(task)
+
     def _find_feed(self, feed_id: str) -> FeedConfig | None:
         return next((feed for feed in self._config.feeds if feed.id == feed_id), None)
 
@@ -126,6 +143,21 @@ def _request_lock_key(username: str | None, client_host: str | None) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return _ANONYMOUS_LOCK_KEY
+
+
+async def _drain_probe_task(task: asyncio.Task[Any]) -> None:
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    if task.done():
+        try:
+            task.result()
+        except (Exception, asyncio.CancelledError):
+            pass
 
 
 def _draft_feed(raw_draft: Any) -> FeedConfig:
