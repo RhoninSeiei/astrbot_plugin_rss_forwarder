@@ -203,6 +203,7 @@ cython_debug/
 
 # Local feature worktrees
 .worktrees/
+.superpowers/
 
 # Marimo
 marimo/_static/
