@@ -498,6 +498,107 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
                     "unreachable",
                 )
 
+    async def test_recommendation_matching_prefers_proxy_source_over_short_error(self):
+        proxy_error = "proxy connection failed on port 1080"
+
+        def report_overlapping_errors(_feed, _full_check):
+            return _Report(
+                {
+                    "feed_id": "draft",
+                    "source_type": "rss",
+                    "attempts": [
+                        {
+                            "error_type": "unknown",
+                            "error_message": "failed",
+                        },
+                        {
+                            "error_type": "proxy",
+                            "error_message": proxy_error,
+                        },
+                    ],
+                    "recommendation": {
+                        "code": "unreachable",
+                        "verify_ssl": None,
+                        "use_proxy": None,
+                        "message": f"来源代理访问失败：{proxy_error}",
+                    },
+                }
+            )
+
+        api = SourceProbeApi(_config(), _Service(report_overlapping_errors))
+
+        response = await self._run(
+            api,
+            {
+                "draft": {
+                    "source_type": "rss",
+                    "url": "https://example.com/feed.xml",
+                    "proxy_url": "socks5://proxy.example:1080",
+                }
+            },
+        )
+
+        self.assertEqual(response["status_code"], 200)
+        self.assertEqual(
+            [attempt["error_message"] for attempt in response["data"]["attempts"]],
+            ["failed", "proxy connection failed on port <redacted>"],
+        )
+        self.assertEqual(
+            response["data"]["recommendation"]["message"],
+            "来源代理访问失败：proxy connection failed on port <redacted>",
+        )
+
+    async def test_recommendation_truncation_prefers_longest_valid_prefix(self):
+        proxy_error = "p" * 430 + " port 1080 " + "q" * 200
+        shorter_prefix_error = "q" * 40 + " unknown suffix " + "z" * 600
+        recommendation_message = ("诊断建议：" + proxy_error)[:500]
+
+        def report_truncated_overlapping_errors(_feed, _full_check):
+            return _Report(
+                {
+                    "feed_id": "draft",
+                    "source_type": "rss",
+                    "attempts": [
+                        {
+                            "error_type": "unknown",
+                            "error_message": shorter_prefix_error,
+                        },
+                        {
+                            "error_type": "proxy",
+                            "error_message": proxy_error,
+                        },
+                    ],
+                    "recommendation": {
+                        "code": "unreachable",
+                        "verify_ssl": None,
+                        "use_proxy": None,
+                        "message": recommendation_message,
+                    },
+                }
+            )
+
+        api = SourceProbeApi(
+            _config(),
+            _Service(report_truncated_overlapping_errors),
+        )
+
+        response = await self._run(
+            api,
+            {
+                "draft": {
+                    "source_type": "rss",
+                    "url": "https://example.com/feed.xml",
+                    "proxy_url": "socks5://proxy.example:1080",
+                }
+            },
+        )
+
+        self.assertEqual(response["status_code"], 200)
+        self.assertEqual(
+            response["data"]["recommendation"]["message"],
+            recommendation_message.replace("1080", "<redacted>"),
+        )
+
     async def test_report_redacts_only_the_standalone_proxy_port_number(self):
         def report_proxy_port(_feed, _full_check):
             return _Report(

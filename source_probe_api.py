@@ -399,6 +399,9 @@ def _redact_report_secrets(value: Any, feed: FeedConfig) -> Any:
 
 
 def _recommendation_error_type(message: str, attempts: Any) -> str:
+    if message.startswith("来源代理访问失败"):
+        return "proxy"
+
     typed_attempts = []
     if isinstance(attempts, list):
         for attempt in attempts:
@@ -409,20 +412,26 @@ def _recommendation_error_type(message: str, attempts: Any) -> str:
             if isinstance(error_message, str) and isinstance(error_type, str):
                 if error_message:
                     typed_attempts.append((error_message, error_type))
+    typed_attempts.sort(key=lambda item: len(item[0]), reverse=True)
 
     for error_message, error_type in typed_attempts:
         if error_message in message:
             return error_type
 
     if len(message) == 500:
+        longest_overlap = 31
+        matched_error_type = ""
         for error_message, error_type in typed_attempts:
             maximum_overlap = min(len(message), len(error_message))
             for overlap in range(maximum_overlap, 31, -1):
                 if message.endswith(error_message[:overlap]):
-                    return error_type
+                    if overlap > longest_overlap:
+                        longest_overlap = overlap
+                        matched_error_type = error_type
+                    break
+        if matched_error_type:
+            return matched_error_type
 
-    if message.startswith("来源代理访问失败"):
-        return "proxy"
     return ""
 
 
