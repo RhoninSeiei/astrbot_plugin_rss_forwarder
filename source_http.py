@@ -2,6 +2,7 @@ import ssl
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import (
     HTTPRedirectHandler,
     HTTPSHandler,
@@ -12,6 +13,20 @@ from urllib.request import (
 
 
 _SOCKS_SCHEMES = ("socks://", "socks4://", "socks5://", "socks5h://")
+_RSS_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1",
+    "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.7,zh;q=0.6",
+}
+NITTER_REQUEST_HEADERS = {
+    "User-Agent": "astrbot_plugin_rss_forwarder/0.5.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.6",
+}
 
 
 class TooManyRedirects(Exception):
@@ -25,6 +40,39 @@ class SourceHttpResponse:
     headers: dict[str, str]
     final_url: str
     truncated: bool = False
+
+
+def build_rss_request(
+    feed,
+    etag: str = "",
+    last_modified: str = "",
+) -> tuple[str, dict[str, str]]:
+    headers = dict(_RSS_REQUEST_HEADERS)
+    url = str(getattr(feed, "url", "") or "")
+    auth_mode = str(getattr(feed, "auth_mode", "none") or "none")
+    key = str(getattr(feed, "key", "") or "")
+    if auth_mode == "query" and key:
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query["key"] = key
+        url = urlunparse(parsed._replace(query=urlencode(query)))
+    elif auth_mode == "header" and key:
+        headers["Authorization"] = f"Bearer {key}"
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+    return url, headers
+
+
+def build_nitter_timeline_request(feed) -> tuple[str, dict[str, str]]:
+    base_url = (
+        str(getattr(feed, "nitter_url", "") or "").strip()
+        or str(getattr(feed, "url", "") or "").strip()
+        or "https://nitter.net"
+    ).rstrip("/")
+    username = str(getattr(feed, "username", "") or "").strip().lstrip("@")
+    return f"{base_url}/{username}", dict(NITTER_REQUEST_HEADERS)
 
 
 def build_ssl_context(verify_ssl: bool) -> ssl.SSLContext:

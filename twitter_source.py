@@ -14,14 +14,12 @@ from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 from astrbot.api import logger
 
-from .source_http import build_ssl_context, request_source
-
-
-_NITTER_REQUEST_HEADERS = {
-    "User-Agent": "astrbot_plugin_rss_forwarder/0.5.2 (+https://github.com/RhoninSeiei/astrbot_plugin_rss_forwarder)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.6",
-}
+from .source_http import (
+    NITTER_REQUEST_HEADERS,
+    build_nitter_timeline_request,
+    build_ssl_context,
+    request_source,
+)
 
 
 @dataclass(slots=True)
@@ -62,7 +60,8 @@ class TwitterTimelineFetcher:
             return None
 
         since_id = str(state.get("since_id", "") or "").strip()
-        base_url = self._resolve_nitter_url(feed)
+        timeline_url, timeline_headers = build_nitter_timeline_request(feed)
+        base_url = timeline_url.rsplit("/", 1)[0]
         proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
         timeout = max(int(getattr(feed, "timeout", 10) or 10), 1)
         verify_ssl = bool(getattr(feed, "verify_ssl", True))
@@ -71,10 +70,11 @@ class TwitterTimelineFetcher:
         try:
             timeline_html = await asyncio.to_thread(
                 self._open_text,
-                f"{base_url}/{username}",
+                timeline_url,
                 proxy_url,
                 timeout,
                 verify_ssl,
+                timeline_headers,
             )
         except Exception as exc:
             logger.warning("fetch twitter feed=%s timeline failed: %s", feed.id, exc)
@@ -101,6 +101,7 @@ class TwitterTimelineFetcher:
                     proxy_url,
                     timeout,
                     verify_ssl,
+                    NITTER_REQUEST_HEADERS,
                 )
                 item = self._parse_tweet_detail(feed, base_url, username, tweet_id, detail_html)
                 if cache_dir is not None:
@@ -149,10 +150,11 @@ class TwitterTimelineFetcher:
         proxy_url: str,
         timeout: int,
         verify_ssl: bool,
+        headers: dict[str, str],
     ) -> str:
         response = request_source(
             url=url,
-            headers=_NITTER_REQUEST_HEADERS,
+            headers=headers,
             proxy_url=proxy_url,
             timeout=timeout,
             verify_ssl=verify_ssl,

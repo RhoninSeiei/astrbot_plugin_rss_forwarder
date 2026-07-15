@@ -77,6 +77,41 @@ def _request(**overrides):
 
 
 class SourceHttpPublicApiTests(unittest.TestCase):
+    def test_build_rss_request_applies_authentication_and_conditional_headers(self):
+        feed = types.SimpleNamespace(
+            url="https://example.com/feed.xml?existing=yes",
+            auth_mode="query",
+            key="draft-secret",
+        )
+
+        url, headers = source_http.build_rss_request(
+            feed,
+            etag="etag-before",
+            last_modified="Tue, 12 May 2026 00:00:00 GMT",
+        )
+
+        self.assertIn("existing=yes", url)
+        self.assertIn("key=draft-secret", url)
+        self.assertIn("application/rss+xml", headers["Accept"])
+        self.assertEqual(headers["If-None-Match"], "etag-before")
+        self.assertEqual(
+            headers["If-Modified-Since"],
+            "Tue, 12 May 2026 00:00:00 GMT",
+        )
+
+    def test_build_nitter_timeline_request_uses_saved_source_fields(self):
+        feed = types.SimpleNamespace(
+            username="@Alice",
+            nitter_url="https://nitter.example.com/base/",
+            url="",
+        )
+
+        url, headers = source_http.build_nitter_timeline_request(feed)
+
+        self.assertEqual(url, "https://nitter.example.com/base/Alice")
+        self.assertIn("text/html", headers["Accept"])
+        self.assertIn("astrbot_plugin_rss_forwarder", headers["User-Agent"])
+
     def test_response_type_and_request_signature_are_public_contract(self):
         response = source_http.SourceHttpResponse(
             body=b"body",

@@ -2,13 +2,18 @@ import asyncio
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import getproxies
 
 from astrbot.api import logger
 
 from .config import RSSConfig
-from .source_http import get_response_header, request_source, source_http_client
+from .source_http import (
+    build_rss_request,
+    get_response_header,
+    request_source,
+    source_http_client,
+)
 from .storage import FeedStorage
 from .twitter_source import TwitterTimelineFetcher
 
@@ -80,11 +85,7 @@ class FeedFetcher:
         last_modified = str(state.get("last_modified", "")).strip()
         proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
 
-        url, headers = self._build_url_and_headers(feed)
-        if etag:
-            headers["If-None-Match"] = etag
-        if last_modified:
-            headers["If-Modified-Since"] = last_modified
+        url, headers = build_rss_request(feed, etag, last_modified)
 
         def _request_once():
             response = request_source(
@@ -140,29 +141,6 @@ class FeedFetcher:
             "since_id": fetched.since_id,
             "status": fetched.status,
         }
-
-    @staticmethod
-    def _build_url_and_headers(feed) -> tuple[str, dict[str, str]]:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0 Safari/537.36"
-            ),
-            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1",
-            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.7,zh;q=0.6",
-        }
-        url = feed.url
-
-        if feed.auth_mode == "query" and feed.key:
-            parsed = urlparse(url)
-            q = dict(parse_qsl(parsed.query, keep_blank_values=True))
-            q["key"] = feed.key
-            url = urlunparse(parsed._replace(query=urlencode(q)))
-        elif feed.auth_mode == "header" and feed.key:
-            headers["Authorization"] = f"Bearer {feed.key}"
-
-        return url, headers
 
     @staticmethod
     def _proxy_state_for_log(proxy_url: str) -> str:

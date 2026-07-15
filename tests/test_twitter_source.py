@@ -128,7 +128,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         fetcher = TwitterTimelineFetcher()
 
-        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             if url.endswith("/alice"):
                 return """
                 <div class="timeline-item"><a class="tweet-link" href="/alice/status/300"></a></div>
@@ -170,7 +170,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
         opened_urls = []
         fetcher = TwitterTimelineFetcher()
 
-        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             opened_urls.append(url)
             if url.endswith("/alice"):
                 return """
@@ -216,7 +216,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         calls = []
 
-        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             calls.append((url, proxy_url, timeout, verify_ssl))
             if url.endswith("/alice"):
                 return '<a href="/alice/status/200"></a>'
@@ -258,8 +258,8 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
     def test_open_text_uses_shared_source_transport(self):
         parameter_count = len(inspect.signature(TwitterTimelineFetcher._open_text).parameters)
-        if parameter_count != 4:
-            self.fail("_open_text must accept verify_ssl as its fourth parameter")
+        if parameter_count != 5:
+            self.fail("_open_text must accept shared headers as its fifth parameter")
 
         captured = {}
 
@@ -283,6 +283,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
                 "http://127.0.0.1:7890",
                 12,
                 False,
+                {"Accept": "text/html", "X-Shared": "yes"},
             )
 
         self.assertEqual(result, "<html>共享请求</html>")
@@ -291,7 +292,52 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(captured["verify_ssl"], False)
         self.assertIsNone(captured["max_bytes"])
         self.assertIsNone(captured["max_redirects"])
-        self.assertIn("text/html", captured["headers"]["Accept"])
+        self.assertEqual(captured["headers"]["X-Shared"], "yes")
+
+    async def test_fetch_uses_shared_nitter_timeline_request_result(self):
+        class Feed:
+            id = "tw-shared"
+            username = "alice"
+            nitter_url = "https://ignored.example.com"
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            verify_ssl = True
+            max_new_items = 1
+
+        calls = []
+
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
+            calls.append((url, dict(headers)))
+            return "<html></html>"
+
+        with (
+            mock.patch.object(
+                twitter_module,
+                "build_nitter_timeline_request",
+                lambda _feed: (
+                    "https://shared.example.com/alice",
+                    {"Accept": "text/html", "X-Shared": "yes"},
+                ),
+            ),
+            mock.patch.object(
+                TwitterTimelineFetcher,
+                "_open_text",
+                staticmethod(fake_open_text),
+            ),
+        ):
+            result = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "100"})
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "https://shared.example.com/alice",
+                    {"Accept": "text/html", "X-Shared": "yes"},
+                )
+            ],
+        )
 
     async def test_relaxed_source_tls_is_not_passed_to_media_cache_downloader(self):
         class Feed:
@@ -309,7 +355,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         media_calls = []
 
-        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             if url.endswith("/alice"):
                 return '<a href="/alice/status/200"></a>'
             return """
@@ -365,7 +411,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         captured = {"source_verify_ssl": []}
 
-        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             captured["source_verify_ssl"].append(verify_ssl)
             if url.endswith("/alice"):
                 return '<a href="/alice/status/200"></a>'
@@ -444,7 +490,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         captured = {"source_verify_ssl": []}
 
-        def fake_open_text(url, proxy_url, timeout, verify_ssl):
+        def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             captured["source_verify_ssl"].append(verify_ssl)
             if url.endswith("/alice"):
                 return '<a href="/alice/status/200"></a>'
