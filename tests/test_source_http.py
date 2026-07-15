@@ -197,19 +197,43 @@ class SourceHttpSslAndProxyTests(unittest.TestCase):
 
 
 class SourceHttpSocksTests(unittest.TestCase):
-    def _stub_httpx(self, *, error=None):
+    def _stub_httpx(self, *, error=None, chunks=None):
         captured = {}
+        chunks = list(chunks or [b"socks body"])
 
         class FakeResponse:
-            content = b"socks body"
             status_code = 206
             headers = {"Content-Type": "application/rss+xml"}
             url = "https://example.com/socks-final"
+
+            @property
+            def content(self):
+                captured["content_reads"] = captured.get("content_reads", 0) + 1
+                return b"".join(chunks)
+
+            def __enter__(self):
+                captured["response_entered"] = True
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                captured["response_closed"] = True
+                return False
 
             def raise_for_status(self):
                 captured["raise_for_status"] = True
                 if error is not None:
                     raise error
+
+            def iter_bytes(self, chunk_size=None):
+                captured["iter_chunk_size"] = chunk_size
+                for chunk in chunks:
+                    captured["iterated_chunks"] = (
+                        captured.get("iterated_chunks", 0) + 1
+                    )
+                    captured["iterated_bytes"] = (
+                        captured.get("iterated_bytes", 0) + len(chunk)
+                    )
+                    yield chunk
 
         class FakeClient:
             def __init__(self, **kwargs):
@@ -223,6 +247,10 @@ class SourceHttpSocksTests(unittest.TestCase):
 
             def get(self, url):
                 captured["url"] = url
+                return FakeResponse()
+
+            def stream(self, method, url):
+                captured["stream"] = (method, url)
                 return FakeResponse()
 
         return captured, types.SimpleNamespace(Client=FakeClient)
@@ -260,6 +288,29 @@ class SourceHttpSocksTests(unittest.TestCase):
             _request(proxy_url="socks://127.0.0.1:1080", max_redirects=None)
 
         self.assertNotIn("max_redirects", captured["kwargs"])
+
+    def test_finite_socks_read_streams_only_limit_plus_one_byte(self):
+        captured, httpx_stub = self._stub_httpx(
+            chunks=[b"abc", b"def", b"unread", b"also unread"]
+        )
+
+        with patch.dict(sys.modules, {"httpx": httpx_stub}):
+            response = _request(
+                proxy_url="socks5://127.0.0.1:1080",
+                max_bytes=5,
+            )
+
+        self.assertEqual(
+            captured.get("stream"),
+            ("GET", "https://example.com/feed.xml"),
+        )
+        self.assertEqual(captured["iter_chunk_size"], 6)
+        self.assertEqual(captured["iterated_chunks"], 2)
+        self.assertEqual(captured["iterated_bytes"], 6)
+        self.assertEqual(captured.get("content_reads", 0), 0)
+        self.assertTrue(captured["response_closed"])
+        self.assertEqual(response.body, b"abcde")
+        self.assertIs(response.truncated, True)
 
     def test_httpx_http_status_error_is_propagated(self):
         expected = RuntimeError("status failure")
@@ -324,6 +375,46 @@ class SourceHttpReadingAndResponseTests(unittest.TestCase):
 
 
 class SourceHttpRedirectAndDependencyTests(unittest.TestCase):
+    def _assert_caller_redirect_limit(self, urls, *, max_redirects):
+        class FakeParent:
+            def __init__(self):
+                self.open_count = 0
+
+            def open(self, request, timeout):
+                self.open_count += 1
+                request.timeout = timeout
+                return request
+
+        class FakeResponse:
+            def read(self):
+                return b""
+
+            def close(self):
+                pass
+
+        parent = FakeParent()
+        handler = source_http._LimitedRedirectHandler(max_redirects)
+        handler.parent = parent
+        request = Request("https://example.com/start")
+        request.timeout = 17
+        raised = None
+
+        for url in urls:
+            try:
+                request = handler.http_error_302(
+                    request,
+                    FakeResponse(),
+                    302,
+                    "Found",
+                    {"location": url},
+                )
+            except Exception as exc:
+                raised = exc
+                break
+
+        self.assertIsInstance(raised, source_http.TooManyRedirects)
+        self.assertEqual(parent.open_count, max_redirects)
+
     def test_sixth_urllib_redirect_raises_sanitized_error(self):
         secret_redirect = "https://example.com/final?token=secret-value"
 
@@ -370,6 +461,20 @@ class SourceHttpRedirectAndDependencyTests(unittest.TestCase):
                 isinstance(handler, HTTPRedirectHandler)
                 for handler in captured["handlers"]
             )
+        )
+
+    def test_caller_limit_precedes_standard_library_repeat_limit(self):
+        repeated_url = "https://example.com/repeated"
+
+        self._assert_caller_redirect_limit(
+            [repeated_url] * 13,
+            max_redirects=12,
+        )
+
+    def test_caller_limit_above_ten_precedes_standard_library_total_limit(self):
+        self._assert_caller_redirect_limit(
+            [f"https://example.com/redirect-{index}" for index in range(13)],
+            max_redirects=12,
         )
 
     def test_requirements_declares_httpx_socks_dependency(self):

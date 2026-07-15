@@ -39,6 +39,8 @@ class _LimitedRedirectHandler(HTTPRedirectHandler):
         super().__init__()
         self._max_redirects = max_redirects
         self._redirect_count = 0
+        self.max_repeats = max_redirects + 1
+        self.max_redirections = max_redirects + 1
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         self._redirect_count += 1
@@ -83,18 +85,33 @@ def _request_with_httpx(
         client_options["max_redirects"] = max_redirects
 
     with httpx.Client(**client_options) as client:
+        if max_bytes is not None:
+            with client.stream("GET", url) as response:
+                response.raise_for_status()
+                content = bytearray()
+                for chunk in response.iter_bytes(chunk_size=max_bytes + 1):
+                    remaining = max_bytes + 1 - len(content)
+                    content.extend(chunk[:remaining])
+                    if len(content) >= max_bytes + 1:
+                        break
+                truncated = len(content) > max_bytes
+                return SourceHttpResponse(
+                    body=bytes(content[:max_bytes]),
+                    status=int(response.status_code),
+                    headers=_response_headers(response.headers),
+                    final_url=str(response.url),
+                    truncated=truncated,
+                )
+
         response = client.get(url)
         response.raise_for_status()
         content = bytes(response.content)
-        truncated = max_bytes is not None and len(content) > max_bytes
-        if max_bytes is not None:
-            content = content[:max_bytes]
         return SourceHttpResponse(
             body=content,
             status=int(response.status_code),
             headers=_response_headers(response.headers),
             final_url=str(response.url),
-            truncated=truncated,
+            truncated=False,
         )
 
 
