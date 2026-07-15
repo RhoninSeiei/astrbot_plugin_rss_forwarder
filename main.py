@@ -1,3 +1,6 @@
+import importlib.util
+
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
@@ -9,6 +12,7 @@ from .parser import FeedParser
 from .pipeline import FeedPipeline
 from .scheduler import RSSScheduler
 from .semantic_dedup import SemanticDedupService
+from .source_probe import SourceProbeService
 from .storage import FeedStorage
 
 
@@ -44,6 +48,7 @@ class RSSPlugin(Star, RSSCommands):
         dispatcher = FeedDispatcher(context=context, config=config, storage=storage, renderer=self)
         pipeline = FeedPipeline(context=context, config=config)
         semantic_deduper = SemanticDedupService(context=context, config=config, storage=storage)
+        self.source_probe_service = SourceProbeService()
 
         self.scheduler = RSSScheduler(
             config=config,
@@ -54,6 +59,19 @@ class RSSPlugin(Star, RSSCommands):
             pipeline=pipeline,
             semantic_deduper=semantic_deduper,
         )
+        self._source_probe_api = None
+        if importlib.util.find_spec("astrbot.api.web") is not None:
+            from .source_probe_api import SourceProbeApi
+
+            self._source_probe_api = SourceProbeApi(
+                config,
+                self.source_probe_service,
+            )
+            self._source_probe_api.register(self.context)
+        else:
+            logger.warning(
+                "astrbot.api.web is unavailable; source probe Page API registration skipped"
+            )
 
     async def initialize(self):
         """插件初始化：仅做资源编排（启动调度器）。"""
