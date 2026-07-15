@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import re
 import unicodedata
 from typing import Any
@@ -281,16 +282,16 @@ def _feed_error_secrets(feed: FeedConfig) -> tuple[str, ...]:
 
 def _proxy_error_values(
     proxy_url: str,
-) -> tuple[tuple[str, ...], str, int | None]:
+) -> tuple[tuple[str, ...], tuple[str, ...], int | None]:
     raw_url = str(proxy_url or "")
     if not raw_url:
-        return (), "", None
+        return (), (), None
     try:
         parsed = urlsplit(raw_url)
         hostname = parsed.hostname or ""
         port = parsed.port
     except ValueError:
-        return (raw_url,), "", None
+        return (raw_url,), (), None
 
     safe_hostname = f"[{hostname}]" if ":" in hostname else hostname
     host_port = f"{safe_hostname}:{port}" if port is not None else safe_hostname
@@ -309,8 +310,36 @@ def _proxy_error_values(
             parsed.username or "",
             parsed.password or "",
         ),
-        hostname,
+        _proxy_hostname_variants(hostname),
         port,
+    )
+
+
+def _proxy_hostname_variants(hostname: str) -> tuple[str, ...]:
+    variants = {hostname}
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            variants.add(hostname.encode("idna").decode("ascii"))
+        except UnicodeError:
+            pass
+        try:
+            variants.add(hostname.encode("ascii").decode("idna"))
+        except UnicodeError:
+            pass
+    else:
+        variants.update((str(address), address.compressed, address.exploded))
+    return tuple(sorted(filter(None, variants), key=len, reverse=True))
+
+
+def _proxy_hostname_pattern(hostnames: tuple[str, ...]) -> re.Pattern[str] | None:
+    if not hostnames:
+        return None
+    alternatives = "|".join(re.escape(hostname) for hostname in hostnames)
+    return re.compile(
+        rf"(?<![\w.-])(?:{alternatives})(?![\w.-])",
+        re.IGNORECASE,
     )
 
 
@@ -319,37 +348,61 @@ def _redact_report_secrets(value: Any, feed: FeedConfig) -> Any:
         return value
     redacted = dict(value)
     attempts = value.get("attempts")
-    if not isinstance(attempts, list):
-        return redacted
+    if isinstance(attempts, list):
+        redacted_attempts = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                redacted_attempts.append(attempt)
+                continue
+            redacted_attempt = dict(attempt)
+            error_message = attempt.get("error_message")
+            if isinstance(error_message, str):
+                error_type = attempt.get("error_type")
+                redacted_attempt["error_message"] = _redact_error_message(
+                    error_message,
+                    feed,
+                    error_type=error_type if isinstance(error_type, str) else "",
+                )
+            redacted_attempts.append(redacted_attempt)
+        redacted["attempts"] = redacted_attempts
 
-    redacted_attempts = []
-    for attempt in attempts:
-        if not isinstance(attempt, dict):
-            redacted_attempts.append(attempt)
-            continue
-        redacted_attempt = dict(attempt)
-        error_message = attempt.get("error_message")
-        if isinstance(error_message, str):
-            redacted_attempt["error_message"] = _redact_error_message(
-                error_message,
+    recommendation = value.get("recommendation")
+    if isinstance(recommendation, dict):
+        redacted_recommendation = dict(recommendation)
+        message = recommendation.get("message")
+        if isinstance(message, str):
+            redacted_recommendation["message"] = _redact_error_message(
+                message,
                 feed,
             )
-        redacted_attempts.append(redacted_attempt)
-    redacted["attempts"] = redacted_attempts
+        redacted["recommendation"] = redacted_recommendation
     return redacted
 
 
-def _redact_error_message(value: str, feed: FeedConfig) -> str:
+def _redact_error_message(
+    value: str,
+    feed: FeedConfig,
+    *,
+    error_type: str = "",
+) -> str:
+    redact_proxy_port = (
+        error_type.lower() == "proxy"
+        or _has_proxy_address_context(value, feed)
+    )
     for secret in _feed_error_secrets(feed):
         value = value.replace(secret, "<redacted>")
 
-    _, proxy_hostname, proxy_port = _proxy_error_values(feed.proxy_url)
-    if proxy_hostname:
-        hostname_pattern = re.compile(
-            rf"(?<![\w.-]){re.escape(proxy_hostname)}(?![\w.-])"
-        )
+    _, proxy_hostnames, proxy_port = _proxy_error_values(feed.proxy_url)
+    hostname_pattern = _proxy_hostname_pattern(proxy_hostnames)
+    if hostname_pattern is not None:
         value = hostname_pattern.sub("<redacted>", value)
-    if proxy_port is not None:
+    if proxy_port is not None and redact_proxy_port:
         port_pattern = re.compile(rf"(?<!\d){proxy_port}(?!\d)")
         value = port_pattern.sub("<redacted>", value)
     return value
+
+
+def _has_proxy_address_context(value: str, feed: FeedConfig) -> bool:
+    _, proxy_hostnames, _ = _proxy_error_values(feed.proxy_url)
+    hostname_pattern = _proxy_hostname_pattern(proxy_hostnames)
+    return hostname_pattern is not None and hostname_pattern.search(value) is not None
