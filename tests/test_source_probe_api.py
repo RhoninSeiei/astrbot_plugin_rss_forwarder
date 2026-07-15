@@ -1318,10 +1318,16 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
             {"feed_id": "rss-1"},
             username="alice",
         )
+        other = await self._run(
+            api,
+            {"feed_id": "rss-1"},
+            username="bob",
+        )
         try:
             self.assertFalse(first.done())
             self.assertEqual(duplicate["status_code"], 429)
-            self.assertEqual(calls, 1)
+            self.assertEqual(other["status_code"], 200)
+            self.assertEqual(calls, 2)
             self.assertFalse(completed.is_set())
             self.assertEqual(len(api._active_probe_tasks), 1)
         finally:
@@ -1339,7 +1345,7 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
             username="alice",
         )
         self.assertEqual(released["status_code"], 200)
-        self.assertEqual(calls, 2)
+        self.assertEqual(calls, 3)
 
     async def test_terminate_waits_for_active_page_probe_without_cancelling_it(self):
         entered = threading.Event()
@@ -1378,6 +1384,7 @@ class SourceProbeApiRunTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response["status_code"], 200)
         self.assertTrue(completed.is_set())
+        self.assertEqual(api._probe_locks, {})
         self.assertEqual(api._active_probe_tasks, set())
 
 

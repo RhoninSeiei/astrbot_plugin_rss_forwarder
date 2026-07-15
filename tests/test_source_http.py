@@ -406,17 +406,78 @@ class SourceHttpSocksTests(unittest.TestCase):
         if not hasattr(source_http, "source_http_client"):
             self.fail("source_http_client must be public")
 
+        self.assertEqual(
+            source_http.source_http_client("socks4://127.0.0.1:1080"),
+            "urllib3",
+        )
         for proxy_url in (
             "socks://127.0.0.1:1080",
-            "socks4://127.0.0.1:1080",
             "socks5://127.0.0.1:1080",
             " SOCKS5H://127.0.0.1:1080 ",
         ):
             with self.subTest(proxy_url=proxy_url):
-                self.assertEqual(source_http.source_http_client(proxy_url), "urllib3")
+                self.assertEqual(source_http.source_http_client(proxy_url), "httpx")
         for proxy_url in ("", "http://127.0.0.1:7890", "https://proxy.example"):
             with self.subTest(proxy_url=proxy_url):
                 self.assertEqual(source_http.source_http_client(proxy_url), "urllib")
+
+    def _stub_httpx(self, *, error=None, chunks=None):
+        captured = {}
+        chunks = list(chunks or [b"socks body"])
+
+        class FakeResponse:
+            status_code = 206
+            headers = {"Content-Type": "application/rss+xml"}
+            url = "https://example.com/socks-final"
+
+            @property
+            def content(self):
+                captured["content_reads"] = captured.get("content_reads", 0) + 1
+                return b"".join(chunks)
+
+            def __enter__(self):
+                captured["response_entered"] = True
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                captured["response_closed"] = True
+                return False
+
+            def raise_for_status(self):
+                captured["raise_for_status"] = True
+                if error is not None:
+                    raise error
+
+            def iter_bytes(self, chunk_size=None):
+                captured["iter_chunk_size"] = chunk_size
+                for chunk in chunks:
+                    captured["iterated_chunks"] = (
+                        captured.get("iterated_chunks", 0) + 1
+                    )
+                    captured["iterated_bytes"] = (
+                        captured.get("iterated_bytes", 0) + len(chunk)
+                    )
+                    yield chunk
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def get(self, url):
+                captured["url"] = url
+                return FakeResponse()
+
+            def stream(self, method, url):
+                captured["stream"] = (method, url)
+                return FakeResponse()
+
+        return captured, types.SimpleNamespace(Client=FakeClient)
 
     def _stub_socks_manager(self, *, status=206, chunks=None):
         captured = {}
@@ -468,7 +529,7 @@ class SourceHttpSocksTests(unittest.TestCase):
 
         return captured, fake_builder
 
-    def test_socks_proxy_uses_urllib3_manager_with_finite_redirect_limit(self):
+    def test_socks4_proxy_uses_urllib3_manager_with_finite_redirect_limit(self):
         captured, fake_builder = self._stub_socks_manager()
 
         with patch.object(
@@ -478,14 +539,14 @@ class SourceHttpSocksTests(unittest.TestCase):
             create=True,
         ):
             response = _request(
-                proxy_url="socks5h://127.0.0.1:1080",
+                proxy_url="socks4://127.0.0.1:1080",
                 verify_ssl=False,
                 max_redirects=5,
             )
 
         self.assertEqual(
             captured["builder"],
-            ("socks5h://127.0.0.1:1080", False),
+            ("socks4://127.0.0.1:1080", False),
         )
         self.assertEqual(
             captured["request"],
@@ -502,7 +563,7 @@ class SourceHttpSocksTests(unittest.TestCase):
         self.assertTrue(captured["response_released"])
         self.assertTrue(captured["manager_cleared"])
 
-    def test_finite_socks_read_streams_only_limit_plus_one_byte(self):
+    def test_finite_socks4_read_streams_only_limit_plus_one_byte(self):
         captured, fake_builder = self._stub_socks_manager(
             chunks=[b"abc", b"def", b"unread", b"also unread"]
         )
@@ -514,7 +575,7 @@ class SourceHttpSocksTests(unittest.TestCase):
             create=True,
         ):
             response = _request(
-                proxy_url="socks5://127.0.0.1:1080",
+                proxy_url="socks4://127.0.0.1:1080",
                 max_bytes=5,
             )
 
@@ -525,6 +586,182 @@ class SourceHttpSocksTests(unittest.TestCase):
         self.assertTrue(captured["response_released"])
         self.assertEqual(response.body, b"abcde")
         self.assertIs(response.truncated, True)
+
+    def test_socks5_proxy_uses_httpx_with_redirect_guard(self):
+        captured, httpx_stub = self._stub_httpx()
+
+        with patch.dict(sys.modules, {"httpx": httpx_stub}):
+            response = _request(
+                proxy_url="socks5h://127.0.0.1:1080",
+                verify_ssl=False,
+                max_redirects=5,
+            )
+
+        options = captured["kwargs"]
+        self.assertEqual(options["headers"], {"Accept": "application/xml"})
+        self.assertEqual(options["timeout"], 17)
+        self.assertIs(options["follow_redirects"], True)
+        self.assertIs(options["verify"], False)
+        self.assertEqual(options["proxy"], "socks5h://127.0.0.1:1080")
+        self.assertEqual(options["max_redirects"], 5)
+        self.assertEqual(len(options["event_hooks"]["request"]), 1)
+        self.assertTrue(callable(options["event_hooks"]["request"][0]))
+        self.assertTrue(captured["raise_for_status"])
+        self.assertEqual(response.body, b"socks body")
+        self.assertEqual(response.status, 206)
+        self.assertEqual(response.final_url, "https://example.com/socks-final")
+
+    def test_socks5_default_redirect_limit_uses_httpx_default(self):
+        captured, httpx_stub = self._stub_httpx()
+
+        with patch.dict(sys.modules, {"httpx": httpx_stub}):
+            _request(proxy_url="socks://127.0.0.1:1080", max_redirects=None)
+
+        self.assertNotIn("max_redirects", captured["kwargs"])
+        self.assertEqual(
+            captured["kwargs"]["proxy"],
+            "socks5://127.0.0.1:1080",
+        )
+
+    def test_finite_socks5_read_streams_only_limit_plus_one_byte(self):
+        captured, httpx_stub = self._stub_httpx(
+            chunks=[b"abc", b"def", b"unread", b"also unread"]
+        )
+
+        with patch.dict(sys.modules, {"httpx": httpx_stub}):
+            response = _request(
+                proxy_url="socks5://127.0.0.1:1080",
+                max_bytes=5,
+            )
+
+        self.assertEqual(
+            captured.get("stream"),
+            ("GET", "https://example.com/feed.xml"),
+        )
+        self.assertEqual(captured["iter_chunk_size"], 6)
+        self.assertEqual(captured["iterated_chunks"], 2)
+        self.assertEqual(captured["iterated_bytes"], 6)
+        self.assertEqual(captured.get("content_reads", 0), 0)
+        self.assertTrue(captured["response_closed"])
+        self.assertEqual(response.body, b"abcde")
+        self.assertIs(response.truncated, True)
+
+    def test_httpx_redirect_guard_preserves_same_origin_sensitive_headers(self):
+        guard = source_http._httpx_redirect_guard()
+        first = types.SimpleNamespace(
+            url="https://EXAMPLE.com:443/start",
+            headers={
+                "Authorization": "Bearer source-secret",
+                "Cookie": "session=cookie-secret",
+                "Proxy-Authorization": "Basic proxy-secret",
+                "X-Preserved": "yes",
+            },
+        )
+        guard(first)
+        redirected = types.SimpleNamespace(
+            url="https://example.com/next",
+            headers={"X-Preserved": "yes"},
+        )
+
+        guard(redirected)
+
+        self.assertEqual(redirected.headers["Authorization"], "Bearer source-secret")
+        self.assertEqual(redirected.headers["Cookie"], "session=cookie-secret")
+        self.assertEqual(
+            redirected.headers["Proxy-Authorization"],
+            "Basic proxy-secret",
+        )
+        self.assertEqual(redirected.headers["X-Preserved"], "yes")
+
+    def test_httpx_redirect_guard_removes_cross_origin_sensitive_headers(self):
+        for target in (
+            "http://example.com/next",
+            "https://other.example/next",
+            "https://example.com:444/next",
+        ):
+            with self.subTest(target=target):
+                guard = source_http._httpx_redirect_guard()
+                headers = {
+                    "Authorization": "Bearer source-secret",
+                    "Cookie": "session=cookie-secret",
+                    "Proxy-Authorization": "Basic proxy-secret",
+                    "X-Preserved": "yes",
+                }
+                guard(
+                    types.SimpleNamespace(
+                        url="https://example.com/start",
+                        headers=dict(headers),
+                    )
+                )
+                redirected = types.SimpleNamespace(
+                    url=target,
+                    headers=dict(headers),
+                )
+
+                guard(redirected)
+
+                normalized = {
+                    name.lower(): value for name, value in redirected.headers.items()
+                }
+                self.assertNotIn("authorization", normalized)
+                self.assertNotIn("cookie", normalized)
+                self.assertNotIn("proxy-authorization", normalized)
+                self.assertEqual(normalized["x-preserved"], "yes")
+
+    def _real_httpx_redirect_headers(self, target_url):
+        import httpx
+
+        captured = []
+
+        def respond(request):
+            captured.append(dict(request.headers.items()))
+            if len(captured) == 1:
+                return httpx.Response(
+                    302,
+                    headers={"Location": target_url},
+                    request=request,
+                )
+            return httpx.Response(200, content=b"feed", request=request)
+
+        with httpx.Client(
+            headers={
+                "Authorization": "Bearer source-secret",
+                "Cookie": "session=cookie-secret",
+                "Proxy-Authorization": "Basic proxy-secret",
+                "X-Preserved": "yes",
+            },
+            follow_redirects=True,
+            event_hooks={"request": [source_http._httpx_redirect_guard()]},
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            response = client.get("https://example.com/start")
+
+        self.assertEqual(response.content, b"feed")
+        return {name.lower(): value for name, value in captured[1].items()}
+
+    def test_real_httpx_same_origin_redirect_retains_sensitive_headers(self):
+        headers = self._real_httpx_redirect_headers(
+            "https://EXAMPLE.com:443/next"
+        )
+
+        self.assertEqual(headers["authorization"], "Bearer source-secret")
+        self.assertEqual(headers["cookie"], "session=cookie-secret")
+        self.assertEqual(headers["proxy-authorization"], "Basic proxy-secret")
+        self.assertEqual(headers["x-preserved"], "yes")
+
+    def test_real_httpx_cross_origin_redirect_strips_sensitive_headers(self):
+        for target_url in (
+            "http://example.com/next",
+            "https://other.example/next",
+            "https://example.com:444/next",
+        ):
+            with self.subTest(target_url=target_url):
+                headers = self._real_httpx_redirect_headers(target_url)
+
+                self.assertNotIn("authorization", headers)
+                self.assertNotIn("cookie", headers)
+                self.assertNotIn("proxy-authorization", headers)
+                self.assertEqual(headers["x-preserved"], "yes")
 
     def test_socks_http_status_error_omits_userinfo_and_query_values(self):
         _captured, fake_builder = self._stub_socks_manager(status=401)
@@ -893,14 +1130,12 @@ class SourceHttpRedirectAndDependencyTests(unittest.TestCase):
             max_redirects=12,
         )
 
-    def test_requirements_declares_urllib3_socks_dependency(self):
+    def test_requirements_declare_both_socks_dependencies(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
 
         self.assertIn("Pillow", requirements.splitlines())
         self.assertIn("urllib3[socks]>=2.7,<3", requirements.splitlines())
-        self.assertFalse(
-            any(line.startswith("httpx") for line in requirements.splitlines())
-        )
+        self.assertIn("httpx[socks]>=0.27,<1", requirements.splitlines())
 
 
 if __name__ == "__main__":

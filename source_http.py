@@ -21,7 +21,8 @@ from urllib.request import (
 )
 
 
-_SOCKS_SCHEMES = ("socks://", "socks4://", "socks5://", "socks5h://")
+_SOCKS4_SCHEMES = ("socks4://",)
+_HTTPX_SOCKS_SCHEMES = ("socks://", "socks5://", "socks5h://")
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _SENSITIVE_REDIRECT_HEADERS = {
     "authorization",
@@ -223,7 +224,11 @@ def get_response_header(
 
 def source_http_client(proxy_url: str) -> str:
     normalized_proxy = str(proxy_url or "").strip().lower()
-    return "urllib3" if normalized_proxy.startswith(_SOCKS_SCHEMES) else "urllib"
+    if normalized_proxy.startswith(_SOCKS4_SCHEMES):
+        return "urllib3"
+    if normalized_proxy.startswith(_HTTPX_SOCKS_SCHEMES):
+        return "httpx"
+    return "urllib"
 
 
 def _normalize_socks_proxy_url(proxy_url: str) -> str:
@@ -254,6 +259,88 @@ def _read_socks_body(response: Any, max_bytes: int | None) -> tuple[bytes, bool]
         if len(content) >= max_bytes + 1:
             break
     return bytes(content[:max_bytes]), len(content) > max_bytes
+
+
+def _httpx_redirect_guard():
+    previous_url: str | None = None
+    sensitive_headers: dict[str, tuple[str, str]] = {}
+
+    def guard(request) -> None:
+        nonlocal previous_url, sensitive_headers
+        current_url = str(request.url)
+        if previous_url is None:
+            sensitive_headers = {
+                str(name).lower(): (str(name), str(value))
+                for name, value in request.headers.items()
+                if str(name).lower() in _SENSITIVE_REDIRECT_HEADERS
+            }
+            previous_url = current_url
+            return
+
+        if _url_origin(previous_url) == _url_origin(current_url):
+            for original_name, value in sensitive_headers.values():
+                request.headers[original_name] = value
+        else:
+            for header_name in tuple(request.headers):
+                if str(header_name).lower() in _SENSITIVE_REDIRECT_HEADERS:
+                    request.headers.pop(header_name, None)
+            sensitive_headers = {}
+        previous_url = current_url
+
+    return guard
+
+
+def _request_with_httpx(
+    *,
+    url: str,
+    headers: dict[str, str],
+    proxy_url: str,
+    timeout: int,
+    verify_ssl: bool,
+    max_bytes: int | None,
+    max_redirects: int | None,
+) -> SourceHttpResponse:
+    import httpx
+
+    client_options: dict[str, Any] = {
+        "headers": headers,
+        "timeout": timeout,
+        "follow_redirects": True,
+        "verify": verify_ssl,
+        "proxy": _normalize_socks_proxy_url(proxy_url),
+        "event_hooks": {"request": [_httpx_redirect_guard()]},
+    }
+    if max_redirects is not None:
+        client_options["max_redirects"] = max_redirects
+
+    with httpx.Client(**client_options) as client:
+        if max_bytes is not None:
+            with client.stream("GET", url) as response:
+                response.raise_for_status()
+                content = bytearray()
+                for chunk in response.iter_bytes(chunk_size=max_bytes + 1):
+                    remaining = max_bytes + 1 - len(content)
+                    content.extend(chunk[:remaining])
+                    if len(content) >= max_bytes + 1:
+                        break
+                truncated = len(content) > max_bytes
+                return SourceHttpResponse(
+                    body=bytes(content[:max_bytes]),
+                    status=int(response.status_code),
+                    headers=normalize_response_headers(response.headers),
+                    final_url=str(response.url),
+                    truncated=truncated,
+                )
+
+        response = client.get(url)
+        response.raise_for_status()
+        return SourceHttpResponse(
+            body=bytes(response.content),
+            status=int(response.status_code),
+            headers=normalize_response_headers(response.headers),
+            final_url=str(response.url),
+            truncated=False,
+        )
 
 
 def _request_with_socks(
@@ -350,8 +437,19 @@ def request_source(
         raise ValueError("max_bytes must be greater than zero")
 
     normalized_proxy = str(proxy_url or "").strip()
-    if source_http_client(normalized_proxy) == "urllib3":
+    client_name = source_http_client(normalized_proxy)
+    if client_name == "urllib3":
         return _request_with_socks(
+            url=url,
+            headers=headers,
+            proxy_url=normalized_proxy,
+            timeout=timeout,
+            verify_ssl=verify_ssl,
+            max_bytes=max_bytes,
+            max_redirects=max_redirects,
+        )
+    if client_name == "httpx":
+        return _request_with_httpx(
             url=url,
             headers=headers,
             proxy_url=normalized_proxy,
