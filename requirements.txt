@@ -1,1 +1,2 @@
 Pillow
+httpx[socks]>=0.27,<1
