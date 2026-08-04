@@ -12,6 +12,8 @@ class AggregateCardImageRenderer:
     CARD_PAD = 48
     HEADER_H = 118
     FOOTER_H = 70
+    BODY_TOP_MARGIN = 28
+    BODY_BOTTOM_MARGIN = 28
     SECTION_GAP = 22
     MAX_CACHE_FILES = 20
 
@@ -60,7 +62,10 @@ class AggregateCardImageRenderer:
             body_h += self.SECTION_GAP * (len(section_layouts) - 1)
         body_h = max(body_h, 82)
 
-        total_h = self.OUTER_PAD * 2 + self.HEADER_H + body_h + self.FOOTER_H
+        total_h = (
+            self.OUTER_PAD * 2 + self.HEADER_H + self.BODY_TOP_MARGIN + body_h
+            + self.BODY_BOTTOM_MARGIN + self.FOOTER_H
+        )
         img = Image.new("RGB", (self.WIDTH, total_h), (255, 255, 255))
         draw = ImageDraw.Draw(img)
         self._draw_frame(draw, img.width, img.height)
@@ -104,7 +109,7 @@ class AggregateCardImageRenderer:
     def _draw_sections(self, draw, Image, ImageOps, img, layouts, title_font, body_font) -> None:
         left = self.OUTER_PAD + self.CARD_PAD
         right = self.WIDTH - self.OUTER_PAD - self.CARD_PAD
-        y = self.OUTER_PAD + self.HEADER_H + 28
+        y = self.OUTER_PAD + self.HEADER_H + self.BODY_TOP_MARGIN
         for section, title_lines, summary_lines, section_h in layouts:
             x_text = left
             image_path = str(section.get("image_path", "") or "").strip()

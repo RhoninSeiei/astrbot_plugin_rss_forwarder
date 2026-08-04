@@ -433,7 +433,7 @@ class ConfigTranslationTests(unittest.TestCase):
         self.assertIsNotNone(register_call)
         self.assertEqual(register_call.args[0].value, "astrbot_plugin_rss_forwarder")
 
-    def test_release_versions_match_and_equal_0_7_1(self):
+    def test_release_versions_match_and_equal_0_7_2(self):
         metadata_text = Path("metadata.yaml").read_text(encoding="utf-8")
         metadata_match = re.search(
             r"(?m)^version:\s*(v?\d+\.\d+\.\d+)\s*$",
@@ -458,7 +458,7 @@ class ConfigTranslationTests(unittest.TestCase):
         runtime_version = register_call.args[3].value
 
         self.assertEqual(metadata_version, runtime_version)
-        self.assertEqual(metadata_version, "0.7.1")
+        self.assertEqual(metadata_version, "0.7.2")
 
     def test_readmes_document_source_diagnostics_entry_labels(self):
         expected_titles = {
