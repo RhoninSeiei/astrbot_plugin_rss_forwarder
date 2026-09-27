@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlsplit
 
 from astrbot.api import logger
 
@@ -63,26 +63,47 @@ class TwitterTimelineFetcher:
             feed,
             default_nitter_url=self._default_nitter_url,
         )
-        base_url = timeline_url.rsplit("/", 1)[0]
         proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
         timeout = max(int(getattr(feed, "timeout", 10) or 10), 1)
         verify_ssl = bool(getattr(feed, "verify_ssl", True))
         max_new_items = max(int(getattr(feed, "max_new_items", 1) or 0), 0)
 
-        try:
-            timeline_html = await asyncio.to_thread(
-                self._open_text,
-                timeline_url,
-                proxy_url,
-                timeout,
-                verify_ssl,
-                timeline_headers,
-            )
-        except Exception as exc:
-            logger.warning("fetch twitter feed=%s timeline failed: %s", feed.id, exc)
+        timeline_ids: list[str] | None = None
+        base_url = ""
+        for candidate_url in self._resolve_nitter_urls(feed, timeline_url):
+            candidate_timeline_url = f"{candidate_url}/{username}"
+            for attempt in range(2):
+                try:
+                    timeline_html = await asyncio.to_thread(
+                        self._open_text,
+                        candidate_timeline_url,
+                        proxy_url,
+                        timeout,
+                        verify_ssl,
+                        timeline_headers,
+                    )
+                    candidate_ids = self._extract_timeline_ids(timeline_html, username)
+                    if not candidate_ids and not self._has_class(timeline_html, "timeline"):
+                        raise ValueError("Nitter returned an invalid timeline page")
+                    timeline_ids = candidate_ids
+                    base_url = candidate_url
+                    break
+                except Exception as exc:
+                    if attempt == 0 and self._should_retry_timeline(exc):
+                        await asyncio.sleep(0.5)
+                        continue
+                    logger.warning(
+                        "fetch twitter feed=%s instance=%s timeline failed: %s",
+                        feed.id,
+                        urlsplit(candidate_url).hostname,
+                        exc,
+                    )
+                    break
+            if timeline_ids is not None:
+                break
+        if timeline_ids is None:
             return None
 
-        timeline_ids = self._extract_timeline_ids(timeline_html, username)
         if not timeline_ids:
             return TwitterFetchResult(feed_id=feed.id, items=[], since_id=since_id)
 
@@ -96,35 +117,45 @@ class TwitterTimelineFetcher:
         items: list[dict[str, Any]] = []
         advanced_since_id = since_id
         for tweet_id in reversed(new_ids):
-            try:
-                detail_html = await asyncio.to_thread(
-                    self._open_text,
-                    f"{base_url}/{username}/status/{tweet_id}",
-                    proxy_url,
-                    timeout,
-                    verify_ssl,
-                    NITTER_REQUEST_HEADERS,
-                )
-                item = self._parse_tweet_detail(feed, base_url, username, tweet_id, detail_html)
-                if cache_dir is not None:
-                    await self._cache_item_media(
-                        item,
-                        cache_dir=cache_dir,
-                        proxy_url=proxy_url,
-                        timeout=timeout,
+            detail_bases = [base_url] + [
+                url for url in self._resolve_nitter_urls(feed, timeline_url) if url != base_url
+            ]
+            for detail_base in detail_bases:
+                try:
+                    detail_html = await asyncio.to_thread(
+                        self._open_text,
+                        f"{detail_base}/{username}/status/{tweet_id}",
+                        proxy_url,
+                        timeout,
+                        verify_ssl,
+                        NITTER_REQUEST_HEADERS,
                     )
-                items.append(item)
-                advanced_since_id = tweet_id
-            except Exception as exc:
-                logger.warning(
-                    "fetch twitter feed=%s tweet=%s failed: %s",
-                    feed.id,
-                    tweet_id,
-                    exc,
-                )
-                if self._is_permanent_detail_failure(exc):
+                    if not self._has_class(detail_html, "main-tweet"):
+                        raise ValueError("Nitter returned an invalid tweet page")
+                    item = self._parse_tweet_detail(
+                        feed, detail_base, username, tweet_id, detail_html
+                    )
+                    if not any((item["text"], item["all_images"], item["all_videos"])):
+                        raise ValueError("Nitter returned an empty tweet")
+                    if cache_dir is not None:
+                        await self._cache_item_media(
+                            item,
+                            cache_dir=cache_dir,
+                            proxy_url=proxy_url,
+                            timeout=timeout,
+                        )
+                    items.append(item)
                     advanced_since_id = tweet_id
-                    continue
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "fetch twitter feed=%s tweet=%s instance=%s failed: %s",
+                        feed.id,
+                        tweet_id,
+                        urlsplit(detail_base).hostname,
+                        exc,
+                    )
+            else:
                 break
 
         return TwitterFetchResult(
@@ -133,11 +164,6 @@ class TwitterTimelineFetcher:
             since_id=advanced_since_id,
         )
 
-    @staticmethod
-    def _is_permanent_detail_failure(exc: Exception) -> bool:
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
-        return status_code in {404, 410}
-
     def _resolve_nitter_url(self, feed) -> str:
         configured = (
             str(getattr(feed, "nitter_url", "") or "").strip()
@@ -145,6 +171,22 @@ class TwitterTimelineFetcher:
             or self._default_nitter_url
         )
         return configured.rstrip("/")
+
+    def _resolve_nitter_urls(self, feed, timeline_url: str) -> list[str]:
+        primary = timeline_url.rsplit("/", 1)[0]
+        candidates = [primary]
+        for url in getattr(feed, "nitter_fallback_urls", []) or []:
+            normalized = str(url).strip().rstrip("/")
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+        return candidates
+
+    @staticmethod
+    def _should_retry_timeline(exc: Exception) -> bool:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is None:
+            status = getattr(exc, "code", None)
+        return status in {429, 500, 502, 503, 504} if status else not isinstance(exc, ValueError)
 
     @staticmethod
     def _open_text(

@@ -43,6 +43,7 @@ class FeedConfig:
     source_type: str = "rss"
     username: str = ""
     nitter_url: str = ""
+    nitter_fallback_urls: list[str] = field(default_factory=list)
     proxy_url: str = ""
     send_images: bool = True
     send_videos: bool = True
@@ -203,6 +204,13 @@ class RSSConfig:
                 raise ConfigValidationError(
                     f"feeds[{feed_id}].verify_ssl 必须是 bool"
                 )
+            fallback_urls = item.get("nitter_fallback_urls", [])
+            if not isinstance(fallback_urls, list) or any(
+                not isinstance(url, str) for url in fallback_urls
+            ):
+                raise ConfigValidationError(
+                    f"feeds[{item.get('id', '')}].nitter_fallback_urls 必须是 URL 列表"
+                )
 
         feeds = [
             FeedConfig(
@@ -212,6 +220,9 @@ class RSSConfig:
                 or "rss",
                 username=str(item.get("username", "")).strip().lstrip("@"),
                 nitter_url=str(item.get("nitter_url", "")).strip(),
+                nitter_fallback_urls=[
+                    url.strip() for url in item.get("nitter_fallback_urls", []) if url.strip()
+                ],
                 proxy_url=str(item.get("proxy_url", "")).strip(),
                 send_images=bool(item.get("send_images", True)),
                 send_videos=bool(item.get("send_videos", True)),
@@ -537,6 +548,11 @@ class RSSConfig:
                     self._validate_url(feed.url, f"feeds[{feed.id}].url")
                 if feed.nitter_url:
                     self._validate_url(feed.nitter_url, f"feeds[{feed.id}].nitter_url")
+                for index, fallback_url in enumerate(feed.nitter_fallback_urls):
+                    self._validate_url(
+                        fallback_url,
+                        f"feeds[{feed.id}].nitter_fallback_urls[{index}]",
+                    )
                 if feed.proxy_url:
                     self._validate_proxy_url(feed.proxy_url, f"feeds[{feed.id}].proxy_url")
                 if feed.max_new_items < 0:

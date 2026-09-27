@@ -69,6 +69,197 @@ class _FakeCacheDir:
 
 
 class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeline_eof_uses_backup_and_preserves_cursor(self):
+        class Feed:
+            id = "tw-backup"
+            username = "alice"
+            nitter_url = "https://primary.example.com"
+            nitter_fallback_urls = ["https://backup.example.com"]
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            verify_ssl = True
+            send_images = False
+            send_videos = False
+            send_link = True
+            max_new_items = 1
+
+        opened = []
+
+        def fake_open_text(url, *_args):
+            opened.append(url)
+            if url.startswith("https://primary.example.com"):
+                raise OSError("TLS EOF")
+            if url.endswith("/alice"):
+                return '<div class="timeline-item"><a href="/alice/status/300"></a></div>'
+            return '<div class="main-tweet"><div class="tweet-content media-body">new post</div></div>'
+
+        async def inline_thread(func, *args):
+            return func(*args)
+
+        with mock.patch.object(TwitterTimelineFetcher, "_open_text", staticmethod(fake_open_text)):
+            with mock.patch("asyncio.to_thread", new=inline_thread):
+                result = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "200"})
+
+        self.assertEqual(result.since_id, "300")
+        self.assertEqual([item["tweet_id"] for item in result.items], ["300"])
+        self.assertIn("https://backup.example.com/alice/status/300", opened)
+        self.assertNotIn("https://primary.example.com/alice/status/300", opened)
+
+    async def test_challenge_page_uses_backup_instead_of_empty_result(self):
+        class Feed:
+            id = "tw-challenge"
+            username = "alice"
+            nitter_url = "https://primary.example.com"
+            nitter_fallback_urls = ["https://backup.example.com"]
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            verify_ssl = True
+            max_new_items = 1
+            send_images = False
+            send_videos = False
+            send_link = True
+
+        def fake_open_text(url, *_args):
+            if url.startswith("https://primary.example.com"):
+                return "<title>正在确认你是不是机器人！</title>"
+            if url.endswith("/alice"):
+                return '<div class="timeline-item"><a href="/alice/status/300"></a></div>'
+            return '<div class="main-tweet"><div class="tweet-content media-body">new post</div></div>'
+
+        async def inline_thread(func, *args):
+            return func(*args)
+
+        with mock.patch.object(TwitterTimelineFetcher, "_open_text", staticmethod(fake_open_text)):
+            with mock.patch("asyncio.to_thread", new=inline_thread):
+                result = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "200"})
+
+        self.assertEqual(result.since_id, "300")
+        self.assertEqual(len(result.items), 1)
+
+    async def test_detail_failure_uses_backup_without_advancing_on_total_failure(self):
+        class Feed:
+            id = "tw-detail-backup"
+            username = "alice"
+            nitter_url = "https://primary.example.com"
+            nitter_fallback_urls = ["https://backup.example.com"]
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            verify_ssl = True
+            max_new_items = 1
+            send_images = False
+            send_videos = False
+            send_link = True
+
+        attempts = []
+
+        def fake_open_text(url, *_args):
+            attempts.append(url)
+            if url.endswith("/alice"):
+                return '<div class="timeline-item"><a href="/alice/status/300"></a></div>'
+            if "primary.example.com" in url:
+                raise OSError("TLS EOF")
+            return '<div class="main-tweet"><div class="tweet-content media-body">new post</div></div>'
+
+        async def inline_thread(func, *args):
+            return func(*args)
+
+        with mock.patch.object(TwitterTimelineFetcher, "_open_text", staticmethod(fake_open_text)):
+            with mock.patch("asyncio.to_thread", new=inline_thread):
+                result = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "200"})
+
+        self.assertEqual(result.since_id, "300")
+        self.assertIn("https://backup.example.com/alice/status/300", attempts)
+
+        def fail_detail(url, *_args):
+            if url.endswith("/alice"):
+                return '<div class="timeline-item"><a href="/alice/status/300"></a></div>'
+            raise OSError("TLS EOF")
+
+        with mock.patch.object(TwitterTimelineFetcher, "_open_text", staticmethod(fail_detail)):
+            with mock.patch("asyncio.to_thread", new=inline_thread):
+                failed = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "200"})
+
+        self.assertEqual(failed.since_id, "200")
+        self.assertEqual(failed.items, [])
+
+    async def test_unknown_verification_page_uses_backup_and_valid_empty_timeline_does_not(self):
+        class Feed:
+            id = "tw-verify"
+            username = "alice"
+            nitter_url = "https://primary.example.com"
+            nitter_fallback_urls = ["https://backup.example.com"]
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            verify_ssl = True
+            max_new_items = 1
+            send_images = False
+            send_videos = False
+            send_link = True
+
+        opened = []
+
+        def challenge_response(url, *_args):
+            opened.append(url)
+            if url.startswith("https://primary.example.com"):
+                return "<title>Making sure you are not a bot!</title>"
+            if url.endswith("/alice"):
+                return '<div class="timeline-item"><a href="/alice/status/300"></a></div>'
+            return '<div class="main-tweet"><div class="tweet-content">new post</div></div>'
+
+        async def inline_thread(func, *args):
+            return func(*args)
+
+        with mock.patch.object(TwitterTimelineFetcher, "_open_text", staticmethod(challenge_response)):
+            with mock.patch("asyncio.to_thread", new=inline_thread):
+                result = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "200"})
+        self.assertEqual(result.since_id, "300")
+        self.assertIn("https://backup.example.com/alice", opened)
+
+        opened.clear()
+
+        def empty_response(url, *_args):
+            opened.append(url)
+            return '<div class="timeline">No tweets found</div>'
+
+        with mock.patch.object(TwitterTimelineFetcher, "_open_text", staticmethod(empty_response)):
+            with mock.patch("asyncio.to_thread", new=inline_thread):
+                empty = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "200"})
+        self.assertEqual(empty.since_id, "200")
+        self.assertEqual(empty.items, [])
+        self.assertEqual(opened, ["https://primary.example.com/alice"])
+
+    async def test_all_detail_404_responses_preserve_cursor(self):
+        class Feed:
+            id = "tw-404"
+            username = "alice"
+            nitter_url = "https://primary.example.com"
+            nitter_fallback_urls = ["https://backup.example.com"]
+            url = ""
+            proxy_url = ""
+            timeout = 10
+            verify_ssl = True
+            max_new_items = 1
+
+        def fake_open_text(url, *_args):
+            if url.endswith("/alice"):
+                return '<div class="timeline-item"><a href="/alice/status/300"></a></div>'
+            exc = RuntimeError("post unavailable")
+            exc.response = types.SimpleNamespace(status_code=404)
+            raise exc
+
+        async def inline_thread(func, *args):
+            return func(*args)
+
+        with mock.patch.object(TwitterTimelineFetcher, "_open_text", staticmethod(fake_open_text)):
+            with mock.patch("asyncio.to_thread", new=inline_thread):
+                result = await TwitterTimelineFetcher().fetch(Feed(), {"since_id": "200"})
+        self.assertEqual(result.since_id, "200")
+        self.assertEqual(result.items, [])
+
     def test_extract_timeline_ids_dedupes_status_links(self):
         html = """
         <div class="timeline-item"><a class="tweet-link" href="/alice/status/200"></a></div>
@@ -307,7 +498,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             calls.append((url, dict(headers)))
-            return "<html></html>"
+            return '<div class="timeline">No tweets found</div>'
 
         with (
             mock.patch.object(
@@ -352,7 +543,7 @@ class TwitterTimelineFetcherTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_open_text(url, proxy_url, timeout, verify_ssl, headers):
             opened_urls.append(url)
-            return "<html></html>"
+            return '<div class="timeline">No tweets found</div>'
 
         with mock.patch.object(
             TwitterTimelineFetcher,

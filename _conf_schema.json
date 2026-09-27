@@ -109,6 +109,12 @@
             "description": "Nitter 镜像站地址",
             "hint": "留空时使用 https://nitter.net；也可填写自建 Nitter 服务。"
           },
+          "nitter_fallback_urls": {
+            "type": "list",
+            "default": [],
+            "description": "备用 Nitter 实例地址",
+            "hint": "主站连接失败或返回验证码页面时，按顺序尝试。请填写完整的 HTTPS 站点地址。"
+          },
           "proxy_url": {
             "type": "string",
             "default": "",

@@ -79,6 +79,8 @@ RSS 源可按需设置 `send_images`、`send_videos` 与 `max_new_items`。其�
 
 同样在 `feeds[]` 中新增一项，类型选择 `Twitter/Nitter 源`。最少需要填写 `id` 与 `username`；运行环境无法访问默认 Nitter 服务时，再填写 `nitter_url` 或 `proxy_url`。
 
+可在 `nitter_fallback_urls` 中逐项填写备用实例的完整地址。主实例连接失败、受到限流或返回验证码页面时，插件会短暂重试并依次尝试备用实例；推文游标仅在成功抓取后更新。备用实例需能实际返回目标账号的时间线和推文详情，HTTP 200 本身不足以判定可用。
+
 ![RSS/Twitter 源配置面板示意](./docs/assets/rss-forwarder-panel-feeds.svg)
 
 Twitter 源首次启用时会记录当前最新游标，后续轮询才发送新推文，避免首次启用时发送大量历史内容。`max_new_items=1` 适合多数推送场景，可以减少请求并避免一次发送过多历史内容。
@@ -150,7 +152,7 @@ AstrBot v4.24.1 已支持 Plugin Pages。在该版本中，入口可能显示页
 
 - `feeds[]`：面板中显示为 `RSS/Twitter 源配置`，新增条目时分为 `RSS/Atom 源` 与 `Twitter/Nitter 源`
 - `RSS/Atom 源`：`id`、`url`、`auth_mode`、`key`、`proxy_url`、`send_images`、`send_videos`、`max_new_items`、`enabled`、`timeout`
-- `Twitter/Nitter 源`：`id`、`username`、`nitter_url`、`proxy_url`、`send_images`、`send_videos`、`send_link`、`max_new_items`、`enabled`、`timeout`
+- `Twitter/Nitter 源`：`id`、`username`、`nitter_url`、`nitter_fallback_urls`、`proxy_url`、`send_images`、`send_videos`、`send_link`、`max_new_items`、`enabled`、`timeout`
 - `targets[]`
   - `id`（唯一）
   - `platform`
