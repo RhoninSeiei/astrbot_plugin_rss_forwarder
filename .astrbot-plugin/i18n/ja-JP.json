@@ -1,5 +1,6 @@
 {
   "pages": {
+    "subscriptions": {"title": "購読管理"},
     "source-diagnostics": {
       "title": "ソース診断",
       "description": "直接接続、ソースプロキシ、厳格または緩和した TLS 検証でソースへの接続を確認します。診断結果は設定に保存されません。",

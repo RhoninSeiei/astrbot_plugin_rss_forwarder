@@ -4,6 +4,14 @@
 
 `astrbot_plugin_rss_forwarder` is an AstrBot plugin focused on RSS / RSSHub / Twitter delivery orchestration. It fetches updates from multiple feeds and proactively pushes them to configured chat targets using panel-driven routing rules.
 
+## Subscription Management
+
+Open **Subscriptions** in the plugin details to create a subscription from a public RSS/Atom URL or a webpage declaring an alternate feed. Select existing targets and either an interval in minutes or a five-field cron schedule. Advanced aggregation, translation and rendering options remain in the standard plugin configuration.
+
+The `rss_manage_subscription` LLM tool supports listing, discovering, creating, pausing and resuming subscriptions. It requires an AstrBot administrator and a model/persona with tool calling enabled. An empty target selection means the current conversation; other conversations must use preconfigured target IDs. Schedules use AstrBot's timezone. New jobs seed their historical item cache before starting.
+
+`subscription_proxy_url` applies to discovery and new feeds only; existing proxies remain unchanged. Discovery verifies TLS and permits only public HTTP(S) addresses on standard ports. Authenticated or internal feeds remain configurable through the standard settings. Web access uses AstrBot's plugin API authorization; chat operations separately require administrator status.
+
 ## Positioning
 
 This project is not meant to be a drop-in clone of [`Soulter/astrbot_plugin_rss`](https://github.com/Soulter/astrbot_plugin_rss). Its current focus is broader:

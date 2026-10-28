@@ -1,4 +1,10 @@
 {
+  "subscription_proxy_url": {
+    "type": "string",
+    "default": "",
+    "description": "订阅管理的发现和新建来源代理",
+    "hint": "供订阅管理页面和自然语言工具使用。留空直连；新建来源继承此设置，已有来源的代理保持不变。发现过程始终校验 TLS 证书，仅访问公网 HTTP(S) 地址。"
+  },
   "feeds": {
     "type": "template_list",
     "description": "RSS/Twitter 源配置",

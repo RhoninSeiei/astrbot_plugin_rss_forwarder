@@ -1,5 +1,6 @@
 {
   "pages": {
+    "subscriptions": {"title": "订阅管理"},
     "source-diagnostics": {
       "title": "来源诊断",
       "description": "检查来源在默认网络、来源代理和不同 TLS 校验设置下的可访问性。探测不会保存配置。",

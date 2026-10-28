@@ -47,7 +47,8 @@ def _load_main(package_name: str):
     event_module = types.ModuleType("astrbot.api.event")
     event_module.AstrMessageEvent = object
     event_module.filter = types.SimpleNamespace(
-        regex=lambda _pattern: (lambda handler: handler)
+        regex=lambda _pattern: (lambda handler: handler),
+        llm_tool=lambda **_kwargs: (lambda handler: handler),
     )
     star_module = types.ModuleType("astrbot.api.star")
 
@@ -104,7 +105,7 @@ def _load_main(package_name: str):
 
     stubs = {
         "commands": {"RSSCommands": RSSCommands},
-        "config": {"RSSConfig": RSSConfig},
+        "config": {"RSSConfig": RSSConfig, "ConfigValidationError": ValueError},
         "dispatcher": {"FeedDispatcher": DummyComponent},
         "fetcher": {"FeedFetcher": DummyComponent},
         "parser": {"FeedParser": DummyComponent},
@@ -113,6 +114,10 @@ def _load_main(package_name: str):
         "semantic_dedup": {"SemanticDedupService": DummyComponent},
         "storage": {"FeedStorage": DummyComponent},
         "source_probe": {"SourceProbeService": SourceProbeService},
+        "subscription_api": {"SubscriptionApi": type("SubscriptionApi", (), {
+            "__init__": lambda self, *args, **kwargs: None,
+            "register": lambda self, context: None,
+        })},
     }
     for name, attributes in stubs.items():
         module = types.ModuleType(f"{package_name}.{name}")
@@ -129,6 +134,18 @@ def _load_main(package_name: str):
 
 
 class SourceProbeCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_subscription_revision_uses_migrated_config(self):
+        module, _, active_config, _ = _load_main("rss_migration_compat")
+        raw = {"feeds": [{"id": "legacy", "__template_key": "feed"}]}
+
+        def migrate(source):
+            source["feeds"][0]["__template_key"] = "rss_feed"
+            return active_config
+
+        with mock.patch.object(module.RSSConfig, "from_context", side_effect=migrate), mock.patch.object(importlib.util, "find_spec", return_value=None):
+            plugin = module.RSSPlugin(_Context(raw), config=raw)
+        self.assertEqual(plugin._committed_raw, raw)
+
     async def test_supported_web_api_registers_and_keeps_shared_service(self):
         package_name = "astrbot_source_probe_compat_present"
         main_module, _logger, config, service_type = _load_main(package_name)
@@ -145,6 +162,12 @@ class SourceProbeCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         api_module = types.ModuleType(f"{package_name}.source_probe_api")
         api_module.SourceProbeApi = SourceProbeApi
         sys.modules[api_module.__name__] = api_module
+        subscription_api = types.ModuleType(f"{package_name}.subscription_api")
+        subscription_api.SubscriptionApi = type("SubscriptionApi", (), {
+            "__init__": lambda self, *args, **kwargs: None,
+            "register": lambda self, context: None,
+        })
+        sys.modules[subscription_api.__name__] = subscription_api
         context = _Context(config)
 
         with mock.patch.object(importlib.util, "find_spec", return_value=object()) as find_spec:

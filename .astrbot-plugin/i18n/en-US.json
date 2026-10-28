@@ -1,5 +1,6 @@
 {
   "pages": {
+    "subscriptions": {"title": "Subscriptions"},
     "source-diagnostics": {
       "title": "Source diagnostics",
       "description": "Check source access through the direct network, the source proxy, and strict or relaxed TLS verification. Probes do not save configuration.",
