@@ -2,6 +2,7 @@ import asyncio
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlparse, urlunparse
 from urllib.request import getproxies
 
@@ -80,12 +81,23 @@ class FeedFetcher:
         return items
 
     async def _fetch_single_feed(self, feed, *, job_id: str = "") -> FetchedFeed | None:
+        from httpx import HTTPStatusError
+
         state = await self._storage.get_feed_state(feed.id)
         etag = str(state.get("etag", "")).strip()
         last_modified = str(state.get("last_modified", "")).strip()
         proxy_url = str(getattr(feed, "proxy_url", "") or "").strip()
 
         url, headers = build_rss_request(feed, etag, last_modified)
+
+        def _not_modified():
+            return FetchedFeed(
+                feed_id=feed.id,
+                body="",
+                etag=etag,
+                last_modified=last_modified,
+                status=304,
+            )
 
         def _request_once():
             response = request_source(
@@ -97,6 +109,11 @@ class FeedFetcher:
                 max_bytes=None,
                 max_redirects=None,
             )
+            status = int(response.status)
+            if status == 304:
+                return _not_modified()
+            if not 200 <= status < 300:
+                raise HTTPError(url, status, f"HTTP status {status}", response.headers, None)
             return FetchedFeed(
                 feed_id=feed.id,
                 body=response.body.decode("utf-8", errors="ignore"),
@@ -104,16 +121,19 @@ class FeedFetcher:
                 last_modified=str(
                     get_response_header(response.headers, "Last-Modified")
                 ).strip(),
-                status=int(response.status or 200),
+                status=status,
             )
 
         try:
             return await asyncio.to_thread(_request_once)
         except Exception as exc:
-            # urllib 对 304 也会抛异常，直接忽略
-            if "304" in str(exc):
+            if (
+                isinstance(exc, HTTPError) and exc.code == 304
+            ) or (
+                isinstance(exc, HTTPStatusError) and exc.response.status_code == 304
+            ):
                 logger.info("feed=%s not modified (304)", feed.id)
-                return None
+                return _not_modified()
             logger.warning(
                 "fetch job=%s feed=%s url=%s proxy=%s client=%s failed: %s",
                 job_id or "-",
@@ -186,6 +206,22 @@ class FeedFetcher:
 
         response = getattr(exc, "response", None)
         status_code = getattr(response, "status_code", None)
+        response_headers = getattr(response, "headers", None) or {}
+        if isinstance(exc, HTTPError):
+            status_code = exc.code
+            response_headers = exc.headers or {}
         status = f" HTTP {status_code};" if status_code is not None else ""
         summary = f"{category}:{status} {message}".strip()
-        return summary if len(summary) <= 240 else f"{summary[:237]}..."
+        hint = ""
+        if (
+            status_code == 403
+            and get_response_header(response_headers, "cf-mitigated").strip().lower()
+            == "challenge"
+        ):
+            hint = (
+                "; Cloudflare challenge; changing TLS verification will not resolve HTTP 403"
+            )
+        summary_limit = 240 - len(hint)
+        if len(summary) > summary_limit:
+            summary = f"{summary[:summary_limit - 3]}..."
+        return summary + hint

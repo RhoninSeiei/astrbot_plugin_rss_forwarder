@@ -529,8 +529,10 @@ class RSSScheduler:
                 items = self._call_parse(raw_items, None)
                 await self._archive_items(items)
                 feed_meta = self._extract_feed_meta(raw_items)
+                if feed_id not in feed_meta:
+                    return
                 now_ts = int(time.time())
-                meta = feed_meta.get(feed_id, {})
+                meta = feed_meta[feed_id]
                 await self._storage.update_feed_state(
                     feed_id,
                     etag=meta.get("etag"),
@@ -1238,7 +1240,9 @@ class RSSScheduler:
                 feed_meta = self._extract_feed_meta(raw_items)
                 now_ts = int(time.time())
                 for feed_id in job.feed_ids:
-                    meta = feed_meta.get(feed_id, {})
+                    if feed_id not in feed_meta:
+                        continue
+                    meta = feed_meta[feed_id]
                     await self._storage.update_feed_state(
                         feed_id,
                         etag=meta.get("etag"),
@@ -1613,10 +1617,16 @@ class RSSScheduler:
 
     @staticmethod
     def _extract_feed_meta(raw_items: list[dict]) -> dict[str, dict[str, str]]:
-        """从抓取结果中提取可选的 feed 元信息。"""
+        """提取成功抓取的来源及其可选元信息，兼容未提供状态码的旧结果。"""
         meta_by_feed: dict[str, dict[str, str]] = {}
         for raw_item in raw_items:
             if not isinstance(raw_item, dict):
+                continue
+            try:
+                status = int(raw_item.get("status", 200))
+            except (TypeError, ValueError):
+                continue
+            if not (200 <= status < 300 or status == 304):
                 continue
             feed_id = str(raw_item.get("feed_id", "")).strip()
             if not feed_id:
@@ -1624,8 +1634,6 @@ class RSSScheduler:
             etag = str(raw_item.get("etag", "")).strip()
             last_modified = str(raw_item.get("last_modified", "")).strip()
             since_id = str(raw_item.get("since_id", "")).strip()
-            if not etag and not last_modified and not since_id:
-                continue
             meta_by_feed[feed_id] = {
                 "etag": etag,
                 "last_modified": last_modified,

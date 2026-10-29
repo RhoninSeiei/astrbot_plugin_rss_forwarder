@@ -5,6 +5,7 @@ import types
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from unittest import mock
 
 
 astrbot_module = types.ModuleType("astrbot")
@@ -97,6 +98,135 @@ class RSSSchedulerTests(unittest.TestCase):
         feed_state_map = {"feed-1": {"last_success_time": 1773536400}}
 
         self.assertFalse(RSSScheduler._should_mark_history_only(item, feed_state_map))
+
+
+class SchedulerFeedSuccessTests(unittest.IsolatedAsyncioTestCase):
+    def _scheduler(self, raw_items, feed_ids):
+        states = {
+            feed_id: {
+                "last_success_time": 123, "bootstrap_done": False,
+                "etag": "old-etag", "last_modified": "old-modified", "since_id": "10",
+            }
+            for feed_id in feed_ids
+        }
+        storage = types.SimpleNamespace(
+            get_feed_state=mock.AsyncMock(side_effect=lambda feed_id: dict(states[feed_id])),
+            update_feed_state=mock.AsyncMock(),
+            archive_digest_items=mock.AsyncMock(),
+        )
+        parser = sys.modules[f"{PACKAGE_NAME}.parser"].FeedParser()
+        parser._parse_xml = mock.Mock(wraps=parser._parse_xml)
+        scheduler = RSSScheduler(
+            config=types.SimpleNamespace(jobs=[], targets=[], dedup_ttl_seconds=123),
+            fetcher=types.SimpleNamespace(
+                fetch=mock.AsyncMock(return_value=raw_items),
+                fetch_feed_ids=mock.AsyncMock(return_value=raw_items),
+            ),
+            parser=parser,
+            dispatcher=types.SimpleNamespace(dispatch=mock.AsyncMock()),
+            storage=storage,
+        )
+        return scheduler
+
+    async def _run_job(self, scheduler, feed_ids):
+        await scheduler._run_job_once_guarded(types.SimpleNamespace(
+            id="job-status", feed_ids=feed_ids, target_ids=[], interval_seconds=300,
+        ))
+        self.assertEqual(scheduler.last_results["job-status"].error_summary, "")
+
+    def _assert_success(self, storage, feed_id, **metadata):
+        storage.update_feed_state.assert_awaited_once()
+        args, fields = storage.update_feed_state.await_args
+        self.assertEqual(args, (feed_id,))
+        self.assertGreater(fields["last_success_time"], 123)
+        self.assertIs(fields["bootstrap_done"], True)
+        for key, value in metadata.items():
+            self.assertEqual(fields[key], value)
+
+    async def test_partial_failure_updates_only_successful_feed(self):
+        scheduler = self._scheduler([
+            {"feed_id": "ok", "status": 200, "body": "<rss><channel/></rss>",
+             "etag": "fresh-etag", "last_modified": "fresh-modified", "since_id": "20"},
+            {"feed_id": "failed", "status": 503, "body": "", "etag": "bad-etag",
+             "last_modified": "bad-modified", "since_id": "999"},
+        ], ["ok", "failed", "missing"])
+        await self._run_job(scheduler, ["ok", "failed", "missing"])
+        self._assert_success(
+            scheduler.storage, "ok", etag="fresh-etag",
+            last_modified="fresh-modified", since_id="20",
+        )
+
+    async def test_all_failures_do_not_update_any_feed_state(self):
+        for raw in [[], [{"feed_id": "failed", "status": 500, "since_id": "999"}]]:
+            with self.subTest(raw=raw):
+                scheduler = self._scheduler(raw, ["failed", "missing"])
+                await self._run_job(scheduler, ["failed", "missing"])
+                scheduler.storage.update_feed_state.assert_not_awaited()
+
+    async def test_empty_success_without_validators_updates_feed_state(self):
+        for raw in [
+            {"feed_id": "ok", "status": 200, "body": "<rss><channel/></rss>"},
+            {"feed_id": "ok", "status": 200, "body": ""},
+            {"feed_id": "ok", "status": 204, "body": ""},
+            {"feed_id": "ok", "source_type": "twitter", "status": 200, "items": []},
+            {"feed_id": "ok", "body": "<rss><channel/></rss>"},
+        ]:
+            with self.subTest(raw=raw):
+                scheduler = self._scheduler([raw], ["ok"])
+                await self._run_job(scheduler, ["ok"])
+                self._assert_success(scheduler.storage, "ok")
+                scheduler._dispatcher.dispatch.assert_not_awaited()
+
+    async def test_304_updates_success_without_parsing_or_dispatch(self):
+        scheduler = self._scheduler([
+            {"feed_id": "ok", "status": 304, "body": "", "etag": "old-etag",
+             "last_modified": "old-modified"},
+        ], ["ok"])
+        await self._run_job(scheduler, ["ok"])
+        self._assert_success(
+            scheduler.storage, "ok", etag="old-etag", last_modified="old-modified",
+        )
+        scheduler._parser._parse_xml.assert_not_called()
+        scheduler._dispatcher.dispatch.assert_not_awaited()
+        scheduler.storage.archive_digest_items.assert_awaited_once_with([])
+
+    async def test_daily_collection_rejects_failed_or_missing_response(self):
+        for raw in [[], [{"feed_id": "failed", "status": 503, "since_id": "999"}]]:
+            with self.subTest(raw=raw):
+                scheduler = self._scheduler(raw, ["failed"])
+                await scheduler._collect_digest_feed_once("failed")
+                scheduler.storage.update_feed_state.assert_not_awaited()
+                self.assertFalse(any(
+                    call.args[0] for call in scheduler.storage.archive_digest_items.await_args_list
+                ))
+
+    async def test_daily_empty_success_and_304_update_feed_state(self):
+        for raw in [
+            {"feed_id": "ok", "status": 200, "body": "<rss><channel/></rss>"},
+            {"feed_id": "ok", "status": 200, "body": ""},
+            {"feed_id": "ok", "status": 304, "body": "", "etag": "old-etag",
+             "last_modified": "old-modified"},
+            {"feed_id": "ok", "body": "<rss><channel/></rss>"},
+        ]:
+            with self.subTest(raw=raw):
+                scheduler = self._scheduler([raw], ["ok"])
+                await scheduler._collect_digest_feed_once("ok")
+                self._assert_success(scheduler.storage, "ok")
+                if raw.get("status") == 304:
+                    scheduler._parser._parse_xml.assert_not_called()
+                    self._assert_success(
+                        scheduler.storage, "ok", etag="old-etag", last_modified="old-modified",
+                    )
+
+    def test_feed_metadata_includes_only_successful_responses(self):
+        raw = [
+            {"feed_id": str(status), "status": status, "since_id": "999"}
+            for status in [0, 200, 206, 299, 304, 302, 401, 503, None, "invalid"]
+        ]
+        raw.extend([{"feed_id": "legacy"}, {}, None])
+        self.assertEqual(
+            set(RSSScheduler._extract_feed_meta(raw)), {"200", "206", "299", "304", "legacy"},
+        )
 
 
 class SchedulerPermanentFailureTests(unittest.IsolatedAsyncioTestCase):

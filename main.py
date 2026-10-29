@@ -25,7 +25,7 @@ from .subscription_discovery import discover_feed
     "astrbot_plugin_rss_forwarder",
     "AstrBot RSS Forwarder",
     "面向 AstrBot 的 RSS/RSSHub/Twitter 推送编排插件",
-    "0.8.0",
+    "0.8.1",
 )
 class RSSPlugin(Star, RSSCommands):
     def __init__(self, context: Context, config=None):

@@ -5,6 +5,7 @@ import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 
 import httpx
 
@@ -382,6 +383,153 @@ class FeedFetcherTests(unittest.TestCase):
         self.assertNotIn("cookie-secret", rendered)
         self.assertNotIn("\n", rendered)
         self.assertLessEqual(len(args[-1]), 240)
+
+
+class FeedFetcherDiagnosticTests(unittest.TestCase):
+    CHALLENGE_HINT = (
+        "Cloudflare challenge; changing TLS verification will not resolve HTTP 403"
+    )
+
+    def test_cloudflare_challenge_403_has_fixed_hint_without_response_secrets(self):
+        for message in ["Forbidden", "Forbidden " + "x" * 400]:
+            with self.subTest(message_length=len(message)):
+                error = HTTPError(
+                    "https://videocardz.com/feed", 403, message,
+                    {"server": "cloudflare", "cf-mitigated": "challenge",
+                     "Set-Cookie": "secret-response-cookie"}, None,
+                )
+                summary = FeedFetcher._exception_summary_for_log(error)
+                self.assertIn(self.CHALLENGE_HINT, summary)
+                self.assertIn("HTTPError", summary)
+                self.assertNotIn("secret-response-cookie", summary)
+                self.assertNotIn("Set-Cookie", summary)
+                self.assertLessEqual(len(summary), 240)
+
+    def test_ordinary_403_and_non_403_challenge_do_not_get_hint(self):
+        for status, headers in [
+            (403, {}),
+            (403, {"server": "cloudflare"}),
+            (403, {"server": "cloudflare", "cf-mitigated": "other"}),
+            (503, {"server": "cloudflare", "cf-mitigated": "challenge"}),
+        ]:
+            with self.subTest(status=status, headers=headers):
+                error = HTTPError(
+                    "https://example.com/feed", status, "Forbidden", headers, None,
+                )
+                summary = FeedFetcher._exception_summary_for_log(error)
+                self.assertNotIn(self.CHALLENGE_HINT, summary)
+                self.assertIn(str(status), summary)
+
+    def test_httpx_challenge_response_has_fixed_hint_without_body_or_headers(self):
+        request = httpx.Request("GET", "https://videocardz.com/feed")
+        error = httpx.HTTPStatusError(
+            "Forbidden", request=request,
+            response=httpx.Response(
+                403, request=request, content=b"secret-response-body",
+                headers={"Server": "cloudflare", "CF-Mitigated": "challenge",
+                         "Set-Cookie": "secret-response-cookie"},
+            ),
+        )
+        summary = FeedFetcher._exception_summary_for_log(error)
+        self.assertIn(self.CHALLENGE_HINT, summary)
+        self.assertNotIn("secret-response-body", summary)
+        self.assertNotIn("secret-response-cookie", summary)
+
+
+class FeedFetcherStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.feed = types.SimpleNamespace(
+            id="rss-1", enabled=True, url="https://example.com/feed.xml",
+            auth_mode="none", key="", timeout=10, proxy_url="",
+        )
+        self.validators = {
+            "etag": "etag-before",
+            "last_modified": "Tue, 12 May 2026 00:00:00 GMT",
+        }
+        self.fetcher = FeedFetcher(
+            types.SimpleNamespace(feeds=[self.feed]),
+            _FakeStorage({self.feed.id: self.validators}),
+        )
+
+    async def _fetch(self, *, response=None, error=None):
+        async def inline_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            mock.patch.object(fetcher_module.asyncio, "to_thread", inline_to_thread),
+            mock.patch.object(
+                fetcher_module, "request_source", return_value=response, side_effect=error,
+            ),
+        ):
+            return await self.fetcher.fetch_feed_ids([self.feed.id])
+
+    async def test_http_304_exceptions_return_success_with_cached_validators(self):
+        request = httpx.Request("GET", self.feed.url)
+        errors = [
+            HTTPError(self.feed.url, 304, "Not Modified", {}, None),
+            httpx.HTTPStatusError(
+                "Not Modified", request=request,
+                response=httpx.Response(304, request=request),
+            ),
+        ]
+        for error in errors:
+            with self.subTest(transport=type(error).__name__):
+                result = await self._fetch(error=error)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["status"], 304)
+                self.assertEqual(result[0]["body"], "")
+                for field, value in self.validators.items():
+                    self.assertEqual(result[0][field], value)
+
+    async def test_direct_304_response_preserves_validators_and_has_empty_body(self):
+        result = await self._fetch(response=source_http_module.SourceHttpResponse(
+            body=b"ignored", status=304, headers={}, final_url=self.feed.url,
+        ))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["status"], 304)
+        self.assertEqual(result[0]["body"], "")
+        for field, value in self.validators.items():
+            self.assertEqual(result[0][field], value)
+
+    async def test_error_text_or_untyped_status_304_is_not_success(self):
+        request = httpx.Request("GET", self.feed.url)
+        untyped_error = RuntimeError("unexpected response")
+        untyped_error.response = types.SimpleNamespace(status_code=304)
+        errors = [
+            OSError("connection failed after 304 milliseconds"),
+            HTTPError(self.feed.url, 503, "upstream error 304", {}, None),
+            httpx.HTTPStatusError(
+                "upstream error 304", request=request,
+                response=httpx.Response(503, request=request),
+            ),
+            untyped_error,
+        ]
+        for error in errors:
+            with self.subTest(error=repr(error)), mock.patch.object(
+                fetcher_module, "logger",
+            ) as logger:
+                self.assertEqual(await self._fetch(error=error), [])
+                logger.warning.assert_called_once()
+                logger.info.assert_not_called()
+
+    async def test_empty_2xx_responses_without_validators_are_successful(self):
+        for status, body in [(200, b""), (200, b"<rss><channel/></rss>"), (204, b"")]:
+            with self.subTest(status=status, body=body):
+                result = await self._fetch(response=source_http_module.SourceHttpResponse(
+                    body=body, status=status, headers={}, final_url=self.feed.url,
+                ))
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["status"], status)
+                self.assertEqual(result[0]["etag"], "")
+                self.assertEqual(result[0]["last_modified"], "")
+
+    async def test_non_success_response_status_is_not_returned_as_success(self):
+        for status in [0, 302, 401, 503]:
+            with self.subTest(status=status):
+                result = await self._fetch(response=source_http_module.SourceHttpResponse(
+                    body=b"error 304", status=status, headers={}, final_url=self.feed.url,
+                ))
+                self.assertEqual(result, [])
 
 
 if __name__ == "__main__":
