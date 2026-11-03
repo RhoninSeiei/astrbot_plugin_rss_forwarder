@@ -10,14 +10,27 @@ from .parser import ET
 class _BootstrapStorage:
     """Hide conditional HTTP state and timeline cursors without writing shared state."""
 
-    def __init__(self, storage):
+    def __init__(self, storage, feed_ids=None):
         self._storage = storage
+        self._feed_ids = None if feed_ids is None else set(feed_ids)
 
     async def get_feed_state(self, feed_id):
+        if self._feed_ids is not None and feed_id not in self._feed_ids:
+            return await self._storage.get_feed_state(feed_id)
         return {"since_id": "0"}
 
     def __getattr__(self, name):
         return getattr(self._storage, name)
+
+
+def _bootstrap_fetcher(fetcher, feed_ids=None):
+    cloned = copy(fetcher)
+    cloned._storage = _BootstrapStorage(fetcher._storage, feed_ids)
+    cloned._config = deepcopy(fetcher._config)
+    for feed in cloned._config.feeds:
+        if feed_ids is None or feed.id in feed_ids:
+            feed.max_new_items = 0
+    return cloned
 
 
 def _check_current(plugin, raw, committed, old_scheduler, *, applied=None):
@@ -80,24 +93,29 @@ def _validate_raw(raw_items, job):
 
 
 async def _prepare_bootstrap(scheduler, old_scheduler):
-    old_ids = {job.id for job in old_scheduler._config.jobs}
-    jobs = [job for job in scheduler._config.jobs if job.enabled and job.id not in old_ids]
+    old_scopes = set(old_scheduler._subscription_scopes())
+    jobs = []
+    for job in scheduler._config.jobs:
+        if not job.enabled:
+            continue
+        origins = scheduler._resolve_job_target_origins(job)
+        groups = {}
+        for feed_id in job.feed_ids:
+            added = tuple(origin for origin in origins if (job.id, origin, feed_id) not in old_scopes)
+            if added:
+                groups.setdefault(added, []).append(feed_id)
+        for added, feed_ids in groups.items():
+            scoped_job = copy(job)
+            scoped_job.feed_ids = feed_ids
+            jobs.append((scoped_job, list(added)))
     if not jobs:
         return []
 
     original_fetcher = scheduler._fetcher
-    bootstrap_fetcher = copy(original_fetcher)
-    bootstrap_fetcher._storage = _BootstrapStorage(original_fetcher._storage)
-    bootstrap_fetcher._config = deepcopy(original_fetcher._config)
-    for feed in bootstrap_fetcher._config.feeds:
-        feed.max_new_items = 0
-    scheduler._fetcher = bootstrap_fetcher
+    scheduler._fetcher = _bootstrap_fetcher(original_fetcher)
     prepared = []
     try:
-        for job in jobs:
-            origins = scheduler._resolve_job_target_origins(job)
-            if not origins:
-                raise ValueError("new subscription job has no enabled target origins")
+        for job, origins in jobs:
             raw_items = await scheduler._fetcher.fetch(job)
             _validate_raw(raw_items, job)
             unlimited = deepcopy(raw_items)
@@ -113,7 +131,7 @@ async def _prepare_bootstrap(scheduler, old_scheduler):
                 seen_keys = scheduler._build_seen_keys(item)
                 if not seen_keys:
                     raise ValueError("bootstrap item has no deduplication keys")
-                keys.append(seen_keys)
+                keys.append((item["feed_id"], seen_keys))
             prepared.append((job, origins, keys, scheduler._job_dedup_ttl_seconds(job)))
     finally:
         scheduler._fetcher = original_fetcher
@@ -166,21 +184,29 @@ async def apply_runtime(plugin, candidate: dict) -> None:
         raise RuntimeError("scheduler factory must return a new scheduler")
     stop_attempted = False
     raw_replaced = False
+    initialized_scopes = []
     try:
+        await old_scheduler._ensure_subscription_registry()
         prepared = await _prepare_bootstrap(new_scheduler, old_scheduler)
         _check_current(plugin, raw, committed, old_scheduler)
         stop_attempted = True
         await old_scheduler.stop()
         _check_current(plugin, raw, committed, old_scheduler)
         for job, origins, keys, ttl in prepared:
-            for seen_keys in keys:
-                await new_scheduler._mark_seen_for_origins(job, origins, seen_keys, ttl_seconds=ttl)
+            for feed_id, seen_keys in keys:
+                await new_scheduler._mark_bootstrap_seen(job, origins, feed_id, seen_keys, ttl_seconds=ttl)
         _check_current(plugin, raw, committed, old_scheduler)
         raw_replaced = True
         raw.clear()
         raw.update(deepcopy(desired))
         await _save(raw)
         _check_current(plugin, raw, committed, old_scheduler, applied=desired)
+        for job, origins, _, _ in prepared:
+            for origin in origins:
+                for feed_id in job.feed_ids:
+                    if not await new_scheduler._storage.is_subscription_initialized(job.id, origin, feed_id):
+                        initialized_scopes.append((job.id, origin, feed_id))
+                        await new_scheduler._storage.mark_subscription_initialized(job.id, origin, feed_id)
         _copy_runtime_state(old_scheduler, new_scheduler)
         await _start_preserving_pauses(new_scheduler)
         _check_current(plugin, raw, committed, old_scheduler, applied=desired)
@@ -197,6 +223,11 @@ async def apply_runtime(plugin, candidate: dict) -> None:
             new_stopped = True
         except BaseException as exc:
             rollback_errors.append(("new scheduler stop", exc))
+        for scope in initialized_scopes:
+            try:
+                await new_scheduler._storage.reset_subscription_initialization(*scope)
+            except BaseException as exc:
+                rollback_errors.append(("subscription initialization", exc))
         if raw_replaced:
             if plugin._raw_config is raw and dict(raw) == desired:
                 raw.clear()

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import sys
+import tempfile
 import types
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
@@ -14,6 +15,7 @@ astrbot_api_module.logger = types.SimpleNamespace(
     info=lambda *a, **k: None,
     warning=lambda *a, **k: None,
     error=lambda *a, **k: None,
+    exception=lambda *a, **k: None,
 )
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules["astrbot.api"] = astrbot_api_module
@@ -46,6 +48,241 @@ RSSScheduler = _load_module("scheduler").RSSScheduler
 DispatchResult = dispatcher_module.DispatchResult
 RSSConfig = config_module.RSSConfig
 DailyDigestConfig = config_module.DailyDigestConfig
+
+
+class SchedulerSubscriptionBootstrapTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.storage_dir = temp.name
+        self.storage = sys.modules[f"{PACKAGE_NAME}.storage"].FeedStorage(storage_dir=temp.name)
+        self.raw = {
+            "feeds": [{"id": "feed", "url": "https://example.com/rss", "max_new_items": 1}],
+            "targets": [
+                {"id": "old", "platform": "qq", "unified_msg_origin": "qq:group:1"},
+                {"id": "new", "platform": "qq", "unified_msg_origin": "qq:group:2"},
+            ],
+            "jobs": [{"id": "job", "feed_ids": ["feed"], "target_ids": ["old"],
+                      "batch_size": 1, "interval_seconds": 300}],
+        }
+        self.guids = ["history-1", "history-2", "history-3"]
+        self.status = 200
+        self.etag = "fresh-validator"
+        self.body = None
+        self.feed_bodies = {}
+        self.requests = []
+        self.delivered = []
+
+    def scheduler(self, storage=None):
+        config = RSSConfig.from_context(self.raw)
+        owner = self
+
+        class Fetcher:
+            def __init__(self):
+                self._config = config
+                self._storage = storage or owner.storage
+
+            async def fetch(self, job):
+                result = []
+                for feed in self._config.feeds:
+                    if feed.id not in job.feed_ids:
+                        continue
+                    state = await self._storage.get_feed_state(feed.id)
+                    owner.requests.append(dict(state))
+                    body = owner.feed_bodies.get(feed.id, owner.body)
+                    if body is None:
+                        body = "<rss><channel>" + "".join(
+                            f"<item><guid>{guid}</guid><title>{guid}</title></item>"
+                            for guid in owner.guids
+                        ) + "</channel></rss>"
+                    result.append({"feed_id": feed.id, "body": body, "status": owner.status,
+                                   "etag": owner.etag, "max_new_items": feed.max_new_items})
+                return result
+
+        async def dispatch(item):
+            self.delivered.append(item)
+            return DispatchResult(success_count=1, success_origins=item["_target_origins"])
+
+        return RSSScheduler(config, Fetcher(), sys.modules[f"{PACKAGE_NAME}.parser"].FeedParser(),
+                            types.SimpleNamespace(dispatch=mock.AsyncMock(side_effect=dispatch),
+                                                  dispatch_daily_digest=mock.AsyncMock(side_effect=dispatch)),
+                            storage or self.storage)
+
+    async def run_job(self, scheduler, job_id="job"):
+        await scheduler.run_job_once(job_id)
+        self.assertEqual(scheduler.last_results[job_id].error_summary, "")
+
+    async def establish_old(self):
+        await self.storage.update_feed_state("feed", bootstrap_done=True, last_success_time=1,
+                                             etag="old-validator", since_id="100")
+        await self.run_job(self.scheduler())
+        self.delivered.clear()
+
+    async def test_standard_config_new_target_seeds_full_snapshot_without_affecting_old_target(self):
+        await self.establish_old()
+        self.raw["jobs"][0]["target_ids"].append("new")
+        scheduler = self.scheduler()
+        await self.run_job(scheduler)
+        self.assertEqual(self.delivered, [])
+        self.assertNotIn("etag", self.requests[-1])
+        self.assertEqual(self.requests[-1]["since_id"], "0")
+        for guid in self.guids:
+            self.assertTrue(await self.storage.has_seen(
+                scheduler._bootstrap_seen_keys(scheduler.get_job("job"), "qq:group:2", "feed", [guid])[0]))
+        self.assertFalse(await self.storage.has_seen(
+            scheduler._target_seen_key("job", "qq:group:1", "history-2")))
+        self.assertFalse(await self.storage.has_seen("history-2"))
+
+        # Restart must retain initialization and resume ordinary conditional polling.
+        restored = sys.modules[f"{PACKAGE_NAME}.storage"].FeedStorage(storage_dir=self.storage_dir)
+        self.guids.insert(0, "next")
+        await self.run_job(self.scheduler(restored))
+        self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
+                         [("next", ["qq:group:1", "qq:group:2"])])
+        self.assertEqual(self.requests[-1]["etag"], "fresh-validator")
+
+    async def test_new_job_reusing_source_does_not_replay_undated_history(self):
+        await self.establish_old()
+        self.raw["jobs"].append({"id": "new-job", "feed_ids": ["feed"], "target_ids": ["new"],
+                                 "interval_seconds": 300})
+        scheduler = self.scheduler()
+        await self.run_job(scheduler, "new-job")
+        self.assertEqual(self.delivered, [])
+        self.guids.insert(0, "next")
+        await self.run_job(scheduler, "new-job")
+        self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
+                         [("next", ["qq:group:2"])])
+
+    async def test_old_target_receives_new_entry_while_new_target_establishes_baseline(self):
+        await self.establish_old()
+        self.guids.insert(0, "concurrent-new")
+        self.raw["jobs"][0]["target_ids"].append("new")
+        await self.run_job(self.scheduler())
+        self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
+                         [("concurrent-new", ["qq:group:1"])])
+
+    async def test_new_job_snapshot_does_not_advance_shared_source_state(self):
+        await self.establish_old()
+        before = dict(await self.storage.get_feed_state("feed"))
+        self.guids.insert(0, "concurrent-new")
+        self.etag = "bootstrap-validator"
+        self.raw["jobs"].append({"id": "new-job", "feed_ids": ["feed"], "target_ids": ["new"],
+                                 "interval_seconds": 300})
+        scheduler = self.scheduler()
+        await self.run_job(scheduler, "new-job")
+        self.assertEqual(await self.storage.get_feed_state("feed"), before)
+        await self.run_job(scheduler)
+        self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
+                         [("concurrent-new", ["qq:group:1"])])
+
+    async def test_existing_job_new_feed_is_initialized_independently(self):
+        await self.establish_old()
+        self.raw["feeds"].append({"id": "other", "url": "https://other.example/rss"})
+        self.raw["jobs"][0]["feed_ids"].append("other")
+        await self.run_job(self.scheduler())
+        self.assertEqual(self.delivered, [])
+        self.assertTrue(await self.storage.is_subscription_initialized("job", "qq:group:1", "other"))
+
+    async def test_new_feed_history_cannot_consume_another_feeds_unseen_guid(self):
+        await self.establish_old()
+        self.raw["feeds"].append({"id": "other", "url": "https://other.example/rss"})
+        self.raw["jobs"][0]["feed_ids"].append("other")
+        for feed_id in ("feed", "other"):
+            self.feed_bodies[feed_id] = (
+                "<rss><channel><item><guid>shared-guid</guid><title>Shared</title>"
+                f"<link>https://example.com/{feed_id}/new</link></item></channel></rss>"
+            )
+        await self.run_job(self.scheduler())
+        self.assertEqual([(item["feed_id"], item["guid"], item["_target_origins"])
+                          for item in self.delivered], [("feed", "shared-guid", ["qq:group:1"])])
+
+    async def test_valid_empty_snapshot_initializes_and_next_undated_entry_is_sent(self):
+        await self.establish_old()
+        self.guids.clear()
+        self.raw["jobs"][0]["target_ids"].append("new")
+        await self.run_job(self.scheduler())
+        self.assertTrue(await self.storage.is_subscription_initialized("job", "qq:group:2", "feed"))
+        self.guids.append("next")
+        await self.run_job(self.scheduler())
+        self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
+                         [("next", ["qq:group:1", "qq:group:2"])])
+
+    async def test_failed_or_cached_bootstrap_does_not_initialize_new_target(self):
+        await self.establish_old()
+        self.raw["jobs"][0]["target_ids"].append("new")
+        for status, body in [(503, ""), (304, ""), (200, "<broken>")]:
+            with self.subTest(status=status, body=body):
+                self.status, self.body = status, body
+                await self.run_job(self.scheduler())
+                self.assertFalse(await self.storage.is_subscription_initialized("job", "qq:group:2", "feed"))
+                self.assertEqual(self.delivered, [])
+        self.status, self.body = 200, None
+        await self.run_job(self.scheduler())
+        self.assertEqual(self.delivered, [])
+        self.assertTrue(await self.storage.is_subscription_initialized("job", "qq:group:2", "feed"))
+
+    async def test_legacy_migration_keeps_first_poll_new_items_for_all_existing_jobs(self):
+        self.raw["jobs"].append({"id": "other", "feed_ids": ["feed"], "target_ids": ["new"],
+                                 "interval_seconds": 300})
+        await self.storage.update_feed_state("feed", bootstrap_done=True, last_success_time=1)
+        scheduler = self.scheduler()
+        await self.run_job(scheduler)
+        await self.run_job(scheduler, "other")
+        self.assertEqual({item["job_id"] for item in self.delivered}, {"job", "other"})
+
+    async def test_aggregate_new_target_uses_same_bootstrap_boundary(self):
+        await self.establish_old()
+        self.raw["jobs"][0].update(target_ids=["old", "new"], aggregate_enabled=True)
+        await self.run_job(self.scheduler())
+        self.assertEqual(self.delivered, [])
+
+    async def test_twitter_new_target_snapshot_does_not_replay_old_tweets_to_old_target(self):
+        self.raw["feeds"] = [{"id": "feed", "source_type": "twitter", "username": "alice",
+                              "max_new_items": 1}]
+        self.raw["jobs"][0]["batch_size"] = 10
+        await self.storage.update_feed_state("feed", since_id="100", bootstrap_done=True)
+        old = self.scheduler()
+        await old._ensure_subscription_registry()
+        self.raw["jobs"][0]["target_ids"].append("new")
+        timeline_ids = ["102", "101", "99"]
+        twitter_calls = []
+
+        async def fetch_timeline(feed, state, **kwargs):
+            cursor = state.get("since_id", "")
+            twitter_calls.append((cursor, feed.max_new_items))
+            ids = [item_id for item_id in timeline_ids if int(item_id) > int(cursor or 0)]
+            if feed.max_new_items:
+                ids = ids[:feed.max_new_items]
+            return types.SimpleNamespace(feed_id="feed", status=200,
+                items=[{"username": "alice", "tweet_id": item_id, "text": item_id} for item_id in ids],
+                since_id=ids[0] if ids else cursor)
+
+        config = RSSConfig.from_context(self.raw)
+        fetcher = sys.modules[f"{PACKAGE_NAME}.fetcher"].FeedFetcher(config, self.storage)
+        fetcher._twitter_fetcher.fetch = mock.AsyncMock(side_effect=fetch_timeline)
+
+        async def dispatch(item):
+            self.delivered.append(item)
+            return DispatchResult(success_count=1, success_origins=item["_target_origins"])
+
+        scheduler = RSSScheduler(config, fetcher, sys.modules[f"{PACKAGE_NAME}.parser"].FeedParser(),
+                                 types.SimpleNamespace(dispatch=mock.AsyncMock(side_effect=dispatch)), self.storage)
+        await self.run_job(scheduler)
+        self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
+                         [("twitter:alice:102", ["qq:group:1"])])
+        self.assertIn(("100", 1), twitter_calls)
+        self.assertIn(("0", 0), twitter_calls)
+        for tweet_id in timeline_ids:
+            self.assertTrue(await self.storage.has_seen(scheduler._bootstrap_seen_keys(
+                scheduler.get_job("job"), "qq:group:2", "feed", ["twitter:alice:" + tweet_id])[0]))
+        self.assertFalse(await self.storage.has_seen(scheduler._target_seen_key(
+            "job", "qq:group:1", "twitter:alice:99")))
+        self.assertEqual((await self.storage.get_feed_state("feed"))["since_id"], "102")
+        timeline_ids.insert(0, "103")
+        self.delivered.clear()
+        await self.run_job(scheduler)
+        self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
+                         [("twitter:alice:103", ["qq:group:1", "qq:group:2"])])
 
 
 class RSSSchedulerTests(unittest.TestCase):

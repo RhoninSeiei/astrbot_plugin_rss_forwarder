@@ -25,6 +25,8 @@ class FeedStorage:
     CONTENT_KEY_PREFIX = "content_seen:"
     CONTENT_INDEX_KEY = "content_seen_index"
     DEDUP_VERSION_KEY = "content_seen_version"
+    SUBSCRIPTION_REGISTRY_KEY = "subscription_registry:v1"
+    SUBSCRIPTION_STATE_PREFIX = "subscription_initialized:v1:"
     DISPATCH_GUARD_PREFIX = "dispatch_guard:"
     SEMANTIC_DEDUP_SECTION = "semantic_dedup"
     DAILY_DIGEST_RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -458,6 +460,32 @@ class FeedStorage:
 
     async def get_feed_state(self, feed_id: str) -> dict[str, Any]:
         return await self.get(self._feed_state_key(feed_id), default={})
+
+    @staticmethod
+    def _subscription_scope(job_id: str, origin: str, feed_id: str) -> str:
+        payload = json.dumps([job_id, origin, feed_id], ensure_ascii=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def initialize_subscription_registry(self, scopes: list[tuple[str, str, str]]) -> None:
+        # Legacy state cannot identify newly added subscriptions. Adopt the first
+        # configuration once, without consuming the existing jobs' next poll.
+        if await self.get(self.SUBSCRIPTION_REGISTRY_KEY) is None:
+            await self.put(self.SUBSCRIPTION_REGISTRY_KEY, {
+                self._subscription_scope(*scope): True for scope in scopes
+            })
+
+    async def is_subscription_initialized(self, job_id: str, origin: str, feed_id: str) -> bool:
+        scope = self._subscription_scope(job_id, origin, feed_id)
+        adopted = await self.get(self.SUBSCRIPTION_REGISTRY_KEY, default={})
+        if isinstance(adopted, dict) and adopted.get(scope) is True:
+            return True
+        return await self.get(self.SUBSCRIPTION_STATE_PREFIX + scope) is True
+
+    async def mark_subscription_initialized(self, job_id: str, origin: str, feed_id: str) -> None:
+        await self.put(self.SUBSCRIPTION_STATE_PREFIX + self._subscription_scope(job_id, origin, feed_id), True)
+
+    async def reset_subscription_initialization(self, job_id: str, origin: str, feed_id: str) -> None:
+        await self.delete(self.SUBSCRIPTION_STATE_PREFIX + self._subscription_scope(job_id, origin, feed_id))
 
     async def update_feed_state(
         self,

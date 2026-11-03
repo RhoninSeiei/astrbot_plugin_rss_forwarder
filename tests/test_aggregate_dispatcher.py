@@ -76,6 +76,11 @@ class _MessageChain:
         self.chain = list(chain or [])
 
 
+class _Plain:
+    def __init__(self, text):
+        self.text = text
+
+
 class _Image:
     def __init__(self, path):
         self.path = path
@@ -86,6 +91,62 @@ class _Image:
 
 
 class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_text_builder_sends_aggregate_and_image_fallback(self):
+        for mode in ('text', 'image'):
+            with self.subTest(mode=mode):
+                context = _FakeContext()
+                dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=_FakeStorage())
+                dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+                dispatcher._resolve_plain_cls = lambda: _Plain
+
+                async def fail_image(_digest):
+                    raise RuntimeError('test renderer unavailable')
+
+                dispatcher._build_aggregate_digest_image_payload = fail_image
+                result = await dispatcher.dispatch_aggregate_digest({
+                    'id': 'real-builder', 'title': 'Hardware news', 'content': '1. New CPU',
+                    'target_ids': ['target-1'], 'render_mode': mode,
+                    'links': [{'source': 'Example', 'link': 'https://example.com/news'}],
+                })
+                self.assertEqual(result.success_count, 1)
+                self.assertEqual(result.transient_failure_count, 0)
+                self.assertEqual(len(context.sent), 1)
+                text = context.sent[0][1].chain[0].text
+                self.assertIn('Hardware news', text)
+                self.assertIn('1. New CPU', text)
+                self.assertIn('Example: https://example.com/news', text)
+
+    def test_times_are_human_readable_in_configured_timezone(self):
+        config = self._build_config()
+        config.timezone = 'Asia/Shanghai'
+        dispatcher = FeedDispatcher(context=_FakeContext(), config=config)
+        for value in ['2026-05-11T03:30:01+00:00', '2026-05-11T03:30:01Z', 'Mon, 11 May 2026 03:30:01 GMT']:
+            with self.subTest(value=value):
+                self.assertEqual(dispatcher._format_time({'published_at': value}), '2026-05-11 11:30')
+        config.timezone = 'America/New_York'
+        self.assertEqual(dispatcher._format_time({'published_at': '2026-05-11T03:30:01Z'}), '2026-05-10 23:30')
+        self.assertEqual(dispatcher._format_time({'published_at': '2026-05-11 03:30:01'}), '2026-05-11 03:30')
+        self.assertEqual(dispatcher._format_time({'published_at': 'unknown'}), 'unknown')
+
+    def test_twitter_text_and_card_use_formatted_time(self):
+        config = self._build_config()
+        config.timezone = 'Asia/Shanghai'
+        dispatcher = FeedDispatcher(context=_FakeContext(), config=config)
+        dispatcher._resolve_messagechain_cls = lambda: _MessageChain
+        dispatcher._resolve_plain_cls = lambda: _Plain
+        item = {'title': 'News', 'source_type': 'twitter', 'published_at': '2026-05-11T03:30:01+00:00'}
+        text = dispatcher._build_text_message_chain(item, include_media=False).chain[0].text
+        card = dispatcher._build_card_html(item)
+        for output in (text, card):
+            self.assertIn('2026-05-11 11:30', output)
+            self.assertNotIn('T03:30:01+00:00', output)
+
+    def test_invalid_timezone_falls_back_to_utc(self):
+        config = self._build_config()
+        config.timezone = 'Invalid/Timezone'
+        dispatcher = FeedDispatcher(context=_FakeContext(), config=config)
+        self.assertEqual(dispatcher._format_time({'published_at': '2026-05-11T03:30:01Z'}), '2026-05-11 03:30')
+
     def _build_config(self):
         return RSSConfig.from_context(
             {

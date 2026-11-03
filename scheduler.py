@@ -3,6 +3,7 @@ import hashlib
 import inspect
 import time
 from contextlib import suppress
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,6 +18,7 @@ from .parser import FeedParser
 from .pipeline import FeedPipeline
 from .semantic_dedup import SemanticDedupResult, SemanticDedupService
 from .storage import FeedStorage
+from .subscription_runtime import _bootstrap_fetcher, _validate_raw
 
 
 @dataclass(slots=True)
@@ -101,6 +103,7 @@ class RSSScheduler:
             return
 
         await self._cancel_stale_job_tasks()
+        await self._ensure_subscription_registry()
         for job in self._jobs():
             if not job.enabled:
                 continue
@@ -785,11 +788,73 @@ class RSSScheduler:
             return seen_keys
         return [self._target_seen_key(job_id, origin, key) for key in seen_keys]
 
+    @staticmethod
+    def _bootstrap_seen_keys(job: JobConfig, origin: str, feed_id: str, seen_keys: list[str]) -> list[str]:
+        origin_digest = hashlib.sha256(origin.encode("utf-8")).hexdigest()
+        feed_digest = hashlib.sha256(feed_id.encode("utf-8")).hexdigest()
+        prefix = f"bootstrap:job:{job.id}:origin:{origin_digest}:feed:{feed_digest}:"
+        return [prefix + key for key in seen_keys]
+
+    async def _mark_bootstrap_seen(self, job, origins, feed_id, seen_keys, ttl_seconds):
+        for origin in origins:
+            await self._mark_seen_all(
+                self._bootstrap_seen_keys(job, origin, feed_id, seen_keys), ttl_seconds,
+            )
+
+    def _subscription_scopes(self) -> list[tuple[str, str, str]]:
+        return [
+            (job.id, origin, feed_id)
+            for job in self._jobs()
+            for origin in self._resolve_job_target_origins(job)
+            for feed_id in job.feed_ids
+        ]
+
+    async def _ensure_subscription_registry(self) -> None:
+        initialize = getattr(self._storage, "initialize_subscription_registry", None)
+        if callable(initialize):
+            await initialize(self._subscription_scopes())
+
+    async def _uninitialized_subscriptions(self, job: JobConfig) -> dict[str, list[str]]:
+        check = getattr(self._storage, "is_subscription_initialized", None)
+        if not callable(check):
+            return {}
+        pending = {}
+        for feed_id in job.feed_ids:
+            origins = []
+            for origin in self._resolve_job_target_origins(job):
+                if not await check(job.id, origin, feed_id):
+                    origins.append(origin)
+            if origins:
+                pending[feed_id] = origins
+        return pending
+
+    async def _initialize_job_subscriptions(self, job, pending, raw_items, ttl_seconds):
+        for feed_id, origins in pending.items():
+            scoped_job = copy(job)
+            scoped_job.feed_ids = [feed_id]
+            snapshot = deepcopy([raw for raw in raw_items if raw.get("feed_id") == feed_id])
+            try:
+                _validate_raw(snapshot, scoped_job)
+            except ValueError as exc:
+                logger.warning("job=%s feed=%s subscription bootstrap deferred: %s", job.id, feed_id, exc)
+                continue
+            for raw in snapshot:
+                raw["max_new_items"] = 0
+            items = self._call_parse(snapshot, scoped_job)
+            keys = [self._build_seen_keys(item) for item in items]
+            if any(not item_keys for item_keys in keys):
+                raise ValueError("bootstrap item has no deduplication keys")
+            for item_keys in keys:
+                await self._mark_bootstrap_seen(job, origins, feed_id, item_keys, ttl_seconds)
+            for origin in origins:
+                await self._storage.mark_subscription_initialized(job.id, origin, feed_id)
+
     async def _pending_target_origins(
         self,
         job: JobConfig,
         seen_keys: list[str],
         ttl_seconds: int,
+        feed_id: str = "",
     ) -> list[str]:
         origins = self._resolve_job_target_origins(job)
         if not origins:
@@ -801,7 +866,12 @@ class RSSScheduler:
 
         pending: list[str] = []
         for origin in origins:
+            check = getattr(self._storage, "is_subscription_initialized", None)
+            if feed_id and callable(check) and not await check(job.id, origin, feed_id):
+                continue
             scoped_keys = self._target_seen_keys(job, origin, seen_keys)
+            if feed_id:
+                scoped_keys += self._bootstrap_seen_keys(job, origin, feed_id, seen_keys)
             if not await self._has_seen_any(scoped_keys, ttl_seconds=ttl_seconds):
                 pending.append(origin)
         return pending
@@ -1049,6 +1119,8 @@ class RSSScheduler:
             batch_size = max(int(getattr(job, "batch_size", 10) or 10), 1)
 
             try:
+                await self._ensure_subscription_registry()
+                pending_subscriptions = await self._uninitialized_subscriptions(job)
                 raw_items = await self._call_fetch(job)
                 fetched_count = len(raw_items)
                 feed_state_map = {
@@ -1057,6 +1129,13 @@ class RSSScheduler:
                 }
 
                 items = self._call_parse(raw_items, job)
+                if pending_subscriptions:
+                    snapshot_job = copy(job)
+                    snapshot_job.feed_ids = list(pending_subscriptions)
+                    snapshot = await self._call_fetch(snapshot_job, pending_subscriptions)
+                    await self._initialize_job_subscriptions(
+                        job, pending_subscriptions, snapshot, dedup_ttl_seconds,
+                    )
                 parsed_count = len(items)
                 await self._archive_items(items)
                 if bool(getattr(job, "aggregate_enabled", False)):
@@ -1091,6 +1170,7 @@ class RSSScheduler:
                             job,
                             seen_keys,
                             dedup_ttl_seconds,
+                            feed_id=str(item.get("feed_id", "")),
                         )
                         has_target_scope = bool(self._resolve_job_target_origins(job))
                         item_id = seen_keys[0]
@@ -1242,6 +1322,11 @@ class RSSScheduler:
                 for feed_id in job.feed_ids:
                     if feed_id not in feed_meta:
                         continue
+                    # A snapshot for exclusively new subscribers must not advance
+                    # validators/cursors shared with an established job.
+                    new_origins = pending_subscriptions.get(feed_id, [])
+                    if new_origins and set(new_origins) == set(self._resolve_job_target_origins(job)):
+                        continue
                     meta = feed_meta[feed_id]
                     await self._storage.update_feed_state(
                         feed_id,
@@ -1321,6 +1406,7 @@ class RSSScheduler:
                 job,
                 seen_keys,
                 dedup_ttl_seconds,
+                feed_id=str(item.get("feed_id", "")),
             )
             item_id = seen_keys[0]
             if any(key in seen_in_run for key in seen_keys):
@@ -1603,11 +1689,16 @@ class RSSScheduler:
                 sources.append(source)
         return " / ".join(sources)
 
-    async def _call_fetch(self, job: JobConfig) -> list[dict]:
-        fetch_func = self._fetcher.fetch
+    async def _call_fetch(self, job: JobConfig, pending_feeds=None) -> list[dict]:
+        fetcher = self._fetcher
+        if pending_feeds:
+            fetcher = _bootstrap_fetcher(fetcher, pending_feeds)
+        fetch_func = fetcher.fetch
         if self._accepts_argument(fetch_func):
-            return await fetch_func(job)
-        return await fetch_func()
+            raw_items = await fetch_func(job)
+        else:
+            raw_items = await fetch_func()
+        return raw_items
 
     def _call_parse(self, raw_items: list[dict], job: JobConfig) -> list[dict]:
         parse_func = self._parser.parse

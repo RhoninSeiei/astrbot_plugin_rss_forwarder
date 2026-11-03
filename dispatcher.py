@@ -4,13 +4,15 @@ import inspect
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api import logger
 
@@ -158,9 +160,22 @@ class FeedDispatcher:
             or ""
         )
         time_text = str(raw_time).strip()
-        if time_text:
-            return time_text
-        return datetime.now().strftime("%Y-%m-%d %H:%M")
+        try:
+            local_zone = ZoneInfo(self._config.timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            local_zone = timezone.utc
+        if not time_text:
+            return datetime.now(local_zone).strftime("%Y-%m-%d %H:%M")
+        try:
+            parsed = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(time_text)
+            except (TypeError, ValueError, OverflowError):
+                return time_text
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=local_zone)
+        return parsed.astimezone(local_zone).strftime("%Y-%m-%d %H:%M")
 
     def _truncate_summary(self, item: dict[str, Any]) -> tuple[str, bool]:
         summary = str(item.get("summary", "") or item.get("content", "")).strip()
@@ -1233,7 +1248,7 @@ class FeedDispatcher:
                 url = str(link.get("link", "") or "").strip()
                 if url:
                     lines.append(f"{source}: {url}")
-        return self._build_plain_chain("\n".join(lines).strip())
+        return self._create_message_chain(lines)
 
     async def _build_aggregate_digest_image_payload(self, digest: dict[str, Any]):
         prepared = await self._prepare_aggregate_digest_images(digest)

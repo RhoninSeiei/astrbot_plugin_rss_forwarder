@@ -189,6 +189,47 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.old.active)
         self.assertIs(self.plugin._source_probe_api._config, self.old._config)
 
+    async def test_existing_job_new_target_is_seeded_without_touching_old_target(self):
+        candidate = copy.deepcopy(self.original)
+        candidate["jobs"][0]["target_ids"].append("private")
+        await apply_runtime(self.plugin, candidate)
+        marked = [call.args[0] for call in self.storage.mark_seen.await_args_list]
+        self.assertEqual(len(marked), 6)
+        for i in range(3):
+            self.assertIn(self.new._bootstrap_seen_keys(
+                self.new.get_job("old-job"), "qq:private:2", "old-feed", [f"old-feed-{i}"])[0], marked)
+            self.assertNotIn(self.new._target_seen_key("old-job", "qq:group:1", f"old-feed-{i}"), marked)
+        self.assertTrue(await self.storage.is_subscription_initialized("old-job", "qq:private:2", "old-feed"))
+
+    async def test_runtime_seed_records_initialization_even_for_empty_feed(self):
+        self.tune = lambda s: setattr(s._fetcher._fetch_single_feed, "side_effect",
+            lambda feed, **kwargs: fetcher_module.FetchedFeed(feed.id, _rss(feed.id, 0), "", "", 200))
+        await apply_runtime(self.plugin, self.candidate)
+        self.assertTrue(await self.storage.is_subscription_initialized("new-job", "qq:private:2", "old-feed"))
+
+    async def test_runtime_new_feed_history_cannot_consume_another_feeds_unseen_guid(self):
+        candidate = copy.deepcopy(self.original)
+        candidate["feeds"].append({"id": "other", "url": "https://other.example/rss"})
+        candidate["jobs"][0]["feed_ids"].append("other")
+
+        def tune(scheduler):
+            async def fetch(feed, **kwargs):
+                body = ("<rss><channel><item><guid>shared-guid</guid><title>Shared</title>"
+                        f"<link>https://example.com/{feed.id}/new</link></item></channel></rss>")
+                return fetcher_module.FetchedFeed(feed.id, body, "", "", 200)
+            scheduler._fetcher._fetch_single_feed.side_effect = fetch
+            scheduler._dispatcher.dispatch = AsyncMock(return_value=types.SimpleNamespace(
+                success_count=1, success_origins=["qq:group:1"], transient_failure_count=0))
+
+        self.tune = tune
+        await apply_runtime(self.plugin, candidate)
+        await self.new.run_job_once("old-job")
+        self.assertEqual(self.new.last_results["old-job"].error_summary, "")
+        self.new._dispatcher.dispatch.assert_awaited_once()
+        item = self.new._dispatcher.dispatch.await_args.args[0]
+        self.assertEqual((item["feed_id"], item["guid"], item["_target_origins"]),
+                         ("old-feed", "shared-guid", ["qq:group:1"]))
+
     async def test_success_seeds_all_items_and_origins_with_job_ttl_before_start(self):
         candidate_before = copy.deepcopy(self.candidate)
         old_key = self.old._target_seen_key("old-job", "qq:group:1", "old-feed-0")
@@ -217,7 +258,7 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 item = {"guid": f"{feed_id}-{i}", "link": f"https://example.com/{feed_id}/{i}"}
                 for origin in ("qq:group:1", "qq:private:2"):
                     for key in self.storage.build_seen_keys(item):
-                        scoped = self.new._target_seen_key(job.id, origin, key)
+                        scoped = self.new._bootstrap_seen_keys(job, origin, feed_id, [key])[0]
                         self.assertTrue(await self.storage.has_seen(scoped))
                         record = await self.storage.get(self.storage._content_key(scoped))
                         self.assertEqual(record["expire_at"] - record["updated_at"], 120)
@@ -341,6 +382,7 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assert_restored()
         self.assertFalse(self.new.active)
         self.assertEqual(self.events[-5:], ["save", "new:start", "new:stop", "save", "old:start"])
+        self.assertFalse(await self.storage.is_subscription_initialized("new-job", "qq:private:2", "old-feed"))
 
     async def test_seed_failure_restarts_old_without_persisting_candidate(self):
         self.storage.mark_seen.side_effect = OSError("seed failed")

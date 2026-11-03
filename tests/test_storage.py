@@ -8,6 +8,21 @@ from storage import FeedStorage
 
 
 class FeedStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_subscription_registry_adopts_legacy_once_and_persists_isolated_scopes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = FeedStorage(storage_dir=tmpdir)
+            await storage.initialize_subscription_registry([("job", "old", "feed")])
+            await storage.initialize_subscription_registry([("job", "new", "feed")])
+            self.assertTrue(await storage.is_subscription_initialized("job", "old", "feed"))
+            self.assertFalse(await storage.is_subscription_initialized("job", "new", "feed"))
+            await storage.mark_subscription_initialized("job", "new", "feed")
+            restored = FeedStorage(storage_dir=tmpdir)
+            self.assertTrue(await restored.is_subscription_initialized("job", "new", "feed"))
+            self.assertFalse(await restored.is_subscription_initialized("other", "new", "feed"))
+            self.assertFalse(await restored.is_subscription_initialized("job", "new", "other"))
+            await restored.clear_seen()
+            self.assertTrue(await restored.is_subscription_initialized("job", "new", "feed"))
+
     def test_default_plugin_name_matches_package_name(self):
         storage = FeedStorage(storage_dir=".")
 
