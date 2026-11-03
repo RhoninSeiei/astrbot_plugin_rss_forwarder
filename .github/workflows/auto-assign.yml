@@ -1,0 +1,31 @@
+name: Auto-assign issues and pull requests
+
+on:
+  issues:
+    types: [opened, reopened, transferred]
+  # Base-branch workflow permits assigning fork PRs without executing their code.
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Add repository owner as assignee
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          gh api --method POST "repos/$GH_REPO/issues/$ISSUE_NUMBER/assignees" \
+            -f 'assignees[]=RhoninSeiei' \
+            --jq '.assignees[].login'
