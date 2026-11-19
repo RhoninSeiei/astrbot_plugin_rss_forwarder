@@ -100,53 +100,63 @@ class FeedDispatcher:
     def _disable_origin_temporarily(self, origin: str) -> None:
         self._disabled_origins[origin] = time.monotonic() + self._DISABLED_ORIGIN_TTL_SECONDS
 
-    def _resolve_origins(self, item: dict[str, Any]) -> list[str]:
-        target_origins = item.get("_target_origins")
-        if isinstance(target_origins, str):
-            target_origins = [target_origins]
-        if isinstance(target_origins, list):
-            allowed_origins = {
-                origin
-                for origin_list in self._job_target_origins.values()
-                for origin in origin_list
-            }
-            requested = {
-                str(origin).strip()
-                for origin in target_origins
-                if str(origin).strip()
-            }
-            if allowed_origins:
-                requested &= allowed_origins
-            return sorted(requested)
+    @staticmethod
+    def _scope_values(value: Any) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [entry.strip() for entry in value if isinstance(entry, str) and entry.strip()]
 
-        origins: set[str] = set()
+    def _origins_for_job(self, job_id: Any) -> list[str]:
+        if not isinstance(job_id, str) or not job_id.strip():
+            return []
+        return self._job_target_origins.get(job_id.strip(), [])
 
-        job_ids = item.get("job_ids") or []
-        if isinstance(job_ids, str):
-            job_ids = [job_ids]
-        for job_id in job_ids:
-            origins.update(self._job_target_origins.get(str(job_id), []))
-
-        job_id = str(item.get("job_id", "")).strip()
-        if job_id:
-            origins.update(self._job_target_origins.get(job_id, []))
-
-        feed_id = str(item.get("feed_id", "")).strip()
-        if feed_id:
-            for job in self._config.jobs:
-                if job.enabled and feed_id in job.feed_ids:
-                    origins.update(self._job_target_origins.get(job.id, []))
-
-        if not origins:
-            for origin_list in self._job_target_origins.values():
-                origins.update(origin_list)
+    def _restrict_to_requested_origins(
+        self, payload: dict[str, Any], origins: set[str]
+    ) -> list[str]:
+        if "_target_origins" in payload:
+            origins.intersection_update(self._scope_values(payload["_target_origins"]))
         return sorted(origins)
 
-    def _resolve_target_origins(self, target_ids: list[str]) -> list[str]:
+    def _resolve_origins(self, item: dict[str, Any]) -> list[str]:
+        # Select by field presence so an empty explicit scope cannot fall back.
+        if "job_id" in item:
+            origins = set(self._origins_for_job(item["job_id"]))
+        elif "job_ids" in item:
+            origins = {
+                origin
+                for job_id in self._scope_values(item["job_ids"])
+                for origin in self._origins_for_job(job_id)
+            }
+        elif "feed_id" in item:
+            feed_id = item["feed_id"]
+            if not isinstance(feed_id, str) or not feed_id.strip():
+                return []
+            feed_id = feed_id.strip()
+            origins = {
+                origin
+                for job in self._config.jobs
+                if job.enabled and feed_id in job.feed_ids
+                for origin in self._origins_for_job(job.id)
+            }
+        elif "_target_origins" in item:
+            origins = {origin for group in self._job_target_origins.values() for origin in group}
+        else:
+            return []
+
+        if "target_ids" in item:
+            origins.intersection_update(self._resolve_target_origins(item["target_ids"]))
+        return self._restrict_to_requested_origins(item, origins)
+
+    def _resolve_target_origins(self, target_ids: Any) -> list[str]:
+        if not isinstance(target_ids, (list, tuple)):
+            return []
         origins = {
             self._target_map[target_id].unified_msg_origin
             for target_id in target_ids
-            if target_id in self._target_map
+            if isinstance(target_id, str) and target_id in self._target_map
         }
         return sorted(origin for origin in origins if origin)
 
@@ -1222,15 +1232,15 @@ class FeedDispatcher:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _resolve_aggregate_origins(self, digest: dict[str, Any]) -> list[str]:
-        target_origins = digest.get("_target_origins")
-        if isinstance(target_origins, str):
-            target_origins = [target_origins]
-        if isinstance(target_origins, list):
-            origins = [str(origin).strip() for origin in target_origins if str(origin).strip()]
-            if origins:
-                return origins
-        target_ids = list(digest.get("target_ids", []) or [])
-        return self._resolve_target_origins(target_ids)
+        if "target_ids" in digest:
+            origins = set(self._resolve_target_origins(digest["target_ids"]))
+            if "job_id" in digest:
+                origins.intersection_update(self._origins_for_job(digest["job_id"]))
+        elif "job_id" in digest and "_target_origins" in digest:
+            origins = set(self._origins_for_job(digest["job_id"]))
+        else:
+            return []
+        return self._restrict_to_requested_origins(digest, origins)
 
     def _build_aggregate_digest_text_chain(self, digest: dict[str, Any]):
         title = str(digest.get("title", "") or "").strip() or "RSS 聚合"

@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, call
 
 
 astrbot_module = types.ModuleType("astrbot")
@@ -54,6 +55,11 @@ class _FakeEvent:
         return text
 
 
+class _AdminEvent(_FakeEvent):
+    def is_admin(self):
+        return True
+
+
 class _ProbeReport:
     def __init__(self, payload=None):
         self._payload = payload or {
@@ -84,6 +90,160 @@ class _ProbeService:
 
 class CommandsTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
+    def _management_commands():
+        feed = FeedConfig(id="feed-1", url="https://feeds.example/rss.xml")
+        commands = RSSCommands(source_probe_service=_ProbeService())
+        commands.scheduler = Mock(
+            config=types.SimpleNamespace(
+                feeds=[feed],
+                jobs=[],
+                targets=[],
+                daily_digests=[
+                    DailyDigestConfig(
+                        id="digest-1",
+                        title="测试日报",
+                        feed_ids=["feed-1"],
+                        target_ids=["target-1"],
+                        send_time="09:00",
+                        enabled=True,
+                    ),
+                ],
+            ),
+            running=True,
+            paused_jobs=set(),
+            last_results={},
+            digest_results={},
+            storage=Mock(
+                get_daily_digest_status=AsyncMock(
+                    return_value={"last_error": "跨会话日报错误"}
+                ),
+                clear_seen=AsyncMock(return_value=5),
+            ),
+            run_job_once=AsyncMock(return_value=True),
+            pause_job=AsyncMock(return_value=True),
+            resume_job=Mock(return_value=True),
+            run_daily_digest_once=AsyncMock(return_value=True),
+            test_translation=AsyncMock(return_value={"input_chars": 11}),
+        )
+        return commands
+
+    async def test_rss_management_routes_deny_non_admin_without_side_effects(self):
+        for message in (
+            "/rss list",
+            "/rss status",
+            "/rss run job-1",
+            "/rss pause job-1",
+            "/rss resume job-1",
+            "/rss reset confirm",
+            "/rss probe feed-1",
+            "/rss test sample text",
+            "/rss TEST_TRANSLATE sample text",
+            "/rss DiGeSt RuN digest-1",
+        ):
+            with self.subTest(message=message):
+                commands = self._management_commands()
+                event = _FakeEvent(message)
+                event.is_admin = Mock(return_value=False)
+
+                results = [result async for result in commands.rss_router(event)]
+
+                event.is_admin.assert_called_once_with()
+                self.assertEqual(commands.scheduler.mock_calls, [])
+                self.assertEqual(commands.source_probe_service.calls, [])
+                self.assertEqual(len(results), 1)
+                self.assertIn("权限不足", results[0])
+                self.assertNotIn("跨会话日报错误", results[0])
+
+    async def test_rss_management_fails_closed_when_admin_identity_is_unavailable(self):
+        for permission in (
+            None,
+            True,
+            Mock(return_value=None),
+            Mock(return_value="admin"),
+            Mock(side_effect=RuntimeError("identity unavailable")),
+        ):
+            with self.subTest(permission=permission):
+                commands = self._management_commands()
+                event = _FakeEvent("/rss reset confirm")
+                if permission is not None:
+                    event.is_admin = permission
+
+                results = [result async for result in commands.rss_router(event)]
+
+                self.assertEqual(commands.scheduler.mock_calls, [])
+                self.assertEqual(len(results), 1)
+                self.assertIn("权限不足", results[0])
+                self.assertNotIn("identity unavailable", results[0])
+
+    async def test_rss_management_routes_allow_admin(self):
+        cases = (
+            ("/rss list", call.storage.get_daily_digest_status("digest-1"), "日报任务列表"),
+            ("/rss status", call.storage.get_daily_digest_status("digest-1"), "跨会话日报错误"),
+            ("/rss run job-1", call.run_job_once(job_id="job-1"), "已触发任务 job-1"),
+            ("/rss pause job-1", call.pause_job("job-1"), "任务已暂停：job-1"),
+            ("/rss resume job-1", call.resume_job("job-1"), "任务已恢复：job-1"),
+            ("/rss test sample text", call.test_translation(sample_text="sample text"), "输入字符数：11"),
+            ("/rss test_translate sample text", call.test_translation(sample_text="sample text"), "输入字符数：11"),
+            ("/rss digest run digest-1", call.run_daily_digest_once("digest-1"), "已触发日报 digest-1"),
+        )
+        for message, expected_call, expected_text in cases:
+            with self.subTest(message=message):
+                commands = self._management_commands()
+                results = [
+                    result
+                    async for result in commands.rss_router(_AdminEvent(message))
+                ]
+
+                self.assertEqual(commands.scheduler.mock_calls, [expected_call])
+                self.assertEqual(len(results), 1)
+                self.assertIn(expected_text, results[0])
+
+    async def test_rss_reset_requires_exact_confirmation_argument(self):
+        for arguments in ("", " job-1", " confirm job-1", " job-1 confirm"):
+            with self.subTest(arguments=arguments):
+                commands = self._management_commands()
+                results = [
+                    result
+                    async for result in commands.rss_router(
+                        _AdminEvent(f"/rss reset{arguments}")
+                    )
+                ]
+
+                commands.scheduler.storage.clear_seen.assert_not_called()
+                self.assertEqual(len(results), 1)
+                self.assertIn("/rss reset confirm", results[0])
+                self.assertIn("所有任务", results[0])
+                self.assertIn("所有会话", results[0])
+                self.assertIn("重复推送", results[0])
+
+    async def test_rss_reset_confirm_clears_global_seen_records(self):
+        commands = self._management_commands()
+        results = [
+            result
+            async for result in commands.rss_router(
+                _AdminEvent("/rss reset confirm")
+            )
+        ]
+
+        commands.scheduler.storage.clear_seen.assert_awaited_once_with()
+        self.assertEqual(len(results), 1)
+        self.assertIn("5 条", results[0])
+
+    async def test_rss_help_is_public_and_documents_admin_scope(self):
+        for message in ("/rss", "/rss help", "/rss unknown"):
+            with self.subTest(message=message):
+                event = _FakeEvent(message)
+                commands = RSSCommands()
+                results = [result async for result in commands.rss_router(event)]
+
+                self.assertEqual(len(results), 1)
+                self.assertIn("仅 AstrBot 管理员", results[0])
+                self.assertIn("/rss reset confirm", results[0])
+                self.assertIn("所有任务", results[0])
+                self.assertIn("所有会话", results[0])
+                self.assertIn("test_translate", results[0])
+
+    @staticmethod
     def _probe_commands(service, feeds):
         commands = RSSCommands(source_probe_service=service)
         commands.scheduler = types.SimpleNamespace(
@@ -102,7 +262,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
         results = [
             result
             async for result in commands.rss_router(
-                _FakeEvent("/rss probe feed-1")
+                _AdminEvent("/rss probe feed-1")
             )
         ]
 
@@ -114,7 +274,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
 
         results = [
             result
-            async for result in commands.rss_router(_FakeEvent("/rss probe"))
+            async for result in commands.rss_router(_AdminEvent("/rss probe"))
         ]
 
         self.assertEqual(results, ["用法：/rss probe <feed_id>"])
@@ -125,7 +285,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
         results = [
             result
             async for result in commands.rss_router(
-                _FakeEvent("/rss probe missing-feed")
+                _AdminEvent("/rss probe missing-feed")
             )
         ]
 
@@ -471,7 +631,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                 return True
 
         commands.scheduler = FakeScheduler()
-        event = _FakeEvent("/rss digest run digest-1")
+        event = _AdminEvent("/rss digest run digest-1")
 
         results = [result async for result in commands.rss_router(event)]
 

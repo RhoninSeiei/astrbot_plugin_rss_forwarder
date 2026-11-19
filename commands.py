@@ -9,6 +9,10 @@ if TYPE_CHECKING:
     from .source_probe import SourceProbeService
 
 
+_DIGEST_RUN_USAGE = "用法：/rss digest run <digest_id>"
+_RESET_SCOPE = "清空本插件所有任务和所有会话共用的推送去重记录，后续可能重复推送。"
+
+
 class RSSCommands:
     """命令入口。"""
 
@@ -33,14 +37,8 @@ class RSSCommands:
             return
 
         sub = tokens[1].lower() if len(tokens) >= 2 else ""
-        if sub == "digest":
-            digest_sub = tokens[2].lower() if len(tokens) >= 3 else ""
-            if digest_sub == "run":
-                async for result in self.rss_digest_run(event):
-                    yield result
-                return
-            yield event.plain_result("用法：/rss digest run [digest_id]")
-            return
+        if sub == "digest" and len(tokens) >= 3 and tokens[2].lower() == "run":
+            sub = "digest run"
 
         route_map = {
             "help": self.rss_help,
@@ -53,15 +51,29 @@ class RSSCommands:
             "probe": self.rss_probe,
             "test": self.rss_test,
             "test_translate": self.rss_test,
+            "digest run": self.rss_digest_run,
         }
 
         handler = route_map.get(sub)
         if handler is None:
-            yield event.plain_result(self._help_text())
+            yield event.plain_result(
+                _DIGEST_RUN_USAGE if sub == "digest" else self._help_text()
+            )
+            return
+
+        if sub != "help" and not self._is_rss_admin(event):
+            yield event.plain_result("权限不足：仅 AstrBot 管理员可以执行此命令。")
             return
 
         async for result in handler(event):
             yield result
+
+    @staticmethod
+    def _is_rss_admin(event: AstrMessageEvent) -> bool:
+        try:
+            return event.is_admin() is True
+        except Exception:
+            return False
 
     async def rss_help(self, event: AstrMessageEvent):
         yield event.plain_result(self._help_text())
@@ -235,15 +247,19 @@ class RSSCommands:
         yield event.plain_result("\n".join(lines))
 
     async def rss_reset(self, event: AstrMessageEvent):
-        """清空已推送去重记录，便于调试或重新全量推送。"""
-        scheduler = self.scheduler
-        deleted = await scheduler.storage.clear_seen()
-        yield event.plain_result(f"已清空去重记录：{deleted} 条。")
+        """经显式确认后，清空插件全局推送去重记录。"""
+        tokens = self._get_message_text(event).split()
+        if tokens[2:] != ["confirm"]:
+            yield event.plain_result(f"用法：/rss reset confirm\n{_RESET_SCOPE}")
+            return
+
+        deleted = await self.scheduler.storage.clear_seen()
+        yield event.plain_result(f"已清空本插件全局推送去重记录：{deleted} 条。")
 
     async def rss_digest_run(self, event: AstrMessageEvent):
         digest_id = self._extract_param_at(event, index=3)
         if not digest_id:
-            yield event.plain_result("用法：/rss digest run [digest_id]")
+            yield event.plain_result(_DIGEST_RUN_USAGE)
             return
 
         ok = await self.scheduler.run_daily_digest_once(digest_id)
@@ -301,7 +317,7 @@ class RSSCommands:
     async def rss_pause(self, event: AstrMessageEvent):
         job_id = self._extract_param(event)
         if not job_id:
-            yield event.plain_result("用法：/rss pause [job_id]")
+            yield event.plain_result("用法：/rss pause <job_id>")
             return
 
         ok = await self.scheduler.pause_job(job_id)
@@ -317,7 +333,7 @@ class RSSCommands:
     async def rss_resume(self, event: AstrMessageEvent):
         job_id = self._extract_param(event)
         if not job_id:
-            yield event.plain_result("用法：/rss resume [job_id]")
+            yield event.plain_result("用法：/rss resume <job_id>")
             return
 
         ok = self.scheduler.resume_job(job_id)
@@ -364,9 +380,14 @@ class RSSCommands:
     @staticmethod
     def _help_text() -> str:
         return (
-            "用法：/rss [list|status|run [job_id]|pause [job_id]|resume [job_id]|"
-            "reset|probe <feed_id>|test [sample text]|digest run [digest_id]]\n"
-            "/rss probe <feed_id>：仅检查连接，不保存设置。"
+            "公开帮助：/rss 或 /rss help\n"
+            "管理命令（仅 AstrBot 管理员）：\n"
+            "/rss list、/rss status：查看跨会话的任务列表和运行状态。\n"
+            "/rss run [job_id]、/rss pause <job_id>、/rss resume <job_id>\n"
+            "/rss digest run <digest_id>\n"
+            "/rss probe <feed_id>：仅检查连接，不保存设置。\n"
+            "/rss test [sample text]（别名：/rss test_translate）\n"
+            f"/rss reset confirm：{_RESET_SCOPE}"
         )
 
     @staticmethod

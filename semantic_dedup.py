@@ -46,7 +46,8 @@ class SemanticDedupService:
         ttl_seconds = self._ttl_seconds(job)
         max_candidates = self._max_candidates(job)
         records = await self._list_records(job, ttl_seconds=ttl_seconds, limit=max_candidates)
-        if not records:
+        candidates = self._prepare_candidates(records)
+        if not candidates:
             return SemanticDedupResult(reason="no_candidates")
 
         provider_id = await self._resolve_provider_id(job, unified_msg_origin=unified_msg_origin)
@@ -54,7 +55,7 @@ class SemanticDedupService:
             logger.warning("semantic dedup enabled but no provider id is available, skip job=%s", job.id)
             return SemanticDedupResult(reason="provider_missing")
 
-        prompt = self._build_prompt(current, records)
+        prompt = self._build_prompt(current, candidates)
         llm_kwargs: dict[str, Any] = {
             "chat_provider_id": provider_id,
             "prompt": prompt,
@@ -84,6 +85,9 @@ class SemanticDedupService:
                 confidence=parsed.confidence,
                 reason="missing_match_id",
             )
+        if parsed.duplicate and not any(row['record_id'] == parsed.matched_record_id for row in candidates):
+            logger.warning("semantic dedup ignored unknown candidate ID job=%s", job.id)
+            return SemanticDedupResult(confidence=parsed.confidence, reason="unknown_match_id")
         if parsed.duplicate and parsed.confidence < min_confidence:
             return SemanticDedupResult(
                 duplicate=False,
@@ -273,15 +277,16 @@ class SemanticDedupService:
             return ""
         return str(provider_id or "").strip()
 
-    def _build_prompt(self, current: dict[str, str], records: list[dict[str, Any]]) -> str:
+    def _prepare_candidates(self, records: list[dict[str, Any]]) -> list[dict[str, str]]:
         candidates = []
         for record in records:
             prepared = self._prepare_item(record)
-            if not prepared["title"] and not prepared["summary"]:
+            record_id = str(record.get("record_id", "") or "").strip()
+            if not record_id or not (prepared["title"] or prepared["summary"]):
                 continue
             candidates.append(
                 {
-                    "record_id": str(record.get("record_id", "") or "").strip(),
+                    "record_id": record_id,
                     "source": self._sanitize_text(str(record.get("source", "") or ""))[:80],
                     "title": prepared["title"][:180],
                     "summary": prepared["summary"][:260],
@@ -290,6 +295,10 @@ class SemanticDedupService:
                 }
             )
 
+        return candidates
+
+    @staticmethod
+    def _build_prompt(current: dict[str, str], candidates: list[dict[str, str]]) -> str:
         payload = {
             "current": {
                 "source": current["source"][:80],

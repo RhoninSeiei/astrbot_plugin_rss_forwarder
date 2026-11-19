@@ -273,6 +273,82 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    async def test_dispatch_respects_explicit_job_and_feed_scopes(self):
+        config = self._build_config()
+        first = config.targets[0].unified_msg_origin
+        second = "default:GroupMessage:2"
+        third = "default:GroupMessage:3"
+        disabled = "default:GroupMessage:4"
+        config.targets.extend([
+            config_module.TargetConfig("target-2", "qq", second),
+            config_module.TargetConfig("target-3", "qq", third),
+            config_module.TargetConfig("target-disabled", "qq", disabled, enabled=False),
+        ])
+        config.jobs.extend([
+            config_module.JobConfig("job-2", ["feed-1"], ["target-2"]),
+            config_module.JobConfig("job-3", ["feed-2"], ["target-3"]),
+            config_module.JobConfig("job-disabled", ["feed-1"], ["target-3"], enabled=False),
+            config_module.JobConfig("job-disabled-target", ["feed-3"], ["target-disabled"]),
+            config_module.JobConfig("job-unknown-target", ["feed-3"], ["missing"]),
+        ])
+
+        cases = [
+            ("single job with shared feed", {"job_id": "job-1", "feed_id": "feed-1"}, [first]),
+            ("single job with extra jobs", {"job_id": "job-1", "job_ids": ["job-2"]}, [first]),
+            ("scheduler pending subset", {
+                "job_id": "job-1", "feed_id": "feed-1", "_target_origins": [second, first],
+            }, [first]),
+            ("disjoint pending origins", {"job_id": "job-1", "_target_origins": second}, []),
+            ("empty pending origins", {"job_id": "job-1", "_target_origins": []}, []),
+            ("invalid pending origins", {"job_id": "job-1", "_target_origins": None}, []),
+            ("unknown job", {"job_id": "missing", "job_ids": ["job-2"], "feed_id": "feed-1"}, []),
+            ("disabled job", {"job_id": "job-disabled", "_target_origins": [third]}, []),
+            ("disabled target", {"job_id": "job-disabled-target", "feed_id": "feed-3"}, []),
+            ("unknown target", {"job_id": "job-unknown-target", "feed_id": "feed-3"}, []),
+            ("empty job", {"job_id": "", "feed_id": "feed-1"}, []),
+            ("multiple jobs", {"job_ids": ["job-1", "job-3", "missing"], "feed_id": "feed-1"}, [first, third]),
+            ("job list pending subset", {"job_ids": "job-2", "_target_origins": [first, second]}, [second]),
+            ("unknown job list", {"job_ids": ["missing"], "feed_id": "feed-1"}, []),
+            ("empty job list", {"job_ids": [], "feed_id": "feed-1"}, []),
+            ("known feed", {"feed_id": "feed-1"}, [first, second]),
+            ("feed pending subset", {"feed_id": "feed-2", "_target_origins": [first, third]}, [third]),
+            ("unknown feed", {"feed_id": "missing"}, []),
+            ("empty feed", {"feed_id": ""}, []),
+            ("feed without valid targets", {"feed_id": "feed-3"}, []),
+            ("origins without job or feed", {"_target_origins": [first, disabled]}, [first]),
+            ("no routing fields", {}, []),
+            ("target IDs alone cannot authorize ordinary delivery", {"target_ids": ["target-1"]}, []),
+            ("empty target IDs", {"job_id": "job-1", "target_ids": []}, []),
+            ("invalid target IDs", {"job_id": "job-1", "target_ids": ["missing", "target-disabled"]}, []),
+            ("target IDs can only narrow job list", {
+                "job_ids": ["job-1", "job-2"], "target_ids": ["target-2", "target-3"],
+            }, [second]),
+        ]
+        for case, scope, expected in cases:
+            with self.subTest(case=case):
+                context = _FakeContext()
+                dispatcher = FeedDispatcher(context=context, config=config)
+                dispatcher._build_text_message_chain = lambda item, **kwargs: "payload"
+
+                result = await dispatcher.dispatch({"title": "Title", **scope})
+
+                self.assertEqual([origin for origin, _ in context.sent], expected)
+                self.assertEqual(result.success_origins, expected)
+
+    async def test_dispatch_rejects_explicit_origins_when_no_job_allows_them(self):
+        config = self._build_config()
+        config.jobs[0].enabled = False
+        context = _FakeContext()
+        dispatcher = FeedDispatcher(context=context, config=config)
+        dispatcher._build_text_message_chain = lambda item, **kwargs: "payload"
+
+        result = await dispatcher.dispatch({
+            "title": "Title", "_target_origins": [config.targets[0].unified_msg_origin],
+        })
+
+        self.assertEqual(context.sent, [])
+        self.assertEqual(result.success_count, 0)
+
     async def test_duplicate_dispatch_is_blocked_before_send(self):
         context = _FakeContext()
         storage = _FakeStorage()

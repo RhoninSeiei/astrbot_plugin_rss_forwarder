@@ -171,11 +171,85 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    async def test_aggregate_dispatch_intersects_job_targets_and_pending_origins(self):
+        config = self._build_config()
+        config.targets.extend([
+            config_module.TargetConfig("target-2", "qq", "qq:group:2"),
+            config_module.TargetConfig("target-3", "qq", "qq:group:3"),
+            config_module.TargetConfig("target-disabled", "qq", "qq:group:4", enabled=False),
+        ])
+        config.jobs[0].target_ids.append("target-2")
+        config.jobs.extend([
+            config_module.JobConfig("job-2", ["feed-1"], ["target-3"]),
+            config_module.JobConfig("job-disabled", ["feed-1"], ["target-1"], enabled=False),
+        ])
+
+        cases = [
+            ("scheduler pending subset", {
+                "job_id": "job-1", "target_ids": ["target-1", "target-2"],
+                "_target_origins": ["qq:group:2", "qq:group:2", "qq:group:3", "qq:group:9"],
+            }, ["qq:group:2"]),
+            ("target IDs cannot add a job destination", {
+                "job_id": "job-1", "target_ids": ["target-1", "target-3"],
+            }, ["qq:group:1"]),
+            ("pending origins must also match target IDs", {
+                "job_id": "job-1", "target_ids": ["target-1"], "_target_origins": ["qq:group:2"],
+            }, []),
+            ("empty pending origins", {
+                "job_id": "job-1", "target_ids": ["target-1"], "_target_origins": [],
+            }, []),
+            ("invalid pending origins", {
+                "job_id": "job-1", "target_ids": ["target-1"], "_target_origins": None,
+            }, []),
+            ("empty target IDs", {
+                "job_id": "job-1", "target_ids": [], "_target_origins": ["qq:group:1"],
+            }, []),
+            ("invalid target IDs", {
+                "job_id": "job-1", "target_ids": [None, {}], "_target_origins": ["qq:group:1"],
+            }, []),
+            ("disabled and unknown targets", {
+                "job_id": "job-1", "target_ids": ["target-disabled", "missing"],
+                "_target_origins": ["qq:group:4", "qq:group:9"],
+            }, []),
+            ("unknown job", {
+                "job_id": "missing", "target_ids": ["target-1"],
+            }, []),
+            ("disabled job", {
+                "job_id": "job-disabled", "target_ids": ["target-1"],
+            }, []),
+            ("job with pending origins only", {
+                "job_id": "job-1", "_target_origins": ["qq:group:2", "qq:group:3"],
+            }, ["qq:group:2"]),
+            ("job without any requested targets", {"job_id": "job-1"}, []),
+            ("jobless target IDs", {
+                "target_ids": ["target-1", "target-3", "target-disabled", "missing"],
+            }, ["qq:group:1", "qq:group:3"]),
+            ("jobless target IDs and pending origins", {
+                "target_ids": ["target-1"], "_target_origins": ["qq:group:1", "qq:group:2"],
+            }, ["qq:group:1"]),
+            ("pending origins without a job or target IDs", {
+                "_target_origins": ["qq:group:1"],
+            }, []),
+        ]
+        for case, scope, expected in cases:
+            with self.subTest(case=case):
+                context = _FakeContext()
+                dispatcher = FeedDispatcher(context=context, config=config)
+                dispatcher._build_aggregate_digest_text_chain = lambda digest: "aggregate-payload"
+
+                result = await dispatcher.dispatch_aggregate_digest({"title": "Aggregate", **scope})
+
+                self.assertEqual([origin for origin, _ in context.sent], expected)
+                self.assertEqual(result.success_origins, expected)
+
     async def test_aggregate_dispatch_uses_target_origins_and_blocks_duplicates(self):
         context = _FakeContext()
+        config = self._build_config()
+        config.targets.append(config_module.TargetConfig("target-2", "qq", "qq:group:2"))
+        config.jobs[0].target_ids.append("target-2")
         dispatcher = FeedDispatcher(
             context=context,
-            config=self._build_config(),
+            config=config,
             storage=_FakeStorage(),
         )
         dispatcher._build_aggregate_digest_text_chain = lambda digest: "aggregate-payload"
@@ -187,7 +261,7 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
             "content": "1. 内容",
             "item_count": 1,
             "_target_origins": ["qq:group:2"],
-            "target_ids": ["target-1"],
+            "target_ids": ["target-1", "target-2"],
             "render_mode": "text",
         }
 
@@ -271,7 +345,7 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
             "title": "聚合标题",
             "content": "1. 内容",
             "item_count": 1,
-            "_target_origins": ["qq:group:2"],
+            "_target_origins": ["qq:group:1"],
             "target_ids": ["target-1"],
             "render_mode": "text",
         }
@@ -283,7 +357,7 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.permanent_failure_count, 0)
         self.assertEqual(second.transient_failure_count, 1)
         self.assertEqual(second.skipped_disabled_count, 0)
-        self.assertEqual(context.sent, [("qq:group:2", "aggregate-payload"), ("qq:group:2", "aggregate-payload")])
+        self.assertEqual(context.sent, [("qq:group:1", "aggregate-payload"), ("qq:group:1", "aggregate-payload")])
 
     async def test_aggregate_send_false_releases_dispatch_claim_for_retry(self):
         context = _FakeContext(send_result=False)
@@ -301,7 +375,7 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
             "title": "聚合标题",
             "content": "1. 内容",
             "item_count": 1,
-            "_target_origins": ["qq:group:2"],
+            "_target_origins": ["qq:group:1"],
             "target_ids": ["target-1"],
             "render_mode": "text",
         }
@@ -313,7 +387,7 @@ class AggregateDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.transient_failure_count, 1)
         self.assertEqual(first.success_count, 0)
         self.assertEqual(second.success_count, 1)
-        self.assertEqual(context.sent, [("qq:group:2", "aggregate-payload"), ("qq:group:2", "aggregate-payload")])
+        self.assertEqual(context.sent, [("qq:group:1", "aggregate-payload"), ("qq:group:1", "aggregate-payload")])
 
 
 

@@ -30,7 +30,7 @@
 - 支持启动首轮延迟：默认在插件启动后等待 `45` 秒再执行第一次轮询，避免平台适配器尚未就绪时抢跑。
 - 支持去重（KV + TTL）与 feed 状态（ETag/Last-Modified/last_success_time）。
 - 支持任务级语义重复判定：同一轮询任务中多个源报道同一事件时，可通过模型判定后只推送首条代表新闻。
-- 支持管理指令：`/rss list`、`/rss status`、`/rss run [job_id]`、`/rss pause [job_id]`、`/rss resume [job_id]`、`/rss reset`（清空去重记录）。
+- `/rss help` 对所有用户开放。查看全局状态、手动推送、暂停、恢复、探测和翻译测试等管理操作仅限 AstrBot 管理员。`/rss reset` 只显示影响范围，`/rss reset confirm` 才会清空全插件去重记录。
 - 支持日报汇总：`daily_digests[]`、`/rss digest run [digest_id]`。
 - 支持三级翻译链路：LLM、Google Translate、GitHub Models。
 - 支持 text / image 两种渲染模式；日报图片由本地 Pillow 生成，普通 RSS 图卡继续使用 `html_render`。

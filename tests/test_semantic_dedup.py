@@ -49,6 +49,22 @@ class _DummyContext:
 
 
 class SemanticDedupServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_id_must_be_in_prompt_not_just_in_storage(self):
+        class Storage:
+            async def list_semantic_dedup_records(self, job_id, limit, ttl_seconds):
+                return [{'record_id': 'visible', 'title': 'A'}, {'record_id': 'filtered'}]
+
+        for invalid in ('invented', 'filtered'):
+            with self.subTest(invalid=invalid):
+                ctx = _DummyContext('{"duplicate":true,"matched_record_id":"%s","confidence":1}' % invalid)
+                service = SemanticDedupService(ctx, RSSConfig(feeds=[], targets=[], jobs=[]), Storage())
+                job = types.SimpleNamespace(id='job', semantic_dedup_enabled=True, semantic_dedup_provider_id='p')
+                result = await service.check(job, {'title': 'Current news'})
+                self.assertNotIn(invalid, ctx.last_llm_kwargs['prompt'])
+                self.assertFalse(result.duplicate)
+                self.assertEqual(result.reason, 'unknown_match_id')
+                self.assertEqual(result.matched_record_id, '')
+
     async def test_duplicate_result_uses_job_provider_and_match_confidence(self):
         class FakeStorage:
             async def list_semantic_dedup_records(self, job_id, limit, ttl_seconds):
