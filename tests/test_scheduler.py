@@ -284,6 +284,69 @@ class SchedulerSubscriptionBootstrapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(item["guid"], item["_target_origins"]) for item in self.delivered],
                          [("twitter:alice:103", ["qq:group:1", "qq:group:2"])])
 
+    def shared_feed_scheduler(self):
+        config = RSSConfig.from_context(self.raw)
+        storage = sys.modules[f"{PACKAGE_NAME}.storage"].FeedStorage(storage_dir=self.storage_dir)
+        fetcher = sys.modules[f"{PACKAGE_NAME}.fetcher"].FeedFetcher(config, storage)
+        fetcher._twitter_media_cache_dir = Path(self.storage_dir) / "twitter_media"
+
+        async def dispatch(item):
+            self.delivered.append((item["job_id"], item["guid"], item["_target_origins"]))
+            return DispatchResult(success_count=1, success_origins=item["_target_origins"])
+
+        return RSSScheduler(config, fetcher, sys.modules[f"{PACKAGE_NAME}.parser"].FeedParser(),
+                            types.SimpleNamespace(dispatch=dispatch), storage)
+
+    def add_shared_feed_job(self):
+        self.raw["jobs"].append({"id": "other", "feed_ids": ["feed"], "target_ids": ["new"],
+                                 "interval_seconds": 300})
+
+    async def test_shared_feed_etag_does_not_skip_lagging_job_after_restart(self):
+        self.add_shared_feed_job()
+        await self.storage.update_feed_state("feed", etag="previous", bootstrap_done=True)
+        sent_validators = []
+
+        def request(**kwargs):
+            etag = kwargs["headers"].get("If-None-Match")
+            sent_validators.append(etag)
+            if etag == "current":
+                return types.SimpleNamespace(status=304, headers={}, body=b"")
+            return types.SimpleNamespace(status=200, headers={"ETag": "current"}, body=(
+                b"<rss><channel><item><guid>article</guid><title>Article</title></item></channel></rss>"
+            ))
+
+        with mock.patch.object(sys.modules[f"{PACKAGE_NAME}.fetcher"], "request_source", side_effect=request):
+            await self.run_job(self.shared_feed_scheduler())
+            restored = self.shared_feed_scheduler()
+            await self.run_job(restored, "other")
+            await self.run_job(restored)
+            await self.run_job(restored, "other")
+
+        self.assertEqual(sent_validators, ["previous", "previous", "current", "current"])
+        self.assertEqual(self.delivered, [("job", "article", ["qq:group:1"]),
+                                          ("other", "article", ["qq:group:2"])])
+
+    async def test_shared_twitter_cursor_does_not_skip_lagging_job_after_restart(self):
+        self.add_shared_feed_job()
+        self.raw["feeds"] = [{"id": "feed", "source_type": "twitter", "username": "alice"}]
+        await self.storage.update_feed_state("feed", since_id="100", bootstrap_done=True)
+
+        def open_text(url, *_args):
+            if url.endswith("/alice"):
+                return '<div class="timeline-item"><a href="/alice/status/101"></a></div>'
+            return '<div class="main-tweet"><div class="tweet-content">New tweet</div></div>'
+
+        twitter = sys.modules[f"{PACKAGE_NAME}.fetcher"].TwitterTimelineFetcher
+        with mock.patch.object(twitter, "_open_text", side_effect=open_text) as requests:
+            await self.run_job(self.shared_feed_scheduler())
+            restored = self.shared_feed_scheduler()
+            await self.run_job(restored, "other")
+            await self.run_job(restored, "other")
+
+        self.assertEqual(sum(call.args[0].endswith("/status/101") for call in requests.call_args_list), 2)
+        self.assertEqual(self.delivered, [("job", "twitter:alice:101", ["qq:group:1"]),
+                                          ("other", "twitter:alice:101", ["qq:group:2"])])
+
 
 class RSSSchedulerTests(unittest.TestCase):
     def test_config_defaults_startup_delay_to_45_seconds(self):
@@ -388,6 +451,7 @@ class SchedulerFeedSuccessTests(unittest.IsolatedAsyncioTestCase):
              "last_modified": "bad-modified", "since_id": "999"},
         ], ["ok", "failed", "missing"])
         await self._run_job(scheduler, ["ok", "failed", "missing"])
+        self.assertEqual(scheduler.last_results["job-status"].failed_feed_ids, ["failed", "missing"])
         self._assert_success(
             scheduler.storage, "ok", etag="fresh-etag",
             last_modified="fresh-modified", since_id="20",
@@ -400,10 +464,20 @@ class SchedulerFeedSuccessTests(unittest.IsolatedAsyncioTestCase):
                 await self._run_job(scheduler, ["failed", "missing"])
                 scheduler.storage.update_feed_state.assert_not_awaited()
 
+    async def test_malformed_xml_does_not_advance_its_cursor_but_valid_empty_feed_does(self):
+        scheduler = self._scheduler([
+            {"feed_id": "broken", "status": 200, "body": "<rss><channel>", "etag": "broken-etag"},
+            {"feed_id": "bodyless", "status": 200, "body": "", "etag": "bodyless-etag"},
+            {"feed_id": "no-channel", "status": 200, "body": "<rss/>", "etag": "no-channel-etag"},
+            {"feed_id": "empty", "status": 200, "body": "<rss><channel/></rss>", "etag": "empty-etag"},
+        ], ["broken", "bodyless", "no-channel", "empty"])
+        await self._run_job(scheduler, ["broken", "bodyless", "no-channel", "empty"])
+        self._assert_success(scheduler.storage, "empty", etag="empty-etag")
+        self.assertEqual(scheduler.last_results["job-status"].failed_feed_ids, ["broken", "bodyless", "no-channel"])
+
     async def test_empty_success_without_validators_updates_feed_state(self):
         for raw in [
             {"feed_id": "ok", "status": 200, "body": "<rss><channel/></rss>"},
-            {"feed_id": "ok", "status": 200, "body": ""},
             {"feed_id": "ok", "status": 204, "body": ""},
             {"feed_id": "ok", "source_type": "twitter", "status": 200, "items": []},
             {"feed_id": "ok", "body": "<rss><channel/></rss>"},
@@ -440,7 +514,7 @@ class SchedulerFeedSuccessTests(unittest.IsolatedAsyncioTestCase):
     async def test_daily_empty_success_and_304_update_feed_state(self):
         for raw in [
             {"feed_id": "ok", "status": 200, "body": "<rss><channel/></rss>"},
-            {"feed_id": "ok", "status": 200, "body": ""},
+            {"feed_id": "ok", "status": 204, "body": ""},
             {"feed_id": "ok", "status": 304, "body": "", "etag": "old-etag",
              "last_modified": "old-modified"},
             {"feed_id": "ok", "body": "<rss><channel/></rss>"},
@@ -1667,6 +1741,208 @@ class SchedulerTargetScopedDedupTests(unittest.IsolatedAsyncioTestCase):
             self._target_seen_key("job-1", friend_origin, "item-1"),
             storage.seen,
         )
+
+
+class SchedulerOutboxTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.storage_dir = temp.name
+        self.origins = ["qq:group:1", "qq:group:2"]
+        self.target_ids = ["one", "two"]
+        self.enabled = [True, True]
+        self.raw = []
+        self.deliveries = []
+        self.delivery_proxies = []
+        self.results = []
+
+    def scheduler(self, *, aggregate=False, batch_size=1):
+        config = RSSConfig.from_context({
+            "feeds": [{"id": "feed", "source_type": "twitter", "username": "alice"}],
+            "targets": [
+                {"id": target_id, "platform": "qq", "unified_msg_origin": origin, "enabled": enabled}
+                for target_id, origin, enabled in zip(self.target_ids, self.origins, self.enabled)
+            ],
+            "jobs": [{"id": "job", "feed_ids": ["feed"], "target_ids": self.target_ids[:],
+                      "interval_seconds": 300, "batch_size": batch_size,
+                      "aggregate_enabled": aggregate, "aggregate_max_items": 1}],
+        })
+        storage = sys.modules[f"{PACKAGE_NAME}.storage"].FeedStorage(storage_dir=self.storage_dir)
+
+        async def dispatch(payload):
+            guids = [item["guid"] for item in payload.get("items", [payload])]
+            origins = payload["_target_origins"]
+            self.deliveries.append((guids, origins))
+            self.delivery_proxies.append([item["proxy_url"] for item in payload.get("items", [payload])])
+            if self.results:
+                return self.results.pop(0)
+            return DispatchResult(success_count=len(origins), success_origins=origins)
+
+        return RSSScheduler(
+            config, types.SimpleNamespace(fetch=mock.AsyncMock(return_value=self.raw),
+                                          _storage=storage, _config=config),
+            sys.modules[f"{PACKAGE_NAME}.parser"].FeedParser(),
+            types.SimpleNamespace(dispatch=dispatch, dispatch_aggregate_digest=dispatch), storage,
+        )
+
+    def fetch(self, *tweet_ids):
+        self.raw = [{"feed_id": "feed", "source_type": "twitter", "status": 200,
+                     "since_id": max(tweet_ids, default="10"), "items": [
+                         {"username": "alice", "tweet_id": tweet_id, "text": f"Tweet {tweet_id}"}
+                         for tweet_id in tweet_ids
+                     ]}]
+
+    async def run_poll(self, scheduler):
+        await scheduler._run_job_once_guarded(scheduler.config.jobs[0])
+        result = scheduler.last_results["job"]
+        self.assertEqual(result.error_summary, "")
+        return result
+
+    async def establish(self, scheduler):
+        await scheduler.storage.update_feed_state("feed", since_id="10", bootstrap_done=True)
+        await scheduler._ensure_subscription_registry()
+
+    async def test_batch_overflow_survives_restart_and_empty_fetch_after_cursor_advances(self):
+        self.fetch("12", "11")
+        scheduler = self.scheduler()
+        await self.establish(scheduler)
+        first = await self.run_poll(scheduler)
+        self.assertEqual(first.pushed_count, 1)
+        self.assertEqual((await scheduler.storage.get_feed_state("feed"))["since_id"], "12")
+
+        self.raw = []
+        second = await self.run_poll(self.scheduler())
+        self.assertEqual(second.pushed_count, 1)
+        self.assertEqual({guid for guids, _ in self.deliveries for guid in guids},
+                         {"twitter:alice:11", "twitter:alice:12"})
+        self.assertEqual(first.pending_target_count, 2)
+        self.assertEqual(second.pending_target_count, 0)
+        self.assertEqual(second.failed_feed_ids, ["feed"])
+
+    async def test_cursor_does_not_advance_when_enqueue_fails(self):
+        self.fetch("12")
+        scheduler = self.scheduler()
+        await self.establish(scheduler)
+        with mock.patch.object(scheduler._outbox, "enqueue", side_effect=OSError("outbox write failed")):
+            await scheduler._run_job_once_guarded(scheduler.config.jobs[0])
+        self.assertIn("outbox write failed", scheduler.last_results["job"].error_summary)
+        self.assertEqual((await scheduler.storage.get_feed_state("feed"))["since_id"], "10")
+        self.assertEqual(self.deliveries, [])
+
+        result = await self.run_poll(self.scheduler())
+        self.assertEqual(result.pushed_count, 1)
+
+    async def test_last_delivery_time_requires_actual_success_and_survives_restart(self):
+        self.fetch("11")
+        scheduler = self.scheduler()
+        await self.establish(scheduler)
+        first = await self.run_poll(scheduler)
+        self.assertIsNotNone(first.last_delivery_at)
+        self.assertGreaterEqual(first.last_delivery_at, first.started_at)
+
+        self.fetch("12")
+        self.results.append(DispatchResult(skipped_duplicate_count=2, skipped_duplicate_origins=self.origins[:]))
+        second = await self.run_poll(self.scheduler())
+        self.assertEqual(second.pushed_count, 0)
+        self.assertEqual(second.last_delivery_at, first.last_delivery_at)
+
+        self.raw = [{"feed_id": "feed", "status": 304}]
+        self.assertEqual((await self.run_poll(self.scheduler())).last_delivery_at, first.last_delivery_at)
+
+    async def test_confirmed_success_survives_failed_seen_write(self):
+        self.fetch("11")
+        scheduler = self.scheduler()
+        await self.establish(scheduler)
+        one, two = self.origins
+        self.results.append(DispatchResult(success_count=1, success_origins=[one],
+                                           transient_failure_count=1, transient_failure_origins=[two]))
+        with mock.patch.object(scheduler.storage, "mark_seen_many", side_effect=OSError("seen write failed")):
+            await scheduler._run_job_once_guarded(scheduler.config.jobs[0])
+        first = scheduler.last_results["job"]
+        self.assertIn("seen write failed", first.error_summary)
+        self.assertEqual(first.pending_target_count, 1)
+        self.assertIsNotNone(first.last_delivery_at)
+
+        restored = self.scheduler()
+        second = await self.run_poll(restored)
+        self.assertEqual(self.deliveries[-1], (["twitter:alice:11"], [two]))
+        self.assertEqual(second.pending_target_count, 0)
+        self.assertTrue(await restored.storage.has_seen(restored._target_seen_key("job", one, "twitter:alice:11")))
+
+    async def test_retry_restores_current_feed_proxy_without_persisting_original_credentials(self):
+        self.fetch("11")
+        scheduler = self.scheduler()
+        await self.establish(scheduler)
+        old_proxy = "http://user:original-secret@proxy.example:8080"
+        new_proxy = "http://user:replacement-secret@proxy.example:8080"
+        scheduler.config.feeds[0].proxy_url = old_proxy
+        parse = scheduler._parser.parse
+        scheduler._parser.parse = lambda raw, job: [dict(item, proxy_url=old_proxy) for item in parse(raw, job)]
+        self.results.append(DispatchResult(transient_failure_count=2, transient_failure_origins=self.origins[:]))
+        await self.run_poll(scheduler)
+        self.assertEqual(self.delivery_proxies[-1], [old_proxy])
+        path = Path(self.storage_dir) / "delivery_outbox.sqlite3"
+        self.assertNotIn(b"original-secret", path.read_bytes())
+
+        self.raw = []
+        restored = self.scheduler()
+        restored.config.feeds[0].proxy_url = new_proxy
+        await self.run_poll(restored)
+        self.assertEqual(self.delivery_proxies[-1], [new_proxy])
+        self.assertNotIn(b"replacement-secret", path.read_bytes())
+
+    async def test_aggregate_limit_and_partial_success_survive_304_and_restart(self):
+        self.fetch("12", "11")
+        scheduler = self.scheduler(aggregate=True, batch_size=5)
+        await self.establish(scheduler)
+        one, two = self.origins
+        self.results.append(DispatchResult(success_count=1, success_origins=[one],
+                                           transient_failure_count=1, transient_failure_origins=[two]))
+        first = await self.run_poll(scheduler)
+        self.assertEqual(len(self.deliveries[0][0]), 1)
+
+        self.raw = [{"feed_id": "feed", "status": 304}]
+        restored = self.scheduler(aggregate=True, batch_size=5)
+        await self.run_poll(restored)
+        third = await self.run_poll(restored)
+        first_item = self.deliveries[0][0]
+        self.assertEqual([origins for guids, origins in self.deliveries if guids == first_item],
+                         [[one, two], [two]])
+        self.assertEqual(len({guid for guids, _ in self.deliveries for guid in guids}), 2)
+        self.assertEqual(first.pending_target_count, 3)
+        self.assertEqual(third.pending_item_count, 0)
+        self.assertEqual(third.failed_feed_ids, [])
+
+    async def test_permanent_failure_is_terminal_but_temporary_disable_retries(self):
+        self.fetch("11")
+        scheduler = self.scheduler()
+        await self.establish(scheduler)
+        one, two = self.origins
+        self.results.append(DispatchResult(permanent_failure_count=1, permanent_failure_origins=[one],
+                                           skipped_disabled_count=1, skipped_disabled_origins=[two]))
+        first = await self.run_poll(scheduler)
+        second = await self.run_poll(self.scheduler())  # Includes the same item again in the fetch.
+        await self.run_poll(self.scheduler())
+        self.assertEqual(self.deliveries, [(["twitter:alice:11"], [one, two]),
+                                           (["twitter:alice:11"], [two])])
+        self.assertEqual(first.pending_target_count, 1)
+        self.assertEqual(second.pending_target_count, 0)
+
+    async def test_replacement_address_and_new_target_do_not_inherit_queue(self):
+        self.fetch("11")
+        scheduler = self.scheduler()
+        await self.establish(scheduler)
+        self.results.append(DispatchResult(transient_failure_count=2, transient_failure_origins=self.origins[:]))
+        await self.run_poll(scheduler)
+        one, _two = self.origins
+        self.origins[1] = "qq:group:3"
+        self.origins.append("qq:group:4")
+        self.target_ids.append("three")
+        self.enabled.append(True)
+        self.raw = []
+        second = await self.run_poll(self.scheduler())
+        self.assertEqual(self.deliveries[-1], (["twitter:alice:11"], [one]))
+        self.assertEqual(second.pending_target_count, 0)
 
 
 if __name__ == "__main__":

@@ -152,13 +152,13 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.original = _config()
         self.raw = AsyncSavingConfig(self.original, self.root / "config.json", self.events)
         self.storage = FeedStorage(storage_dir=self.root / "storage")
-        original_mark = self.storage.mark_seen
+        original_mark = self.storage.mark_seen_many
 
-        async def mark(key, ttl_seconds=86400):
-            self.events.append("seed:" + key)
-            await original_mark(key, ttl_seconds=ttl_seconds)
+        async def mark(keys, ttl_seconds=86400):
+            self.events.extend("seed:" + key for key in keys)
+            await original_mark(keys, ttl_seconds=ttl_seconds)
 
-        self.storage.mark_seen = AsyncMock(side_effect=mark)
+        self.storage.mark_seen_many = AsyncMock(side_effect=mark)
         self.old = TrackedScheduler(self.original, self.storage, self.events, "old")
         self.new = None
         self.tune = lambda scheduler: None
@@ -193,7 +193,7 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         candidate = copy.deepcopy(self.original)
         candidate["jobs"][0]["target_ids"].append("private")
         await apply_runtime(self.plugin, candidate)
-        marked = [call.args[0] for call in self.storage.mark_seen.await_args_list]
+        marked = [key for call in self.storage.mark_seen_many.await_args_list for key in call.args[0]]
         self.assertEqual(len(marked), 6)
         for i in range(3):
             self.assertIn(self.new._bootstrap_seen_keys(
@@ -219,7 +219,8 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 return fetcher_module.FetchedFeed(feed.id, body, "", "", 200)
             scheduler._fetcher._fetch_single_feed.side_effect = fetch
             scheduler._dispatcher.dispatch = AsyncMock(return_value=types.SimpleNamespace(
-                success_count=1, success_origins=["qq:group:1"], transient_failure_count=0))
+                success_count=1, success_origins=["qq:group:1"], transient_failure_count=0,
+                skipped_duplicate_count=0, permanent_failure_count=0, skipped_disabled_count=0))
 
         self.tune = tune
         await apply_runtime(self.plugin, candidate)
@@ -236,7 +237,7 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.storage.mark_seen(old_key, ttl_seconds=777)
         old_record = copy.deepcopy(await self.storage.get(self.storage._content_key(old_key)))
         self.events.clear()
-        self.storage.mark_seen.reset_mock()
+        self.storage.mark_seen_many.reset_mock()
         await apply_runtime(self.plugin, self.candidate)
         self.assertEqual(self.events[:3], ["fetch:old-feed", "fetch:new-feed", "old:stop"])
         self.assertEqual(self.events[-2:], ["save", "new:start"])
@@ -263,8 +264,8 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         record = await self.storage.get(self.storage._content_key(scoped))
                         self.assertEqual(record["expire_at"] - record["updated_at"], 120)
                 self.assertFalse(await self.storage.has_seen(item["guid"]))
-        self.assertEqual(self.storage.mark_seen.await_count, 24)
-        self.assertTrue(all(call.kwargs["ttl_seconds"] == 120 for call in self.storage.mark_seen.await_args_list))
+        self.assertEqual(sum(len(call.args[0]) for call in self.storage.mark_seen_many.await_args_list), 24)
+        self.assertTrue(all(call.kwargs["ttl_seconds"] == 120 for call in self.storage.mark_seen_many.await_args_list))
 
     async def test_identical_candidate_is_noop_but_still_checks_gui_conflict(self):
         await apply_runtime(self.plugin, copy.deepcopy(self.original))
@@ -324,7 +325,7 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     await apply_runtime(self.plugin, self.candidate)
                 self.assertNotIn("old:stop", self.events)
-                self.assertEqual(self.storage.mark_seen.await_count, 0)
+                self.assertEqual(self.storage.mark_seen_many.await_count, 0)
                 self.assert_restored()
 
     async def test_parser_gets_unlimited_raw_items_for_new_jobs_only(self):
@@ -341,10 +342,10 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         toggle["jobs"][0]["enabled"] = False
         await apply_runtime(self.plugin, toggle)
         self.assertFalse(any(event.startswith("fetch:") for event in self.events))
-        self.storage.mark_seen.assert_not_awaited()
+        self.storage.mark_seen_many.assert_not_awaited()
         self.candidate["jobs"][-1]["dedup_ttl_seconds"] = 0
         await apply_runtime(self.plugin, self.candidate)
-        self.assertTrue(all(call.kwargs["ttl_seconds"] == 3600 for call in self.storage.mark_seen.await_args_list))
+        self.assertTrue(all(call.kwargs["ttl_seconds"] == 3600 for call in self.storage.mark_seen_many.await_args_list))
 
     async def test_valid_empty_feed_is_allowed_but_invalid_xml_is_rejected(self):
         for body in ("", "<rss>", "<html><body>Not a feed</body></html>"):
@@ -361,7 +362,7 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.tune = lambda s: setattr(s._fetcher._fetch_single_feed, "side_effect", lambda feed, **kw:
                                      fetcher_module.FetchedFeed(feed.id, _rss(feed.id, 0), "", "", 200))
         await apply_runtime(self.plugin, self.candidate)
-        self.storage.mark_seen.assert_not_awaited()
+        self.storage.mark_seen_many.assert_not_awaited()
         self.assertTrue(self.new.active)
 
     async def test_save_failure_restores_memory_disk_and_old_scheduler(self):
@@ -385,7 +386,7 @@ class SubscriptionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.storage.is_subscription_initialized("new-job", "qq:private:2", "old-feed"))
 
     async def test_seed_failure_restarts_old_without_persisting_candidate(self):
-        self.storage.mark_seen.side_effect = OSError("seed failed")
+        self.storage.mark_seen_many.side_effect = OSError("seed failed")
         with self.assertRaisesRegex(OSError, "seed failed"):
             await apply_runtime(self.plugin, self.candidate)
         self.assert_restored()

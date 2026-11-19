@@ -1,10 +1,17 @@
+import asyncio
 import hashlib
 import json
+import os
 import shutil
+import tempfile
+import threading
 import time
+from collections.abc import Iterable
+from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 try:
@@ -30,6 +37,7 @@ class FeedStorage:
     DISPATCH_GUARD_PREFIX = "dispatch_guard:"
     SEMANTIC_DEDUP_SECTION = "semantic_dedup"
     DAILY_DIGEST_RETENTION_SECONDS = 30 * 24 * 60 * 60
+    _fallback_lock = threading.Lock()
 
     def __init__(
         self,
@@ -45,140 +53,179 @@ class FeedStorage:
         self._get_kv_data = get_kv_data
         self._put_kv_data = put_kv_data
         self._delete_kv_data = delete_kv_data
-        self._fallback_store: dict[str, str] = {}
-        self._seen_ids: set[str] = set()
-        self._dedup_version: int | None = None
         cache_root = Path(storage_dir) if storage_dir is not None else self.plugin_cache_dir()
         self._state_path = cache_root / "state.json"
-        self._migrate_legacy_state(
-            legacy_plugin_names=legacy_plugin_names or [],
-            legacy_storage_dirs=[Path(path) for path in legacy_storage_dirs or []],
-            explicit_storage_dir=storage_dir is not None,
-        )
-        self._state_loaded = False
-        self._disk_state: dict[str, Any] = {"kv": {}}
+        candidates = []
+        if not self._state_path.exists():
+            candidates.extend(Path(path) for path in legacy_storage_dirs or [])
+            if storage_dir is None:
+                for legacy_name in legacy_plugin_names or []:
+                    legacy_name = str(legacy_name or "").strip()
+                    if not legacy_name or legacy_name == self._plugin_name:
+                        continue
+                    candidates.append(self._resolve_plugin_cache_dir(legacy_name))
+        self._legacy_state_paths = [directory / "state.json" for directory in candidates]
+        self._snapshot_id: tuple[int, ...] | None = None
+        self._snapshot: dict[str, Any] = {"kv": {}}
 
-    def _migrate_legacy_state(
-        self,
-        *,
-        legacy_plugin_names: list[str],
-        legacy_storage_dirs: list[Path],
-        explicit_storage_dir: bool,
-    ) -> None:
-        if self._state_path.exists():
+    async def _migrate_legacy_state(self) -> None:
+        if not self._legacy_state_paths:
             return
-
-        candidates = list(legacy_storage_dirs)
-        if not explicit_storage_dir:
-            for legacy_name in legacy_plugin_names:
-                legacy_name = str(legacy_name or "").strip()
-                if not legacy_name or legacy_name == self._plugin_name:
+        if not self._state_path.exists():
+            for legacy_state in self._legacy_state_paths:
+                if not legacy_state.exists():
                     continue
-                candidates.append(self._resolve_plugin_cache_dir(legacy_name))
-
-        for legacy_dir in candidates:
-            legacy_state = Path(legacy_dir) / "state.json"
-            if not legacy_state.exists():
-                continue
-            try:
-                self._state_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(legacy_state, self._state_path)
-                return
-            except OSError:
-                continue
+                await self._replace_state_file(lambda path: shutil.copy2(legacy_state, path))
+                break
+        self._legacy_state_paths = []
 
     async def get(self, key: str, default: Any = None) -> Any:
         """封装 KV 读取。"""
-        await self._ensure_state_loaded()
-        kv_store = self._disk_state.setdefault("kv", {})
-        if key in kv_store:
-            return kv_store[key]
-
-        raw = await self._read_raw_from_backend(key)
-        decoded = self._decode_value(raw)
-        if decoded is None:
+        kv = (await self._read_state())["kv"]
+        if key in kv:
+            return deepcopy(kv[key])
+        if await self._kv_value(kv, key) is None:
             return default
-        kv_store[key] = decoded
-        self._flush_state()
-        return decoded
+        async with self._locked_state() as state:
+            kv = state["kv"]
+            if key in kv:
+                return kv[key]
+            # A concurrent writer may have deleted the backend value since the probe.
+            value = await self._kv_value(kv, key)
+            if value is None:
+                return default
+            await self._commit_kv(state, {key: value}, mirror=False)
+            return deepcopy(value)
 
     async def put(self, key: str, value: Any) -> None:
         """封装 KV 写入。"""
-        await self._ensure_state_loaded()
-        self._disk_state.setdefault("kv", {})[key] = value
-        self._flush_state()
-
-        encoded = json.dumps(value, ensure_ascii=False)
-        if self._put_kv_data is None:
-            self._fallback_store[key] = encoded
-            return
-        await self._put_kv_data(key, encoded)
+        async with self._locked_state() as state:
+            await self._commit_kv(state, {key: deepcopy(value)})
 
     async def delete(self, key: str) -> None:
         """封装 KV 删除。"""
-        await self._ensure_state_loaded()
-        self._disk_state.setdefault("kv", {}).pop(key, None)
-        self._flush_state()
+        async with self._locked_state() as state:
+            await self._commit_kv(state, deletes=(key,))
 
-        if self._delete_kv_data is None:
-            self._fallback_store.pop(key, None)
-            return
-        await self._delete_kv_data(key)
+    async def _kv_value(self, kv: dict[str, Any], key: str, default: Any = None) -> Any:
+        if key in kv:
+            return kv[key]
+        value = self._decode_value(await self._read_raw_from_backend(key))
+        return default if value is None else deepcopy(value)
+
+    async def _commit_kv(
+        self,
+        state: dict[str, Any],
+        updates: dict[str, Any] | None = None,
+        *,
+        deletes: Iterable[str] = (),
+        mirror: bool = True,
+    ) -> None:
+        kv = state["kv"]
+        updates = updates or {}
+        deletes = tuple(deletes)
+        changed = bool(updates)
+        kv.update(updates)
+        for key in deletes:
+            if key in kv:
+                del kv[key]
+                changed = True
+        if changed:
+            await self._write_disk_state(state)
+        if mirror:
+            if self._delete_kv_data is not None:
+                for key in deletes:
+                    await self._delete_kv_data(key)
+            if self._put_kv_data is not None:
+                for key, value in updates.items():
+                    await self._put_kv_data(key, json.dumps(value, ensure_ascii=False))
 
     async def has_seen(self, item_id: str, ttl_seconds: int | None = None) -> bool:
-        await self._get_dedup_version()
-
-        # NOTE:
-        # _seen_ids is only an in-memory acceleration set and does not carry TTL.
-        # We still need to validate persisted record expiration to avoid permanent
-        # false positives after long-running processes.
-        cached = item_id in self._seen_ids
-        record = await self.get(self._content_key(item_id), default=None)
+        kv = (await self._read_state())["kv"]
+        raw_version = await self._kv_value(kv, self.DEDUP_VERSION_KEY)
+        key, record, _ = await self._find_seen_record(kv, item_id, raw_version)
         if not record:
-            record = await self._read_legacy_content_record(item_id)
-        if not record:
-            if cached:
-                self._seen_ids.discard(item_id)
             return False
-
-        now = int(time.time())
         expire_at = int(record.get("expire_at", 0))
-        effective_expire_at = self._effective_expire_at(record, ttl_seconds)
-        if expire_at and expire_at < now:
-            if effective_expire_at and effective_expire_at >= now:
-                record["expire_at"] = effective_expire_at
-                await self.put(self._content_key(item_id), record)
-                self._seen_ids.add(item_id)
-                return True
-            await self.delete(self._content_key(item_id))
-            self._seen_ids.discard(item_id)
-            return False
+        if kv.get(key) and (not expire_at or expire_at >= int(time.time())) and (
+            self._effective_expire_at(record, ttl_seconds) <= expire_at
+        ):
+            return True
 
-        if effective_expire_at and effective_expire_at > expire_at:
-            record["expire_at"] = effective_expire_at
-            await self.put(self._content_key(item_id), record)
+        async with self._locked_state() as state:
+            kv = state["kv"]
+            raw_version = await self._kv_value(kv, self.DEDUP_VERSION_KEY)
+            key, record, from_legacy = await self._find_seen_record(kv, item_id, raw_version)
+            if not record:
+                return False
+            updates = {}
+            if raw_version is not None and self.DEDUP_VERSION_KEY not in kv:
+                updates[self.DEDUP_VERSION_KEY] = raw_version
+            now = int(time.time())
+            expire_at = int(record.get("expire_at", 0))
+            effective_expire_at = self._effective_expire_at(record, ttl_seconds)
+            if expire_at and expire_at < now and effective_expire_at < now:
+                index = await self._kv_value(kv, self.CONTENT_INDEX_KEY)
+                if isinstance(index, list) and item_id in index:
+                    updates[self.CONTENT_INDEX_KEY] = [entry for entry in index if entry != item_id]
+                await self._commit_kv(state, updates, deletes=(key,))
+                return False
 
-        self._seen_ids.add(item_id)
-        return True
+            if effective_expire_at > expire_at:
+                updates[key] = dict(record, expire_at=effective_expire_at)
+                await self._commit_kv(state, updates)
+            elif key not in kv:
+                updates[key] = record
+                await self._commit_kv(state, updates, mirror=from_legacy)
+            else:
+                await self._commit_kv(state, updates, mirror=False)
+            return True
+
+    async def _find_seen_record(
+        self, kv: dict[str, Any], item_id: str, raw_version: Any
+    ) -> tuple[str, Any, bool]:
+        version = self._parse_dedup_version(raw_version)
+        key = self._content_key(item_id, version)
+        record = await self._kv_value(kv, key)
+        if record:
+            return key, record, False
+        for legacy_key in self._legacy_content_keys(item_id, version):
+            record = await self._kv_value(kv, legacy_key)
+            if record:
+                return key, record, True
+        return key, None, False
 
     async def mark_seen(self, item_id: str, ttl_seconds: int = 86400) -> None:
-        await self._get_dedup_version()
-        self._seen_ids.add(item_id)
-        expire_at = int(time.time()) + max(ttl_seconds, 0)
-        await self.put(
-            self._content_key(item_id),
-            {
-                "id": item_id,
-                "expire_at": expire_at,
-                "updated_at": int(time.time()),
-            },
-        )
-        seen_index = await self.get(self.CONTENT_INDEX_KEY, default=[])
-        if not isinstance(seen_index, list):
-            seen_index = []
-        if item_id not in seen_index:
-            seen_index.append(item_id)
-            await self.put(self.CONTENT_INDEX_KEY, seen_index)
+        await self.mark_seen_many((item_id,), ttl_seconds)
+
+    async def mark_seen_many(self, keys: Iterable[str], ttl_seconds: int = 86400) -> None:
+        """在同一份状态中确认全部去重键并更新索引。"""
+        item_ids = list(dict.fromkeys(keys))
+        if not item_ids:
+            return
+        async with self._locked_state() as state:
+            kv = state["kv"]
+            raw_version = await self._kv_value(kv, self.DEDUP_VERSION_KEY, 0)
+            version = self._parse_dedup_version(raw_version)
+            index = await self._kv_value(kv, self.CONTENT_INDEX_KEY, [])
+            if not isinstance(index, list):
+                index = []
+            indexed = {entry for entry in index if isinstance(entry, str)}
+            now = int(time.time())
+            updates: dict[str, Any] = {
+                self._content_key(item_id, version): {
+                    "id": item_id,
+                    "expire_at": now + max(ttl_seconds, 0),
+                    "updated_at": now,
+                }
+                for item_id in item_ids
+            }
+            new_ids = [item_id for item_id in item_ids if item_id not in indexed]
+            if new_ids or self.CONTENT_INDEX_KEY not in kv:
+                updates[self.CONTENT_INDEX_KEY] = index + new_ids
+            if self.DEDUP_VERSION_KEY not in kv:
+                updates[self.DEDUP_VERSION_KEY] = raw_version
+            await self._commit_kv(state, updates)
 
     async def clear_seen(self) -> int:
         """清空已推送去重记录，返回删除数量。
@@ -186,23 +233,20 @@ class FeedStorage:
         说明：在 KV 不支持按前缀枚举键时，采用去重版本号自增实现“逻辑清空”，
         旧版本键即使存在也不会再命中。
         """
-        await self._get_dedup_version()
-        seen_index = await self.get(self.CONTENT_INDEX_KEY, default=[])
-        if not isinstance(seen_index, list):
-            seen_index = []
-
-        deleted = 0
-        for item_id in seen_index:
-            await self.delete(self._content_key(str(item_id)))
-            deleted += 1
-
-        await self.delete(self.CONTENT_INDEX_KEY)
-        self._seen_ids.clear()
-        version = await self._get_dedup_version()
-        self._dedup_version = version + 1
-        await self.put(self.DEDUP_VERSION_KEY, self._dedup_version)
-        self._clear_semantic_dedup_state()
-        return deleted
+        async with self._locked_state() as state:
+            kv = state["kv"]
+            version = self._parse_dedup_version(await self._kv_value(kv, self.DEDUP_VERSION_KEY))
+            index = await self._kv_value(kv, self.CONTENT_INDEX_KEY, [])
+            if not isinstance(index, list):
+                index = []
+            deletes = {self.CONTENT_INDEX_KEY: None}
+            for raw_id in index:
+                item_id = str(raw_id)
+                deletes[self._content_key(item_id, version)] = None
+                deletes.update(dict.fromkeys(self._legacy_content_keys(item_id, version)))
+            state.pop(self.SEMANTIC_DEDUP_SECTION, None)
+            await self._commit_kv(state, {self.DEDUP_VERSION_KEY: version + 1}, deletes=deletes)
+            return len(index)
 
     async def archive_digest_items(
         self,
@@ -218,7 +262,8 @@ class FeedStorage:
             else self.DAILY_DIGEST_RETENTION_SECONDS
         )
 
-        def callback(state: dict[str, Any], now: int):
+        async with self._locked_state() as state:
+            now = int(time.time())
             section = self._daily_digest_section(state)
             archive = section.setdefault("archive", {})
             self._prune_digest_archive(archive, now, effective_retention)
@@ -231,10 +276,8 @@ class FeedStorage:
                 archive[record["archive_key"]] = record
                 updated += 1
 
-            self._write_disk_state(state)
+            await self._write_disk_state(state)
             return updated
-
-        return int(self._with_state_lock(callback))
 
     async def list_digest_items(
         self,
@@ -255,54 +298,34 @@ class FeedStorage:
             else self.DAILY_DIGEST_RETENTION_SECONDS
         )
 
-        def callback(state: dict[str, Any], now: int):
-            section = self._daily_digest_section(state)
-            archive = section.setdefault("archive", {})
-            self._prune_digest_archive(archive, now, effective_retention)
-
-            matched: list[dict[str, Any]] = []
-            for record in archive.values():
-                if not isinstance(record, dict):
-                    continue
-                feed_id = str(record.get("feed_id", "")).strip()
-                if feed_id not in selected_feed_ids:
-                    continue
-                record_ts = self._record_window_timestamp(record)
-                if record_ts < window_start_ts or record_ts > window_end_ts:
-                    continue
-                matched.append(dict(record))
-
-            matched.sort(
-                key=lambda item: (
-                    int(self._record_window_timestamp(item)),
-                    int(item.get("collected_at", 0) or 0),
-                ),
-                reverse=True,
-            )
-            self._write_disk_state(state)
-            return matched[:limit]
-
-        return list(self._with_state_lock(callback) or [])
+        archive = self._nested_mapping(await self._read_state(), "daily_digest", "archive")
+        cutoff = int(time.time()) - max(effective_retention, 1)
+        matched: list[tuple[int, dict[str, Any]]] = []
+        for record in archive.values():
+            if self._digest_record_expired(record, cutoff):
+                continue
+            feed_id = str(record.get("feed_id", "")).strip()
+            if feed_id not in selected_feed_ids:
+                continue
+            record_ts = self._record_window_timestamp(record)
+            if window_start_ts <= record_ts <= window_end_ts:
+                matched.append((record_ts, record))
+        matched.sort(key=lambda item: (item[0], int(item[1].get("collected_at", 0) or 0)), reverse=True)
+        return [deepcopy(record) for _, record in matched[:limit]]
 
     async def get_daily_digest_status(self, digest_id: str) -> dict[str, Any]:
         digest_key = str(digest_id or "").strip()
         if not digest_key:
             return {}
 
-        def callback(state: dict[str, Any], now: int):
-            section = self._daily_digest_section(state)
-            status = section.setdefault("status", {})
-            record = status.get(digest_key)
-            return dict(record) if isinstance(record, dict) else {}
-
-        return dict(self._with_state_lock(callback) or {})
+        return deepcopy(self._nested_mapping(await self._read_state(), "daily_digest", "status", digest_key))
 
     async def update_daily_digest_status(self, digest_id: str, **fields: Any) -> dict[str, Any]:
         digest_key = str(digest_id or "").strip()
         if not digest_key:
             return {}
 
-        def callback(state: dict[str, Any], now: int):
+        async with self._locked_state() as state:
             section = self._daily_digest_section(state)
             status = section.setdefault("status", {})
             record = status.get(digest_key)
@@ -311,13 +334,11 @@ class FeedStorage:
             for key, value in fields.items():
                 if value is None:
                     continue
-                record[key] = value
-            record["updated_at"] = now
+                record[key] = deepcopy(value)
+            record["updated_at"] = int(time.time())
             status[digest_key] = record
-            self._write_disk_state(state)
-            return dict(record)
-
-        return dict(self._with_state_lock(callback) or {})
+            await self._write_disk_state(state)
+            return deepcopy(record)
 
     async def put_semantic_dedup_record(
         self,
@@ -333,7 +354,8 @@ class FeedStorage:
 
         ttl = max(int(ttl_seconds), 1)
 
-        def callback(state: dict[str, Any], now: int):
+        async with self._locked_state() as state:
+            now = int(time.time())
             job_section = self._semantic_job_section(state, job_key)
             records = job_section.setdefault("records", {})
             self._prune_semantic_records(records, now, ttl)
@@ -361,10 +383,8 @@ class FeedStorage:
                 "duplicate_count": int(existing.get("duplicate_count", 0)) if isinstance(existing, dict) else 0,
             }
             records[record_id] = record
-            self._write_disk_state(state)
-            return dict(record)
-
-        return dict(self._with_state_lock(callback) or {})
+            await self._write_disk_state(state)
+            return deepcopy(record)
 
     async def list_semantic_dedup_records(
         self,
@@ -379,22 +399,22 @@ class FeedStorage:
 
         ttl = max(int(ttl_seconds), 1)
 
-        def callback(state: dict[str, Any], now: int):
-            job_section = self._semantic_job_section(state, job_key)
-            records = job_section.setdefault("records", {})
-            self._prune_semantic_records(records, now, ttl)
-            matched = [dict(record) for record in records.values() if isinstance(record, dict)]
-            matched.sort(
-                key=lambda record: (
-                    int(record.get("updated_at", 0) or 0),
-                    int(record.get("created_at", 0) or 0),
-                ),
-                reverse=True,
-            )
-            self._write_disk_state(state)
-            return matched[:limit]
-
-        return list(self._with_state_lock(callback) or [])
+        records = self._nested_mapping(
+            await self._read_state(), self.SEMANTIC_DEDUP_SECTION, "jobs", job_key, "records"
+        )
+        now = int(time.time())
+        matched = [
+            record for record in records.values()
+            if not self._semantic_record_expired(record, now, now - ttl)
+        ]
+        matched.sort(
+            key=lambda record: (
+                int(record.get("updated_at", 0) or 0),
+                int(record.get("created_at", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return deepcopy(matched[:limit])
 
     async def touch_semantic_dedup_record(
         self,
@@ -406,37 +426,49 @@ class FeedStorage:
         if not job_key or not record_key:
             return {}
 
-        def callback(state: dict[str, Any], now: int):
+        async with self._locked_state() as state:
             job_section = self._semantic_job_section(state, job_key)
             records = job_section.setdefault("records", {})
             record = records.get(record_key)
             if not isinstance(record, dict):
                 return {}
-            record["updated_at"] = now
+            record["updated_at"] = int(time.time())
             record["duplicate_count"] = int(record.get("duplicate_count", 0) or 0) + 1
-            self._write_disk_state(state)
-            return dict(record)
-
-        return dict(self._with_state_lock(callback) or {})
+            await self._write_disk_state(state)
+            return deepcopy(record)
 
     async def claim_dispatch(self, fingerprint: str, ttl_seconds: int = 120) -> bool:
         """发送前占位，避免并发实例重复发送同一条消息。"""
+        return await self.claim_dispatch_status(fingerprint, ttl_seconds) == "claimed"
+
+    async def claim_dispatch_status(
+        self, fingerprint: str, ttl_seconds: int = 120
+    ) -> Literal["claimed", "pending", "sent"]:
+        """原子领取发送权，或返回仍有效的占位状态。"""
         key = self._dispatch_guard_key(fingerprint)
         if not key:
-            return True
-        return bool(
-            self._update_dispatch_guard(
-                key,
-                action="claim",
-                ttl_seconds=max(int(ttl_seconds), 1),
-            )
-        )
+            return "claimed"
+        ttl = max(int(ttl_seconds), 1)
+        async with self._locked_state() as state:
+            now = int(time.time())
+            kv = state["kv"]
+            record = kv.get(key)
+            if self._is_guard_active(record, now):
+                return "sent" if record.get("state") == "sent" else "pending"
+
+            kv[key] = {
+                "state": "pending",
+                "expire_at": now + ttl,
+                "updated_at": now,
+            }
+            await self._write_disk_state(state)
+            return "claimed"
 
     async def confirm_dispatch(self, fingerprint: str, ttl_seconds: int = 86400) -> None:
         key = self._dispatch_guard_key(fingerprint)
         if not key:
             return
-        self._update_dispatch_guard(
+        await self._update_dispatch_guard(
             key,
             action="confirm",
             ttl_seconds=max(int(ttl_seconds), 1),
@@ -446,17 +478,7 @@ class FeedStorage:
         key = self._dispatch_guard_key(fingerprint)
         if not key:
             return
-        self._update_dispatch_guard(key, action="release")
-
-    async def _get_dedup_version(self) -> int:
-        if self._dedup_version is not None:
-            return self._dedup_version
-        raw = await self.get(self.DEDUP_VERSION_KEY, default=0)
-        try:
-            self._dedup_version = int(raw)
-        except Exception:
-            self._dedup_version = 0
-        return self._dedup_version
+        await self._update_dispatch_guard(key, action="release")
 
     async def get_feed_state(self, feed_id: str) -> dict[str, Any]:
         return await self.get(self._feed_state_key(feed_id), default={})
@@ -469,10 +491,16 @@ class FeedStorage:
     async def initialize_subscription_registry(self, scopes: list[tuple[str, str, str]]) -> None:
         # Legacy state cannot identify newly added subscriptions. Adopt the first
         # configuration once, without consuming the existing jobs' next poll.
-        if await self.get(self.SUBSCRIPTION_REGISTRY_KEY) is None:
-            await self.put(self.SUBSCRIPTION_REGISTRY_KEY, {
-                self._subscription_scope(*scope): True for scope in scopes
-            })
+        async with self._locked_state() as state:
+            kv = state["kv"]
+            key = self.SUBSCRIPTION_REGISTRY_KEY
+            adopted = await self._kv_value(kv, key)
+            if adopted is None:
+                await self._commit_kv(state, {key: {
+                    self._subscription_scope(*scope): True for scope in scopes
+                }})
+            elif key not in kv:
+                await self._commit_kv(state, {key: adopted}, mirror=False)
 
     async def is_subscription_initialized(self, job_id: str, origin: str, feed_id: str) -> bool:
         scope = self._subscription_scope(job_id, origin, feed_id)
@@ -497,19 +525,21 @@ class FeedStorage:
         bootstrap_done: bool | None = None,
         since_id: str | None = None,
     ) -> dict[str, Any]:
-        state = await self.get_feed_state(feed_id)
-        if etag is not None:
-            state["etag"] = etag
-        if last_modified is not None:
-            state["last_modified"] = last_modified
-        if last_success_time is not None:
-            state["last_success_time"] = last_success_time
-        if bootstrap_done is not None:
-            state["bootstrap_done"] = bool(bootstrap_done)
-        if since_id is not None:
-            state["since_id"] = str(since_id or "").strip()
-        await self.put(self._feed_state_key(feed_id), state)
-        return state
+        key = self._feed_state_key(feed_id)
+        async with self._locked_state() as state:
+            feed_state = dict(await self._kv_value(state["kv"], key, {}))
+            if etag is not None:
+                feed_state["etag"] = etag
+            if last_modified is not None:
+                feed_state["last_modified"] = last_modified
+            if last_success_time is not None:
+                feed_state["last_success_time"] = last_success_time
+            if bootstrap_done is not None:
+                feed_state["bootstrap_done"] = bool(bootstrap_done)
+            if since_id is not None:
+                feed_state["since_id"] = str(since_id or "").strip()
+            await self._commit_kv(state, {key: feed_state})
+            return deepcopy(feed_state)
 
     def build_dedup_key(self, item: dict[str, Any]) -> str:
         """优先使用 guid/id，其次使用 link 哈希。"""
@@ -566,27 +596,59 @@ class FeedStorage:
                 pass
         return Path("data") / "plugin_data" / plugin_name
 
-    async def _ensure_state_loaded(self) -> None:
-        if self._state_loaded:
-            return
-        self._state_loaded = True
+    async def _write_disk_state(self, state: dict[str, Any]) -> None:
+        def write(path: Path) -> None:
+            with path.open("w", encoding="utf-8") as fp:
+                json.dump(state, fp, ensure_ascii=False, sort_keys=True)
+
+        # The locked transaction owns this object until the worker exits.
+        self._snapshot_id = await self._replace_state_file(write)
+        self._snapshot = state
+
+    async def _replace_state_file(self, write: Callable[[Path], Any]) -> tuple[int, ...] | None:
+        worker = asyncio.get_running_loop().run_in_executor(None, self._replace_state_file_sync, write)
         try:
-            if self._state_path.exists():
-                with self._state_path.open("r", encoding="utf-8") as fp:
-                    loaded = json.load(fp)
-                if isinstance(loaded, dict):
-                    self._disk_state = loaded
-        except (OSError, json.JSONDecodeError):
-            self._disk_state = {"kv": {}}
-        self._disk_state.setdefault("kv", {})
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError as cancelled:
+            # A cancelled caller must not release state.lock while the worker can
+            # still replace the file, even if cancellation is requested again.
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                worker.result()
+            except Exception as error:
+                raise cancelled from error
+            raise
 
-    def _flush_state(self) -> None:
-        self._write_disk_state(self._disk_state)
+    def _replace_state_file_sync(self, write: Callable[[Path], Any]) -> tuple[int, ...] | None:
+        fd, name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=self._state_path.parent)
+        os.close(fd)
+        temporary = Path(name)
+        try:
+            write(temporary)
+            with temporary.open("rb") as fp:
+                os.fsync(fp.fileno())
+            os.replace(temporary, self._state_path)
+            try:
+                return self._file_identity(self._state_path.stat())
+            except OSError:
+                return None
+        finally:
+            temporary.unlink(missing_ok=True)
 
-    def _write_disk_state(self, state: dict[str, Any]) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._state_path.open("w", encoding="utf-8") as fp:
-            json.dump(state, fp, ensure_ascii=False, sort_keys=True)
+    @staticmethod
+    def _nested_mapping(state: dict[str, Any], *keys: str) -> dict[str, Any]:
+        value: Any = state
+        for key in keys:
+            if not isinstance(value, dict):
+                return {}
+            value = value.get(key)
+        return value if isinstance(value, dict) else {}
 
     @staticmethod
     def _daily_digest_section(state: dict[str, Any]) -> dict[str, Any]:
@@ -597,14 +659,6 @@ class FeedStorage:
         section.setdefault("archive", {})
         section.setdefault("status", {})
         return section
-
-    def _clear_semantic_dedup_state(self) -> None:
-        def callback(state: dict[str, Any], now: int):
-            state.pop(self.SEMANTIC_DEDUP_SECTION, None)
-            self._write_disk_state(state)
-            return None
-
-        self._with_state_lock(callback)
 
     @classmethod
     def _semantic_dedup_section(cls, state: dict[str, Any]) -> dict[str, Any]:
@@ -629,22 +683,23 @@ class FeedStorage:
         job_section.setdefault("records", {})
         return job_section
 
-    @staticmethod
-    def _prune_semantic_records(records: dict[str, Any], now: int, ttl_seconds: int) -> None:
+    @classmethod
+    def _prune_semantic_records(cls, records: dict[str, Any], now: int, ttl_seconds: int) -> None:
         cutoff = now - max(int(ttl_seconds), 1)
-        expired_keys = []
-        for key, record in records.items():
-            if not isinstance(record, dict):
-                expired_keys.append(key)
-                continue
-            expire_at = int(record.get("expires_at", 0) or 0)
-            created_at = int(record.get("created_at", 0) or 0)
-            if expire_at and expire_at < now:
-                expired_keys.append(key)
-            elif not expire_at and created_at and created_at < cutoff:
-                expired_keys.append(key)
+        expired_keys = [
+            key for key, record in records.items()
+            if cls._semantic_record_expired(record, now, cutoff)
+        ]
         for key in expired_keys:
-            records.pop(key, None)
+            del records[key]
+
+    @staticmethod
+    def _semantic_record_expired(record: Any, now: int, cutoff: int) -> bool:
+        if not isinstance(record, dict):
+            return True
+        expire_at = int(record.get("expires_at", 0) or 0)
+        created_at = int(record.get("created_at", 0) or 0)
+        return expire_at < now if expire_at else bool(created_at and created_at < cutoff)
 
     def _semantic_record_id(self, item: dict[str, Any], seen_keys: list[str]) -> str:
         seed = next((str(key).strip() for key in seen_keys if str(key).strip()), "")
@@ -698,10 +753,14 @@ class FeedStorage:
         expired_keys = [
             key
             for key, record in archive.items()
-            if not isinstance(record, dict) or int(record.get("collected_at", 0) or 0) < cutoff
+            if self._digest_record_expired(record, cutoff)
         ]
         for key in expired_keys:
             archive.pop(key, None)
+
+    @staticmethod
+    def _digest_record_expired(record: Any, cutoff: int) -> bool:
+        return not isinstance(record, dict) or int(record.get("collected_at", 0) or 0) < cutoff
 
     @classmethod
     def _record_window_timestamp(cls, record: dict[str, Any]) -> int:
@@ -725,7 +784,7 @@ class FeedStorage:
 
     async def _read_raw_from_backend(self, key: str) -> Any:
         if self._get_kv_data is None:
-            return self._fallback_store.get(key)
+            return None
         try:
             # AstrBot PluginKVStoreMixin.get_kv_data(key, default)
             return await self._get_kv_data(key, None)
@@ -746,26 +805,28 @@ class FeedStorage:
             return self._decode_value(decoded)
         return raw
 
-    async def _read_legacy_content_record(self, item_id: str) -> dict[str, Any] | None:
+    def _legacy_content_keys(self, item_id: str, version: int) -> list[str]:
         legacy_keys = [f"{self.CONTENT_KEY_PREFIX}{item_id}"]
-        if self._dedup_version not in (None, 0):
-            legacy_keys.append(f"{self.CONTENT_KEY_PREFIX}v0:{item_id}")
-
-        for legacy_key in legacy_keys:
-            record = await self.get(legacy_key, default=None)
-            if record:
-                await self.put(self._content_key(item_id), record)
-                return record
-        return None
+        if version != 0:
+            legacy_keys.append(self._content_key(item_id, 0))
+        return legacy_keys
 
     @classmethod
     def _feed_state_key(cls, feed_id: str) -> str:
         return f"{cls.FEED_STATE_PREFIX}{feed_id}"
 
-    def _content_key(self, item_id: str) -> str:
-        # 仅依赖内存缓存；首次使用前由 _get_dedup_version 初始化。
-        version = self._dedup_version if self._dedup_version is not None else 0
+    def _content_key(self, item_id: str, version: int | None = None) -> str:
+        if version is None:
+            kv = self._load_disk_state_from_file(snapshot=True)["kv"]
+            version = self._parse_dedup_version(kv.get(self.DEDUP_VERSION_KEY))
         return f"{self.CONTENT_KEY_PREFIX}v{version}:{item_id}"
+
+    @staticmethod
+    def _parse_dedup_version(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
 
     @staticmethod
     def _effective_expire_at(record: dict[str, Any], ttl_seconds: int | None) -> int:
@@ -806,56 +867,75 @@ class FeedStorage:
         expire_at = int(record.get("expire_at", 0) or 0)
         return expire_at <= 0 or expire_at >= now
 
-    def _load_disk_state_from_file(self) -> dict[str, Any]:
-        try:
-            if self._state_path.exists():
-                with self._state_path.open("r", encoding="utf-8") as fp:
-                    loaded = json.load(fp)
-                if isinstance(loaded, dict):
-                    loaded.setdefault("kv", {})
-                    return loaded
-        except (OSError, json.JSONDecodeError):
-            pass
-        return {"kv": {}}
+    @staticmethod
+    def _file_identity(stat: os.stat_result) -> tuple[int, ...]:
+        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
 
-    def _with_state_lock(self, callback: Callable[[dict[str, Any], int], Any]) -> Any:
+    def _load_disk_state_from_file(self, *, snapshot: bool = False) -> dict[str, Any]:
+        try:
+            if snapshot and self._file_identity(self._state_path.stat()) == self._snapshot_id:
+                return self._snapshot
+            with self._state_path.open("r", encoding="utf-8") as fp:
+                loaded = json.load(fp)
+                identity = self._file_identity(os.fstat(fp.fileno()))
+        except FileNotFoundError:
+            return {"kv": {}}
+        if not isinstance(loaded, dict) or not isinstance(loaded.setdefault("kv", {}), dict):
+            raise ValueError(f"Invalid state structure: {self._state_path}")
+        if snapshot:
+            self._snapshot_id = identity
+            self._snapshot = loaded
+        return loaded
+
+    async def _read_state(self) -> dict[str, Any]:
+        if self._legacy_state_paths:
+            async with self._state_lock():
+                await self._migrate_legacy_state()
+        return self._load_disk_state_from_file(snapshot=True)
+
+    @asynccontextmanager
+    async def _state_lock(self):
         lock_path = self._state_path.parent / "state.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as lock_fp:
-            if fcntl is not None:
-                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+            # KV callbacks can await while holding this lock. Wait without blocking
+            # the event loop, including when another instance lives on that loop.
+            while True:
+                if fcntl is None:
+                    if self._fallback_lock.acquire(blocking=False):
+                        break
+                else:
+                    try:
+                        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        pass
+                await asyncio.sleep(0.01)
             try:
-                state = self._load_disk_state_from_file()
-                now = int(time.time())
-                result = callback(state, now)
-                self._disk_state = state
-                self._state_loaded = True
-                return result
+                yield
             finally:
-                if fcntl is not None:
+                if fcntl is None:
+                    self._fallback_lock.release()
+                else:
                     fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
-    def _update_dispatch_guard(
+    @asynccontextmanager
+    async def _locked_state(self):
+        async with self._state_lock():
+            await self._migrate_legacy_state()
+            yield self._load_disk_state_from_file()
+
+    async def _update_dispatch_guard(
         self,
         key: str,
         *,
         action: str,
         ttl_seconds: int = 0,
-    ) -> bool | None:
-        def callback(state: dict[str, Any], now: int):
-            kv = state.setdefault("kv", {})
+    ) -> None:
+        async with self._locked_state() as state:
+            now = int(time.time())
+            kv = state["kv"]
             record = kv.get(key)
-
-            if action == "claim":
-                if self._is_guard_active(record, now):
-                    return False
-                kv[key] = {
-                    "state": "pending",
-                    "expire_at": now + max(ttl_seconds, 1),
-                    "updated_at": now,
-                }
-                self._write_disk_state(state)
-                return True
 
             if action == "confirm":
                 kv[key] = {
@@ -863,15 +943,13 @@ class FeedStorage:
                     "expire_at": now + max(ttl_seconds, 1),
                     "updated_at": now,
                 }
-                self._write_disk_state(state)
+                await self._write_disk_state(state)
                 return None
 
             if action == "release":
                 if isinstance(record, dict) and record.get("state") == "pending":
                     kv.pop(key, None)
-                    self._write_disk_state(state)
+                    await self._write_disk_state(state)
                 return None
 
             raise ValueError(f"unknown dispatch guard action: {action}")
-
-        return self._with_state_lock(callback)

@@ -527,20 +527,30 @@ class FeedDispatcher:
             return ""
         return digest.hexdigest()
 
-    async def _claim_dispatch(self, fingerprint: str) -> bool:
-        claim = getattr(self._storage, "claim_dispatch", None)
-        if not callable(claim):
-            return True
+    async def _claim_for_origin(self, fingerprint: str, origin: str, result: DispatchResult) -> bool:
+        status_func = getattr(self._storage, "claim_dispatch_status", None)
+        legacy_func = getattr(self._storage, "claim_dispatch", None)
         try:
-            return bool(
-                await claim(
-                    fingerprint,
-                    ttl_seconds=self._PENDING_DISPATCH_TTL_SECONDS,
-                )
-            )
+            if callable(status_func):
+                status = await status_func(fingerprint, ttl_seconds=self._PENDING_DISPATCH_TTL_SECONDS)
+            elif callable(legacy_func):
+                status = "claimed" if await legacy_func(
+                    fingerprint, ttl_seconds=self._PENDING_DISPATCH_TTL_SECONDS,
+                ) else "sent"
+            else:
+                return True
         except Exception as exc:
             logger.warning("claim dispatch fingerprint failed: %s", exc)
+            status = "pending"
+        if status == "claimed":
             return True
+        if status == "sent":
+            result.skipped_duplicate_count += 1
+            result.skipped_duplicate_origins.append(origin)
+        else:
+            result.transient_failure_count += 1
+            result.transient_failure_origins.append(origin)
+        return False
 
     async def _confirm_dispatch(self, fingerprint: str) -> None:
         confirm = getattr(self._storage, "confirm_dispatch", None)
@@ -1167,15 +1177,7 @@ class FeedDispatcher:
                     continue
 
             fingerprint = await self._build_dispatch_fingerprint(target_item, unified_msg_origin)
-            if not await self._claim_dispatch(fingerprint):
-                result.skipped_duplicate_count += 1
-                result.skipped_duplicate_origins.append(unified_msg_origin)
-                logger.warning(
-                    "skip duplicate dispatch origin=%s item=%s fingerprint=%s",
-                    unified_msg_origin,
-                    str(item.get("guid", "") or item.get("title", "")).strip(),
-                    fingerprint[:12],
-                )
+            if not await self._claim_for_origin(fingerprint, unified_msg_origin, result):
                 continue
             try:
                 send_result = await self.context.send_message(unified_msg_origin, payload)
@@ -1331,15 +1333,7 @@ class FeedDispatcher:
                 result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
             fingerprint = await self._build_aggregate_digest_fingerprint(digest, unified_msg_origin)
-            if not await self._claim_dispatch(fingerprint):
-                result.skipped_duplicate_count += 1
-                result.skipped_duplicate_origins.append(unified_msg_origin)
-                logger.warning(
-                    "skip duplicate aggregate digest origin=%s digest=%s fingerprint=%s",
-                    unified_msg_origin,
-                    str(digest.get("id", "")).strip(),
-                    fingerprint[:12],
-                )
+            if not await self._claim_for_origin(fingerprint, unified_msg_origin, result):
                 continue
             try:
                 send_result = await self.context.send_message(unified_msg_origin, payload)
@@ -1405,15 +1399,7 @@ class FeedDispatcher:
                 result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
             fingerprint = await self._build_daily_digest_fingerprint(digest, unified_msg_origin)
-            if not await self._claim_dispatch(fingerprint):
-                result.skipped_duplicate_count += 1
-                result.skipped_duplicate_origins.append(unified_msg_origin)
-                logger.warning(
-                    "skip duplicate daily digest origin=%s digest=%s fingerprint=%s",
-                    unified_msg_origin,
-                    str(digest.get("id", "")).strip(),
-                    fingerprint[:12],
-                )
+            if not await self._claim_for_origin(fingerprint, unified_msg_origin, result):
                 continue
             try:
                 send_result = await self.context.send_message(unified_msg_origin, payload)

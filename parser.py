@@ -21,7 +21,9 @@ class FeedParser:
 
     _IMG_SRC_RE = re.compile(r"<img\b[^>]*\bsrc=['\"]([^'\"]+)['\"]", re.IGNORECASE)
 
-    def parse(self, raw_items: list[dict], job=None) -> list[dict[str, Any]]:
+    def parse(
+        self, raw_items: list[dict], job=None, *, failed_feed_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         for raw in raw_items:
             feed_id = str(raw.get("feed_id", "")).strip()
@@ -33,7 +35,9 @@ class FeedParser:
                     entries.append(item)
                 continue
             body = str(raw.get("body", "") or "")
-            if not body:
+            if not body.strip():
+                if failed_feed_ids is not None and str(raw.get("status", 200)) not in {"204", "205", "304"}:
+                    failed_feed_ids.add(feed_id)
                 continue
             try:
                 parsed = self._parse_xml(feed_id, body)
@@ -44,6 +48,8 @@ class FeedParser:
                         item.setdefault("job_id", getattr(job, "id", ""))
                     entries.append(item)
             except Exception as exc:
+                if failed_feed_ids is not None:
+                    failed_feed_ids.add(feed_id)
                 logger.warning("parse feed=%s failed: %s", feed_id, exc)
         return entries
 
@@ -105,12 +111,12 @@ class FeedParser:
             return self._parse_rss(feed_id, root)
         if tag == "feed":
             return self._parse_atom(feed_id, root)
-        return []
+        raise ValueError(f"unsupported feed XML root: {tag}")
 
     def _parse_rss(self, feed_id: str, root) -> list[dict[str, Any]]:
         channel = root.find("channel")
         if channel is None:
-            return []
+            raise ValueError("RSS feed is missing its channel")
         feed_title = self._text(channel.find("title"))
         result: list[dict[str, Any]] = []
         for item in channel.findall("item"):

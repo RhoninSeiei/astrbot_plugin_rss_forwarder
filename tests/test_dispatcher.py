@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock
 from tempfile import TemporaryDirectory
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -181,6 +182,21 @@ class _RefreshableStarRenderer:
 
 
 class DispatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_claim_is_retryable_and_sent_claim_is_final(self):
+        storage = _FakeStorage()
+        storage.claim_dispatch_status = AsyncMock(side_effect=["pending", "claimed", "sent"])
+        context = _FakeContext()
+        dispatcher = FeedDispatcher(context=context, config=self._build_config(), storage=storage)
+        dispatcher._build_text_message_chain = lambda *a, **kw: "message"
+        item = {"title": "Test", "feed_id": "feed-1"}
+        pending = await dispatcher.dispatch(item)
+        self.assertEqual(pending.transient_failure_origins, ["default:GroupMessage:1"])
+        self.assertFalse(pending.skipped_duplicate_origins)
+        self.assertEqual(context.send_calls, 0)
+        self.assertEqual((await dispatcher.dispatch(item)).success_count, 1)
+        self.assertEqual((await dispatcher.dispatch(item)).skipped_duplicate_count, 1)
+        self.assertEqual(context.send_calls, 1)
+
     def _build_config(self):
         return RSSConfig.from_context(
             {
