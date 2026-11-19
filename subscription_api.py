@@ -7,10 +7,11 @@ from .subscription_management import safe_validation_error
 
 
 class SubscriptionApi:
-    def __init__(self, service, *, proxy_url="", ready=None):
+    def __init__(self, service, *, proxy_url="", ready=None, job_status=None):
         self.service = service
         self.proxy_url = proxy_url
         self.ready = ready or (lambda: True)
+        self.job_status = job_status
 
     def register(self, context):
         for route, handler, method in [
@@ -27,7 +28,12 @@ class SubscriptionApi:
     async def state(self):
         if not request.username:
             return error_response("需要登录 AstrBot 管理面板", status_code=403)
-        return json_response(self.service.snapshot())
+        state = self.service.snapshot()
+        if self.job_status is not None:
+            statuses = self.job_status()
+            for row in state["jobs"]:
+                row.update(statuses.get(str(row.get("id", "")), {}))
+        return json_response(state)
 
     async def _body(self, allowed):
         if not request.username:

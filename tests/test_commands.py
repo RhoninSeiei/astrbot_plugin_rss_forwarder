@@ -114,6 +114,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             last_results={},
             digest_results={},
             storage=Mock(
+                get_feed_state=AsyncMock(return_value={}),
                 get_daily_digest_status=AsyncMock(
                     return_value={"last_error": "跨会话日报错误"}
                 ),
@@ -126,6 +127,18 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             test_translation=AsyncMock(return_value={"input_chars": 11}),
         )
         return commands
+
+    async def test_status_distinguishes_failed_check_and_earlier_delivery(self):
+        commands = self._management_commands()
+        commands.scheduler.last_results = {"job": types.SimpleNamespace(
+            started_at=datetime(2026, 11, 2, 12), last_delivery_at=datetime(2026, 11, 1, 10),
+            failed_feed_ids=["bad"], pending_target_count=2, error_summary="",
+        )}
+        text = [msg async for msg in commands.rss_status(_AdminEvent("/rss status"))][0]
+        self.assertIn("最近轮询：2026-11-02 12:00", text)
+        self.assertIn("最近确认投递：2026-11-01 10:00", text)
+        self.assertIn("读取失败来源=bad", text)
+        self.assertIn("目标组合=2", text)
 
     async def test_rss_management_routes_deny_non_admin_without_side_effects(self):
         for message in (
@@ -194,7 +207,8 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                     async for result in commands.rss_router(_AdminEvent(message))
                 ]
 
-                self.assertEqual(commands.scheduler.mock_calls, [expected_call])
+                calls = [call.storage.get_feed_state("feed-1")] if message == "/rss status" else []
+                self.assertEqual(commands.scheduler.mock_calls, calls + [expected_call])
                 self.assertEqual(len(results), 1)
                 self.assertIn(expected_text, results[0])
 

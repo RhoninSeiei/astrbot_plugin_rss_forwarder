@@ -82,7 +82,7 @@ function renderTargets() {
 
 function scheduleText(item, kind) {
   if (kind === "daily_digests") return item.send_time ? `每日 ${item.send_time}` : "未设置";
-  if (item.cron) return `Cron · ${item.cron}`;
+  if (item.cron) return [`Cron · ${item.cron}`, item.next_cron && `下次 ${item.next_cron}`, item.schedule_error].filter(Boolean).join(" · ");
   const seconds = Number(item.interval_seconds);
   if (seconds > 0) return seconds % 60 === 0 ? `每 ${seconds / 60} 分钟` : `每 ${seconds} 秒`;
   return "未设置";
@@ -137,7 +137,11 @@ function renderList() {
       void mutate("subscriptions/toggle", { kind, id: item.id, enabled }, "启用状态已保存。");
     });
     enabledCell.append(input);
-    row.append(idCell, cell(sourceText(item), sourceLabel), cell(schedule, "排期"), enabledCell);
+    const health = kind === "jobs" ? [
+      item.failed_feed_ids?.length && `读取失败：${item.failed_feed_ids.join("、")}`,
+      item.pending_target_count > 0 && `待投递：${item.pending_target_count}`,
+    ].filter(Boolean) : [];
+    row.append(idCell, cell(sourceText(item), sourceLabel), cell([schedule, ...health].join("；"), "排期"), enabledCell);
     rows.append(row);
   }
   listEmpty.hidden = items.length > 0;

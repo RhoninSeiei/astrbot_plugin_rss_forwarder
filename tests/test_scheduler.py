@@ -1912,6 +1912,7 @@ class SchedulerOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.pending_target_count, 3)
         self.assertEqual(third.pending_item_count, 0)
         self.assertEqual(third.failed_feed_ids, [])
+        self.assertEqual((await restored.storage.get_feed_state("feed"))["since_id"], "12")
 
     async def test_permanent_failure_is_terminal_but_temporary_disable_retries(self):
         self.fetch("11")

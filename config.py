@@ -3,6 +3,11 @@ from urllib.parse import urlparse
 
 from astrbot.api import logger
 
+if __package__:
+    from .cron_schedule import parse_cron
+else:
+    from cron_schedule import parse_cron
+
 
 class ConfigValidationError(ValueError):
     """配置校验失败。"""
@@ -642,6 +647,11 @@ class RSSConfig:
                 raise ConfigValidationError(f"jobs[{job.id}].feed_ids 不能为空")
             if not job.target_ids:
                 raise ConfigValidationError(f"jobs[{job.id}].target_ids 不能为空")
+            if job.cron:
+                try:
+                    parse_cron(job.cron)
+                except ValueError as exc:
+                    raise ConfigValidationError(f"jobs[{job.id}].cron 无效：{exc}") from exc
             if not job.cron and job.interval_seconds <= 0:
                 raise ConfigValidationError(
                     f"jobs[{job.id}] 必须提供 cron 或 interval_seconds"

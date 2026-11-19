@@ -65,6 +65,7 @@ class FeedDispatcher:
         self._disabled_origins: dict[str, float] = {}
         self._daily_digest_image_renderer = DailyDigestImageRenderer()
         self._aggregate_image_renderer = AggregateCardImageRenderer()
+        self._render_slots = asyncio.Semaphore(2)
         self._feed_send_images = {
             str(getattr(feed, "id", "") or "").strip(): bool(getattr(feed, "send_images", True))
             for feed in getattr(config, "feeds", [])
@@ -270,7 +271,8 @@ class FeedDispatcher:
             )
         )
 
-    async def _build_dispatch_fingerprint(self, item: dict[str, Any], origin: str) -> str:
+    async def _build_dispatch_fingerprint(self, item: dict[str, Any], origin: str, hashes=None) -> str:
+        hashes = {} if hashes is None else hashes
         source_title = item.get("_source_title", "")
         source_summary = item.get("_source_summary", "")
         title = self._normalize_text(source_title or item.get("title", ""))
@@ -292,7 +294,10 @@ class FeedDispatcher:
         if image_paths:
             local_hashes = []
             for image_path in image_paths:
-                image_digest = await self._hash_local_file(image_path)
+                key = ("file", image_path)
+                if key not in hashes:
+                    hashes[key] = await self._hash_local_file(image_path)
+                image_digest = hashes[key]
                 if image_digest:
                     local_hashes.append(image_digest)
             if local_hashes:
@@ -301,7 +306,10 @@ class FeedDispatcher:
         image_urls = [] if has_local_image_hash else self._item_image_urls(item)
         image_url = image_urls[0] if image_urls else ""
         if image_url:
-            image_digest = await self._hash_image_bytes(image_url)
+            key = ("url", image_url)
+            if key not in hashes:
+                hashes[key] = await self._hash_image_bytes(image_url)
+            image_digest = hashes[key]
             if image_digest:
                 payload["image_sha256"] = image_digest
             else:
@@ -791,11 +799,16 @@ class FeedDispatcher:
             f"<div class='summary'>{summary}</div>{footer}</div></body></html>"
         )
 
-    async def _build_image_payload(self, item: dict[str, Any]) -> tuple[Any, bool]:
+    async def _build_image_payload(self, item: dict[str, Any], rendered=None) -> tuple[Any, bool]:
         html = self._build_card_html(item)
 
         try:
-            image_result = await self.html_render(html)
+            if rendered is not None and html in rendered:
+                image_result = rendered[html]
+            else:
+                image_result = await self.html_render(html)
+                if rendered is not None:
+                    rendered[html] = image_result
             # 卡片渲染成功时，主 payload 不包含 RSS 原图。
             return self._as_image_result_if_possible(item, image_result), False
         except Exception as exc:  # pragma: no cover - 依赖运行环境
@@ -830,29 +843,18 @@ class FeedDispatcher:
                 lines.append(label)
         return self._create_message_chain(lines)
 
-    def _build_daily_digest_card_html(self, digest: dict[str, Any]) -> str:
-        title = escape(str(digest.get("title", "")).strip() or "RSS 日报")
-        window_start = escape(str(digest.get("window_start_text", "")).strip())
-        window_end = escape(str(digest.get("window_end_text", "")).strip())
-        item_count = int(digest.get("item_count", 0) or 0)
-        content = escape(str(digest.get("content", "")).strip()).replace("\n", "<br/>")
-        window_text = f"{window_start} - {window_end}" if window_start and window_end else ""
-
-        return (
-            "<html><head><meta charset='utf-8' /><style>"
-            "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef3f9;padding:18px;}"
-            ".card{background:#fff;border-radius:14px;padding:18px;box-shadow:0 2px 16px rgba(30,55,90,.12);max-width:760px;}"
-            ".title{font-size:24px;font-weight:700;line-height:1.4;margin-bottom:8px;color:#111827;}"
-            ".meta{color:#6b7280;font-size:13px;margin-bottom:16px;}"
-            ".content{color:#1f2937;font-size:15px;line-height:1.8;white-space:pre-wrap;}"
-            "</style></head><body>"
-            f"<div class='card'><div class='title'>{title}</div>"
-            f"<div class='meta'>统计区间：{window_text} · 条目数：{item_count}</div>"
-            f"<div class='content'>{content}</div></div></body></html>"
-        )
+    async def _render_file(self, renderer, digest):
+        await self._render_slots.acquire()
+        task = asyncio.create_task(asyncio.to_thread(renderer, digest))
+        def finished(done):
+            self._render_slots.release()
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
 
     async def _build_daily_digest_image_payload(self, digest: dict[str, Any]):
-        image_path = self._render_daily_digest_image_file(digest)
+        image_path = await self._render_file(self._render_daily_digest_image_file, digest)
         chain = self._build_local_image_only_chain(image_path)
         return self._as_chain_result_if_possible(digest, chain)
 
@@ -1140,17 +1142,28 @@ class FeedDispatcher:
             return DispatchResult()
 
         result = DispatchResult()
+        prepared_media = None
+        hashes = {}
+        rendered = {}
         for unified_msg_origin in origins:
             if self._is_origin_temporarily_disabled(unified_msg_origin):
                 result.skipped_disabled_count += 1
                 result.skipped_disabled_origins.append(unified_msg_origin)
                 continue
             target_item = self._item_for_origin(item, unified_msg_origin)
-            target_item = await self._prepare_inline_media_for_send(target_item)
+            if self._is_compact_item(target_item):
+                target_item["send_videos"] = False
+                if not self._should_send_compact_images(target_item):
+                    target_item["send_images"] = False
+            if self._should_send_item_images(target_item):
+                if prepared_media is None:
+                    prepared_media = await self._prepare_inline_media_for_send(target_item)
+                if "image_paths" in prepared_media:
+                    target_item["image_paths"] = prepared_media["image_paths"]
             extra_payloads: list[Any] = []
             if self._config.render_mode == "image":
                 try:
-                    payload, source_image_already_included = await self._build_image_payload(target_item)
+                    payload, source_image_already_included = await self._build_image_payload(target_item, rendered)
                 except Exception as exc:
                     result.transient_failure_count += 1
                     result.transient_failure_origins.append(unified_msg_origin)
@@ -1176,7 +1189,7 @@ class FeedDispatcher:
                     result.transient_failure_origins.append(unified_msg_origin)
                     continue
 
-            fingerprint = await self._build_dispatch_fingerprint(target_item, unified_msg_origin)
+            fingerprint = await self._build_dispatch_fingerprint(target_item, unified_msg_origin, hashes)
             if not await self._claim_for_origin(fingerprint, unified_msg_origin, result):
                 continue
             try:
@@ -1264,7 +1277,7 @@ class FeedDispatcher:
 
     async def _build_aggregate_digest_image_payload(self, digest: dict[str, Any]):
         prepared = await self._prepare_aggregate_digest_images(digest)
-        image_path = self._render_aggregate_digest_image_file(prepared)
+        image_path = await self._render_file(self._render_aggregate_digest_image_file, prepared)
         chain = self._build_local_image_only_chain(image_path)
         return self._as_chain_result_if_possible(prepared, chain)
 

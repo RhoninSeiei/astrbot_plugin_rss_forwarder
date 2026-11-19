@@ -49,6 +49,29 @@ class _DummyContext:
 
 
 class SemanticDedupServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_evidence_requires_same_input_and_rechecks_job_threshold(self):
+        class Storage:
+            title = "Announcement"
+            async def list_semantic_dedup_records(self, *args, **kwargs):
+                return [{"title": self.title, "record_id": "a"}]
+        from unittest.mock import AsyncMock
+        ctx = _DummyContext('{"duplicate":true,"matched_record_id":"a","confidence":0.85}')
+        ctx.llm_generate = AsyncMock(wraps=ctx.llm_generate)
+        storage = Storage()
+        service = SemanticDedupService(ctx, RSSConfig(feeds=[], jobs=[], targets=[]), storage)
+        job = types.SimpleNamespace(id="job", semantic_dedup_enabled=True, semantic_dedup_provider_id="p",
+                                    semantic_dedup_min_confidence=0.8)
+        item = {"title":"News"}
+        self.assertTrue((await service.check(job, item)).duplicate)
+        job.semantic_dedup_min_confidence = 0.9
+        self.assertFalse((await service.check(job, item)).duplicate)
+        self.assertEqual(ctx.llm_generate.await_count, 1)
+        storage.title = "Revised announcement"
+        await service.check(job, item)
+        job.semantic_dedup_provider_id = "other"
+        await service.check(job, item)
+        self.assertEqual(ctx.llm_generate.await_count, 3)
+
     async def test_duplicate_id_must_be_in_prompt_not_just_in_storage(self):
         class Storage:
             async def list_semantic_dedup_records(self, job_id, limit, ttl_seconds):

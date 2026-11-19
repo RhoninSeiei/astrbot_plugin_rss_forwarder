@@ -25,7 +25,7 @@ from .subscription_discovery import discover_feed
     "astrbot_plugin_rss_forwarder",
     "AstrBot RSS Forwarder",
     "面向 AstrBot 的 RSS/RSSHub/Twitter 推送编排插件",
-    "0.8.3",
+    "0.9.0",
 )
 class RSSPlugin(Star, RSSCommands):
     def __init__(self, context: Context, config=None):
@@ -88,6 +88,7 @@ class RSSPlugin(Star, RSSCommands):
                 self.subscriptions,
                 proxy_url=self._committed_raw.get("subscription_proxy_url", ""),
                 ready=lambda: self._management_ready,
+                job_status=lambda: self.scheduler.job_status(),
             )
             self._subscription_api.register(self.context)
         else:

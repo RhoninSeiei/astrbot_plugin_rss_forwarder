@@ -177,6 +177,19 @@ class SubscriptionApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self._assert_no_service_calls()
 
+    async def test_runtime_status_only_enriches_authenticated_configured_jobs(self):
+        self.api.job_status = Mock(return_value={
+            "job-1": {"next_cron": "08:00 CST", "pending_target_count": 2},
+            "removed-job": {"pending_target_count": 4},
+        })
+        self.assertEqual((await self._invoke("state", username=""))["status_code"], 403)
+        self.api.job_status.assert_not_called()
+        data = (await self._invoke("state"))["data"]
+        self.assertEqual(data["revision"], "revision-1")
+        self.assertEqual(data["jobs"], [{"id": "job-1", "feed_ids": ["feed-1"],
+                                         "next_cron": "08:00 CST", "pending_target_count": 2}])
+        self._assert_no_mutation_calls()
+
     async def test_post_endpoints_reject_non_object_json_before_side_effects(self):
         for endpoint in ("discover", "create", "toggle"):
             for body in (None, [], ["url"], "url", 1, False):

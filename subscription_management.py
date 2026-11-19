@@ -9,6 +9,7 @@ from copy import deepcopy
 from urllib.parse import urlsplit, urlunsplit
 
 from .config import ConfigValidationError, RSSConfig
+from .cron_schedule import parse_cron
 
 
 _SAFE_FIELDS = {
@@ -20,7 +21,6 @@ _SAFE_FIELDS = {
                       "window_hours", "max_items", "render_mode"),
 }
 _URL_PATTERN = re.compile(r"[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
-_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
 
 
 def _hash(value) -> str:
@@ -77,38 +77,12 @@ def _safe_value(value):
     return ""
 
 
-def _parse_cron(value: str) -> tuple[tuple[int, ...], ...]:
-    """Validate the scheduler's numeric five-field cron dialect without importing it."""
-    fields = value.split()
-    if len(fields) != 5:
-        raise ConfigValidationError("cron must contain five valid numeric fields")
-    parsed = []
-    for field, (minimum, maximum) in zip(fields, _CRON_RANGES):
-        values = set()
-        for part in field.split(","):
-            match = re.fullmatch(r"(\*|[0-9]+(?:-[0-9]+)?)(?:/([0-9]+))?", part)
-            if match is None:
-                raise ConfigValidationError("invalid cron field")
-            base, step_text = match.groups()
-            step = int(step_text) if step_text is not None else 1
-            if base == "*":
-                start, end = minimum, maximum
-            elif "-" in base:
-                start, end = map(int, base.split("-"))
-            else:
-                start = end = int(base)
-            if not minimum <= start <= end <= maximum or step <= 0:
-                raise ConfigValidationError("cron field is out of range")
-            values.update(range(start, end + 1, step))
-        if maximum == 7:
-            values = {0 if item == 7 else item for item in values}
-        parsed.append(tuple(sorted(values)))
-    return tuple(parsed)
-
-
 def _schedule_key(interval_seconds: int, cron: str):
     if cron:
-        return ("cron", _parse_cron(cron))
+        try:
+            return ("cron", parse_cron(cron))
+        except ValueError as exc:
+            raise ConfigValidationError(str(exc)) from exc
     return ("interval", interval_seconds)
 
 

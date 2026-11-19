@@ -73,7 +73,7 @@ class AggregateCardImageRenderer:
         self._draw_sections(draw, Image, ImageOps, img, section_layouts, section_title_font, body_font)
         self._draw_footer(draw, Image, img, small_font)
 
-        path = output_root / f"{self._safe_id(digest)}_{int(time.time())}.png"
+        path = output_root / f"{self._safe_id(digest)}_{time.time_ns()}.png"
         img.save(path, format="PNG")
         self._trim_output_dir(output_root)
         return str(path)

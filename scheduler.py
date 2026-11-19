@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import inspect
+import math
 import time
 from contextlib import suppress
 from copy import copy, deepcopy
@@ -17,6 +18,7 @@ from .delivery_outbox import DeliveryCandidate, DeliveryEntry, DeliveryOutbox
 from .dispatcher import FeedDispatcher
 from .fetcher import FeedFetcher
 from .parser import FeedParser
+from .cron_schedule import next_fire, parse_cron
 from .pipeline import FeedPipeline
 from .semantic_dedup import SemanticDedupResult, SemanticDedupService
 from .storage import FeedStorage
@@ -423,8 +425,11 @@ class RSSScheduler:
         if getattr(job, "interval_seconds", 0) > 0:
             return int(job.interval_seconds)
         if str(getattr(job, "cron", "") or "").strip():
-            if self._parse_cron_expression(str(getattr(job, "cron", "") or "")) is not None:
+            try:
+                parse_cron(job.cron)
                 return self._poll_interval_seconds()
+            except ValueError:
+                pass
             logger.warning(
                 "job=%s configured with invalid cron=%s, fallback interval=%s",
                 job.id,
@@ -450,87 +455,14 @@ class RSSScheduler:
 
 
     def _cron_next_delay_seconds(self, job: JobConfig, *, now: datetime | None = None) -> int:
-        cron = str(getattr(job, "cron", "") or "").strip()
-        parsed = self._parse_cron_expression(cron)
-        if parsed is None:
-            return self._resolve_interval(job)
-
         base = now or self._local_now()
         if base.tzinfo is None:
             base = base.replace(tzinfo=self._local_timezone())
-        candidate = (base + timedelta(minutes=1)).replace(second=0, microsecond=0)
-        for _ in range(366 * 24 * 60):
-            if self._cron_datetime_matches(candidate, parsed):
-                return max(int((candidate - base).total_seconds()), 1)
-            candidate += timedelta(minutes=1)
-        return self._poll_interval_seconds()
-
-    @classmethod
-    def _parse_cron_expression(cls, cron: str) -> tuple[set[int], set[int], set[int], set[int], set[int]] | None:
-        parts = str(cron or "").split()
-        if len(parts) != 5:
-            return None
-        ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
-        parsed = []
-        for field, (minimum, maximum) in zip(parts, ranges, strict=True):
-            values = cls._parse_cron_field(field, minimum=minimum, maximum=maximum)
-            if not values:
-                return None
-            if maximum == 7:
-                values = {0 if value == 7 else value for value in values}
-            parsed.append(values)
-        return tuple(parsed)  # type: ignore[return-value]
-
-    @staticmethod
-    def _parse_cron_field(field: str, *, minimum: int, maximum: int) -> set[int]:
-        values: set[int] = set()
-        for part in str(field or "").split(","):
-            part = part.strip()
-            if not part:
-                return set()
-            step = 1
-            if "/" in part:
-                base, step_text = part.split("/", 1)
-                try:
-                    step = int(step_text)
-                except ValueError:
-                    return set()
-                if step <= 0:
-                    return set()
-            else:
-                base = part
-            if base == "*":
-                start, end = minimum, maximum
-            elif "-" in base:
-                start_text, end_text = base.split("-", 1)
-                try:
-                    start, end = int(start_text), int(end_text)
-                except ValueError:
-                    return set()
-            else:
-                try:
-                    start = end = int(base)
-                except ValueError:
-                    return set()
-            if start < minimum or end > maximum or start > end:
-                return set()
-            values.update(range(start, end + 1, step))
-        return values
-
-    @staticmethod
-    def _cron_datetime_matches(
-        value: datetime,
-        parsed: tuple[set[int], set[int], set[int], set[int], set[int]],
-    ) -> bool:
-        minutes, hours, days, months, weekdays = parsed
-        cron_weekday = (value.weekday() + 1) % 7
-        return (
-            value.minute in minutes
-            and value.hour in hours
-            and value.day in days
-            and value.month in months
-            and cron_weekday in weekdays
-        )
+        try:
+            scheduled = next_fire(job.cron, base)
+        except ValueError:
+            return self._resolve_interval(job)
+        return max(math.ceil(scheduled.timestamp() - base.timestamp()), 1)
 
     def _local_timezone(self):
         timezone_name = str(getattr(self._config, "timezone", "Asia/Shanghai") or "Asia/Shanghai")
@@ -538,6 +470,23 @@ class RSSScheduler:
             return ZoneInfo(timezone_name)
         except Exception:
             return timezone.utc
+
+    def job_status(self) -> dict[str, dict]:
+        now = self._local_now()
+        statuses = {}
+        for job in self._jobs():
+            status = {}
+            if job.enabled and job.cron and job.id not in self._paused_jobs:
+                try:
+                    status["next_cron"] = next_fire(job.cron, now).strftime("%Y-%m-%d %H:%M %Z")
+                except ValueError:
+                    status["schedule_error"] = "无效 cron"
+            result = self._job_results.get(job.id)
+            if result:
+                status["pending_target_count"] = result.pending_target_count
+                status["failed_feed_ids"] = list(result.failed_feed_ids)
+            statuses[job.id] = status
+        return statuses
 
     def _local_now(self) -> datetime:
         return datetime.now(self._local_timezone())
@@ -1167,7 +1116,7 @@ class RSSScheduler:
                 pending_subscriptions = await self._uninitialized_subscriptions(job)
                 raw_items = await self._call_fetch(job, feed_states=feed_state_map)
                 fetched_count = len(raw_items)
-                feed_meta = self._extract_feed_meta(raw_items)
+                feed_meta = self._extract_feed_meta(raw_items, feed_state_map)
                 parse_failed: set[str] = set()
                 parseable = [raw for raw in raw_items if 200 <= self._feed_response_status(raw) < 300]
                 items = self._call_parse(parseable, job, failed_feed_ids=parse_failed) if parseable else []
@@ -1530,7 +1479,9 @@ class RSSScheduler:
             return 0
 
     @staticmethod
-    def _extract_feed_meta(raw_items: list[dict]) -> dict[str, dict[str, str]]:
+    def _extract_feed_meta(
+        raw_items: list[dict], prior_states: dict[str, dict] | None = None,
+    ) -> dict[str, dict[str, str]]:
         """提取成功抓取的来源及其可选元信息，兼容未提供状态码的旧结果。"""
         meta_by_feed: dict[str, dict[str, str]] = {}
         for raw_item in raw_items:
@@ -1540,13 +1491,10 @@ class RSSScheduler:
             feed_id = str(raw_item.get("feed_id", "")).strip()
             if not feed_id:
                 continue
-            etag = str(raw_item.get("etag", "")).strip()
-            last_modified = str(raw_item.get("last_modified", "")).strip()
-            since_id = str(raw_item.get("since_id", "")).strip()
+            previous = (prior_states or {}).get(feed_id, {}) if status == 304 else {}
             meta_by_feed[feed_id] = {
-                "etag": etag,
-                "last_modified": last_modified,
-                "since_id": since_id,
+                key: str(raw_item.get(key) or previous.get(key) or "").strip()
+                for key in ("etag", "last_modified", "since_id")
             }
         return meta_by_feed
 

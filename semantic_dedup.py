@@ -1,6 +1,9 @@
 import asyncio
+import hashlib
 import json
 import re
+from collections import OrderedDict
+from time import monotonic
 from dataclasses import dataclass
 from html import unescape
 from typing import Any
@@ -10,7 +13,7 @@ from astrbot.api import logger
 from .config import RSSConfig
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class SemanticDedupResult:
     duplicate: bool = False
     matched_record_id: str = ""
@@ -28,6 +31,7 @@ class SemanticDedupService:
         self.context = context
         self._config = config
         self._storage = storage
+        self._decisions = OrderedDict()
 
     async def check(
         self,
@@ -65,8 +69,15 @@ class SemanticDedupService:
             llm_kwargs["profile"] = profile
         llm_kwargs.update(self._build_llm_proxy_kwargs())
 
-        llm_call = self.context.llm_generate(**llm_kwargs)
+        # Cache evidence, never target delivery state. Include the complete model
+        # input and settings so a changed prompt, candidate or provider misses.
+        cache_key = hashlib.sha256(json.dumps(llm_kwargs, sort_keys=True, ensure_ascii=False).encode()).digest()
+        cached = self._decisions.get(cache_key)
+        if cached and monotonic() - cached[0] < min(ttl_seconds, 300):
+            self._decisions.move_to_end(cache_key)
+            return self._validate_decision(job, cached[1], candidates)
         try:
+            llm_call = self.context.llm_generate(**llm_kwargs)
             result = await asyncio.wait_for(llm_call, timeout=self._timeout_seconds())
         except asyncio.TimeoutError:
             return SemanticDedupResult(reason="timeout")
@@ -78,6 +89,15 @@ class SemanticDedupService:
         if parsed is None:
             return SemanticDedupResult(reason="invalid_payload")
 
+        result = self._validate_decision(job, parsed, candidates)
+        if result.reason not in {"unknown_match_id", "missing_match_id"}:
+            self._decisions[cache_key] = (monotonic(), parsed)
+            self._decisions.move_to_end(cache_key)
+            if len(self._decisions) > 256:
+                self._decisions.popitem(last=False)
+        return result
+
+    def _validate_decision(self, job, parsed, candidates):
         min_confidence = self._min_confidence(job)
         if parsed.duplicate and not parsed.matched_record_id:
             return SemanticDedupResult(

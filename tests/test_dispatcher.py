@@ -394,6 +394,50 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context.sent), 1)
         self.assertEqual(len(storage.confirms), 1)
 
+    async def test_media_work_shared_without_sharing_confirmation(self):
+        config = self._build_config()
+        config.targets.extend([
+            config_module.TargetConfig("text", "qq", "qq:group:0", compact_mode="compact"),
+            config_module.TargetConfig("second", "qq", "qq:group:2"),
+        ])
+        config.jobs[0].target_ids += ["text", "second"]
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=_FakeContext(), config=config, storage=storage)
+        dispatcher._build_text_message_chain = lambda item, **kwargs: "text"
+        dispatcher._cache_remote_image_for_send = AsyncMock(return_value="/tmp/local.jpg")
+        dispatcher._hash_local_file = AsyncMock(return_value="hash")
+        dispatcher._hash_image_bytes = AsyncMock(return_value="remote-hash")
+        item = {"job_id": "job-1", "title": "News", "image_url": "https://example.com/a.jpg"}
+        compact = await dispatcher.dispatch(dict(item, _target_origins=["qq:group:0"]))
+        self.assertEqual(compact.success_count, 1)
+        dispatcher._cache_remote_image_for_send.assert_not_awaited()
+        dispatcher._hash_image_bytes.assert_not_awaited()
+        both = await dispatcher.dispatch(dict(item, _target_origins=[config.targets[0].unified_msg_origin, "qq:group:2"]))
+        self.assertEqual(both.success_count, 2)
+        self.assertEqual(len(set(storage.confirms)), 3)
+        dispatcher._cache_remote_image_for_send.assert_awaited_once()
+        dispatcher._hash_local_file.assert_awaited_once()
+
+    async def test_image_targets_share_render_but_keep_independent_delivery(self):
+        config = self._build_config()
+        config.render_mode = "image"
+        config.targets.append(config_module.TargetConfig("second", "qq", "qq:group:2"))
+        config.jobs[0].target_ids.append("second")
+        storage = _FakeStorage()
+        dispatcher = FeedDispatcher(context=_FakeContext(), config=config, storage=storage)
+        dispatcher.html_render = AsyncMock(return_value="https://example.invalid/card.png")
+        dispatcher._as_image_result_if_possible = lambda item, image: [image]
+        result = await dispatcher.dispatch({"job_id": "job-1", "title": "News"})
+        self.assertEqual(len(set(result.success_origins)), 2)
+        self.assertEqual(len(set(storage.confirms)), 2)
+        dispatcher.html_render.assert_awaited_once()
+
+    async def test_pil_render_runs_outside_event_loop(self):
+        import threading
+        dispatcher = FeedDispatcher(context=_FakeContext(), config=self._build_config(), storage=_FakeStorage())
+        worker = await dispatcher._render_file(lambda digest: threading.get_ident(), {})
+        self.assertNotEqual(worker, threading.get_ident())
+
     async def test_daily_digest_send_false_releases_dispatch_claim_for_retry(self):
         context = _FakeContext(send_results=[False, True])
         storage = _FakeStorage()

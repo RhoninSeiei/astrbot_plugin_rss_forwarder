@@ -145,13 +145,13 @@ class RSSCommands:
 
         for job in config.jobs:
             result = last_results.get(job.id)
-            recent_success = self._format_success_time(result)
+            recent_check = self._format_execution_time(result)
             recent_error = self._format_last_error(result)
             job_status = "已暂停" if job.id in paused_jobs else ("启用" if job.enabled else "禁用")
             semantic_status = "开" if getattr(job, "semantic_dedup_enabled", False) else "关"
             lines.append(
                 f"- {job.id} [{job_status}] feeds={len(job.feed_ids)} targets={len(job.target_ids)} "
-                f"语义判重={semantic_status} 最近成功={recent_success} 最近错误={recent_error}"
+                f"语义判重={semantic_status} 最近检查={recent_check} 最近错误={recent_error}"
             )
 
         if config.daily_digests:
@@ -179,7 +179,7 @@ class RSSCommands:
         if job_id:
             result = self.scheduler.last_results.get(job_id)
             yield event.plain_result(
-                f"已触发任务 {job_id}。最近成功={self._format_success_time(result)} "
+                f"已触发任务 {job_id}。最近检查={self._format_execution_time(result)} "
                 f"最近错误={self._format_last_error(result)}"
             )
             return
@@ -269,7 +269,7 @@ class RSSCommands:
 
         result = self.scheduler.digest_results.get(digest_id)
         yield event.plain_result(
-            f"已触发日报 {digest_id}。最近执行={self._format_success_time(result)} 最近错误={self._format_last_error(result)}"
+            f"已触发日报 {digest_id}。最近执行={self._format_execution_time(result)} 最近错误={self._format_last_error(result)}"
         )
 
     async def rss_status(self, event: AstrMessageEvent):
@@ -277,24 +277,29 @@ class RSSCommands:
         config = scheduler.config
         last_results = scheduler.last_results
 
-        success_times = [
-            result.started_at for result in last_results.values() if not result.error_summary
-        ]
-        recent_success = (
-            max(success_times).strftime("%Y-%m-%d %H:%M:%S") if success_times else "暂无"
-        )
-
-        errors = [result.error_summary for result in last_results.values() if result.error_summary]
-        recent_error = errors[-1] if errors else "无"
-
+        results = sorted(last_results.items(), key=lambda pair: pair[1].started_at, reverse=True)
+        checks = [result.started_at for _, result in results]
+        deliveries = [r.last_delivery_at for _, r in results if getattr(r, "last_delivery_at", None)]
+        read_times = []
+        for feed in config.feeds:
+            state = await scheduler.storage.get_feed_state(feed.id)
+            if state.get("last_success_time"):
+                read_times.append(int(state["last_success_time"]))
+        errors = [r.error_summary for _, r in results if r.error_summary]
         lines = [
             "RSS 状态：",
             f"- 调度器：{'运行中' if scheduler.running else '未运行'}",
             f"- feeds={len(config.feeds)} jobs={len(config.jobs)} targets={len(config.targets)}",
             f"- 日报任务={len(config.daily_digests)}",
-            f"- 最近成功：{recent_success}",
-            f"- 最近错误：{recent_error}",
+            f"- 最近轮询：{max(checks):%Y-%m-%d %H:%M:%S}" if checks else "- 最近轮询：暂无",
+            f"- 最近成功读取：{self._format_unix_time(max(read_times, default=0))}",
+            f"- 最近确认投递：{max(deliveries):%Y-%m-%d %H:%M:%S}" if deliveries else "- 最近确认投递：暂无",
+            f"- 最近运行错误：{errors[0] if errors else '无'}",
         ]
+        for job_id, result in results:
+            failed = ", ".join(getattr(result, "failed_feed_ids", ())) or "无"
+            pending = getattr(result, "pending_target_count", 0)
+            lines.append(f"- {job_id}：本轮读取失败来源={failed}；待补发条目与目标组合={pending}")
         if config.daily_digests:
             latest_digest_sent = "暂无"
             latest_digest_error = "无"
@@ -327,7 +332,7 @@ class RSSCommands:
 
         result = self.scheduler.last_results.get(job_id)
         yield event.plain_result(
-            f"任务已暂停：{job_id}。最近成功={self._format_success_time(result)} 最近错误={self._format_last_error(result)}"
+            f"任务已暂停：{job_id}。最近检查={self._format_execution_time(result)} 最近错误={self._format_last_error(result)}"
         )
 
     async def rss_resume(self, event: AstrMessageEvent):
@@ -343,7 +348,7 @@ class RSSCommands:
 
         result = self.scheduler.last_results.get(job_id)
         yield event.plain_result(
-            f"任务已恢复：{job_id}。最近成功={self._format_success_time(result)} 最近错误={self._format_last_error(result)}"
+            f"任务已恢复：{job_id}。最近检查={self._format_execution_time(result)} 最近错误={self._format_last_error(result)}"
         )
 
     @staticmethod
@@ -483,8 +488,8 @@ class RSSCommands:
         return "n/a"
 
     @staticmethod
-    def _format_success_time(result) -> str:
-        if result is None or result.error_summary:
+    def _format_execution_time(result) -> str:
+        if result is None:
             return "暂无"
         return result.started_at.strftime("%Y-%m-%d %H:%M:%S")
 
